@@ -2,13 +2,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   copyGitHooksToWorktreeGitDir,
   copySeededSecretsKey,
   rebindWorkspaceCwd,
   resolveGitWorktreeAddArgs,
   resolveWorktreeMakeTargetPath,
+  worktreeInitCommand,
   worktreeMakeCommand,
 } from "../commands/worktree.js";
 import {
@@ -21,6 +22,20 @@ import {
   sanitizeWorktreeInstanceId,
 } from "../commands/worktree-lib.js";
 import type { PaperclipConfig } from "../config/schema.js";
+
+const ORIGINAL_CWD = process.cwd();
+const ORIGINAL_ENV = { ...process.env };
+
+afterEach(() => {
+  process.chdir(ORIGINAL_CWD);
+  for (const key of Object.keys(process.env)) {
+    if (!(key in ORIGINAL_ENV)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 function buildSourceConfig(): PaperclipConfig {
   return {
@@ -115,6 +130,28 @@ describe("worktree helpers", () => {
     ).toEqual(["worktree", "add", "/tmp/feature-branch", "feature-branch"]);
   });
 
+  it("builds git worktree add args with a start point", () => {
+    expect(
+      resolveGitWorktreeAddArgs({
+        branchName: "my-worktree",
+        targetPath: "/tmp/my-worktree",
+        branchExists: false,
+        startPoint: "public-gh/master",
+      }),
+    ).toEqual(["worktree", "add", "-b", "my-worktree", "/tmp/my-worktree", "public-gh/master"]);
+  });
+
+  it("uses start point even when a local branch with the same name exists", () => {
+    expect(
+      resolveGitWorktreeAddArgs({
+        branchName: "my-worktree",
+        targetPath: "/tmp/my-worktree",
+        branchExists: true,
+        startPoint: "origin/main",
+      }),
+    ).toEqual(["worktree", "add", "-b", "my-worktree", "/tmp/my-worktree", "origin/main"]);
+  });
+
   it("rewrites loopback auth URLs to the new port only", () => {
     expect(rewriteLocalUrlPort("http://127.0.0.1:3100", 3110)).toBe("http://127.0.0.1:3110/");
     expect(rewriteLocalUrlPort("https://paperclip.example", 3110)).toBe("https://paperclip.example");
@@ -167,7 +204,11 @@ describe("worktree helpers", () => {
 
   it("copies the source local_encrypted secrets key into the seeded worktree instance", () => {
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-worktree-secrets-"));
+    const originalInlineMasterKey = process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+    const originalKeyFile = process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
     try {
+      delete process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+      delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
       const sourceConfigPath = path.join(tempRoot, "source", "config.json");
       const sourceKeyPath = path.join(tempRoot, "source", "secrets", "master.key");
       const targetKeyPath = path.join(tempRoot, "target", "secrets", "master.key");
@@ -186,6 +227,16 @@ describe("worktree helpers", () => {
 
       expect(fs.readFileSync(targetKeyPath, "utf8")).toBe("source-master-key");
     } finally {
+      if (originalInlineMasterKey === undefined) {
+        delete process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+      } else {
+        process.env.PAPERCLIP_SECRETS_MASTER_KEY = originalInlineMasterKey;
+      }
+      if (originalKeyFile === undefined) {
+        delete process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE;
+      } else {
+        process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = originalKeyFile;
+      }
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
@@ -207,6 +258,36 @@ describe("worktree helpers", () => {
 
       expect(fs.readFileSync(targetKeyPath, "utf8")).toBe("inline-source-master-key");
     } finally {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("persists the current agent jwt secret into the worktree env file", async () => {
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-worktree-jwt-"));
+    const repoRoot = path.join(tempRoot, "repo");
+    const originalCwd = process.cwd();
+    const originalJwtSecret = process.env.PAPERCLIP_AGENT_JWT_SECRET;
+
+    try {
+      fs.mkdirSync(repoRoot, { recursive: true });
+      process.env.PAPERCLIP_AGENT_JWT_SECRET = "worktree-shared-secret";
+      process.chdir(repoRoot);
+
+      await worktreeInitCommand({
+        seed: false,
+        fromConfig: path.join(tempRoot, "missing", "config.json"),
+        home: path.join(tempRoot, ".paperclip-worktrees"),
+      });
+
+      const envPath = path.join(repoRoot, ".paperclip", ".env");
+      expect(fs.readFileSync(envPath, "utf8")).toContain("PAPERCLIP_AGENT_JWT_SECRET=worktree-shared-secret");
+    } finally {
+      process.chdir(originalCwd);
+      if (originalJwtSecret === undefined) {
+        delete process.env.PAPERCLIP_AGENT_JWT_SECRET;
+      } else {
+        process.env.PAPERCLIP_AGENT_JWT_SECRET = originalJwtSecret;
+      }
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
@@ -293,7 +374,7 @@ describe("worktree helpers", () => {
     const fakeHome = path.join(tempRoot, "home");
     const worktreePath = path.join(fakeHome, "paperclip-make-test");
     const originalCwd = process.cwd();
-    const originalHome = process.env.HOME;
+    const homedirSpy = vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
 
     try {
       fs.mkdirSync(repoRoot, { recursive: true });
@@ -305,7 +386,6 @@ describe("worktree helpers", () => {
       execFileSync("git", ["add", "README.md"], { cwd: repoRoot, stdio: "ignore" });
       execFileSync("git", ["commit", "-m", "Initial commit"], { cwd: repoRoot, stdio: "ignore" });
 
-      process.env.HOME = fakeHome;
       process.chdir(repoRoot);
 
       await worktreeMakeCommand("paperclip-make-test", {
@@ -318,12 +398,8 @@ describe("worktree helpers", () => {
       expect(fs.existsSync(path.join(worktreePath, ".paperclip", ".env"))).toBe(true);
     } finally {
       process.chdir(originalCwd);
-      if (originalHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = originalHome;
-      }
+      homedirSpy.mockRestore();
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
-  });
+  }, 20_000);
 });
