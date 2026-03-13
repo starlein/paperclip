@@ -37,6 +37,7 @@ tmp/
 .vscode/
 .claude/settings.local.json
 .paperclip-local/
+.worktrees/
 
 # Playwright
 tests/e2e/test-results/

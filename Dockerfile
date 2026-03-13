@@ -26,6 +26,7 @@ FROM base AS build
 WORKDIR /app
 COPY --from=deps /app /app
 COPY . .
+ENV NODE_OPTIONS=--max-old-space-size=1536
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
@@ -33,18 +34,28 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 FROM base AS production
 WORKDIR /app
 COPY --chown=node:node --from=build /app /app
-RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai \
-  && mkdir -p /paperclip \
-  && chown node:node /paperclip
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends openssh-client \
+  && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/paperclip-opencode /paperclip \
+  && npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest \
+  && npm install --prefix /opt/paperclip-opencode --omit=dev opencode-ai \
+  && chmod +x /app/scripts/docker-entrypoint.sh \
+  && chown -R node:node /paperclip /opt/paperclip-opencode
 
 ENV NODE_ENV=production \
   HOME=/paperclip \
+  XDG_CONFIG_HOME=/paperclip/.config \
+  XDG_DATA_HOME=/paperclip/.local/share \
   HOST=0.0.0.0 \
   PORT=3100 \
   SERVE_UI=true \
+  PATH=/paperclip/bin:${PATH} \
   PAPERCLIP_HOME=/paperclip \
   PAPERCLIP_INSTANCE_ID=default \
   PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
+  PAPERCLIP_OPENCODE_COMMAND=/paperclip/bin/opencode \
+  PAPERCLIP_OPENCODE_INSTALL_DIR=/opt/paperclip-opencode \
   PAPERCLIP_DEPLOYMENT_MODE=authenticated \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private
 
@@ -52,4 +63,5 @@ VOLUME ["/paperclip"]
 EXPOSE 3100
 
 USER node
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
