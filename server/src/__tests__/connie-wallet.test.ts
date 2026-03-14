@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { getAddressFromKey, validateWalletEnv } from "../wallet/connie-wallet.js";
+import { getAddressFromKey, validateWalletEnv, signMessageWithEnvKey } from "../wallet/connie-wallet.js";
 
 // Anvil default test key #0 — public, safe to use in tests
 const TEST_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -35,5 +35,22 @@ describe("connie-wallet", () => {
     const result = validateWalletEnv();
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/mismatch/);
+  });
+
+  it("validateWalletEnv returns error on malformed key instead of throwing", () => {
+    process.env.CONNIE_WALLET_PRIVATE_KEY = "not-a-valid-key";
+    const result = validateWalletEnv();
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Invalid private key format/i);
+  });
+
+  it("signMessageWithEnvKey produces a valid 132-char hex signature", async () => {
+    process.env.CONNIE_WALLET_PRIVATE_KEY = TEST_KEY;
+    const sig = await signMessageWithEnvKey("paperclip-wallet-test");
+    expect(sig).toMatch(/^0x[0-9a-fA-F]{130}$/);
+  });
+
+  it("signMessageWithEnvKey throws when key is missing", async () => {
+    await expect(signMessageWithEnvKey("hello")).rejects.toThrow("not set");
   });
 });

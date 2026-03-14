@@ -19,7 +19,7 @@
 
 export interface SignerService {
   /** Returns the wallet address (public, safe to log). */
-  getAddress(): string;
+  getAddress(): Promise<string>;
 
   /** Signs an arbitrary string message (EIP-191 personal_sign). */
   signMessage(message: string): Promise<string>;
@@ -52,15 +52,15 @@ export function createEnvSignerService(): SignerService {
   // Defer import to keep the module loadable without viem in scope
   // when running in contexts that don't need signing.
   return {
-    getAddress() {
-      const { getAddressFromKey } = require("./connie-wallet.js") as typeof import("./connie-wallet.js");
+    async getAddress() {
+      const { getAddressFromKey } = await import("./connie-wallet.js");
       const key = process.env.CONNIE_WALLET_PRIVATE_KEY;
       if (!key) throw new Error("CONNIE_WALLET_PRIVATE_KEY not set");
       return getAddressFromKey(key);
     },
 
     async signMessage(message: string) {
-      const { signMessageWithEnvKey } = require("./connie-wallet.js") as typeof import("./connie-wallet.js");
+      const { signMessageWithEnvKey } = await import("./connie-wallet.js");
       return signMessageWithEnvKey(message);
     },
 
