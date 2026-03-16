@@ -10,7 +10,7 @@ PAPERCLIP_PORT="${PAPERCLIP_PORT:-3100}"
 VPS_IP="${VPS_IP:-64.176.199.162}"
 
 # This script is bootstrap-only. Managed hosts must deploy via CI.
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^paperclip-server'; then
+if [ -f "/opt/paperclip/current-release" ] || docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^paperclip-server'; then
   echo "ERROR: Paperclip is already running on this host." >&2
   echo "Use the GitHub Actions deploy-vultr workflow for all updates." >&2
   exit 1

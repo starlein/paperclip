@@ -19,6 +19,16 @@ fi
 git fetch origin "$BASE_BRANCH"
 git fetch upstream "$BASE_BRANCH"
 
+if [ "$(git rev-parse "origin/$BASE_BRANCH")" = "$(git rev-parse "upstream/$BASE_BRANCH")" ]; then
+  cat > "$SUMMARY_FILE" <<EOF
+## Upstream Sync $(date +%Y-%m-%d)
+
+No new commits found between \`origin/$BASE_BRANCH\` and \`upstream/$BASE_BRANCH\`.
+EOF
+  touch .upstream-sync-noop
+  exit 0
+fi
+
 git checkout -B "$INTEGRATION_BRANCH" "origin/$BASE_BRANCH"
 
 if ! git merge --no-edit "upstream/$BASE_BRANCH"; then
@@ -41,7 +51,7 @@ for path in \
   "packages/shared/src/constants.ts"
 do
   if git diff --name-only "origin/$BASE_BRANCH..HEAD" | rg -q "^${path}"; then
-    high_risk_paths="${high_risk_paths}- \`${path}\`\n"
+    high_risk_paths+="- \`${path}\`"$'\n'
   fi
 done
 

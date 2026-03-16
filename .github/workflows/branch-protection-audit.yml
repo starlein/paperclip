@@ -32,11 +32,11 @@ jobs:
           set -euo pipefail
           checks=$(gh api repos/Viraforge/paperclip/branches/master/protection/required_status_checks --jq "[.checks[].context] | sort | join(\",\")")
           echo "Required checks: $checks"
-          echo "$checks" | rg -q "(^|,)verify(,|$)" || {
+          echo "$checks" | grep -Eq "(^|,)verify(,|$)" || {
             echo "FAIL: verify is not required" >&2
             exit 1
           }
-          echo "$checks" | rg -q "(^|,)policy(,|$)" || {
+          echo "$checks" | grep -Eq "(^|,)policy(,|$)" || {
             echo "FAIL: policy is not required" >&2
             exit 1
           }

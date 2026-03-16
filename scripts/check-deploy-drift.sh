@@ -58,6 +58,10 @@ fi
 container_revision=$(docker inspect paperclip-server-1 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null || true)
 printf "CONTAINER_REVISION=%s\n" "$container_revision"
 if [ -z "$container_revision" ]; then
+  if [ -f /opt/paperclip/current-release ]; then
+    echo "DRIFT: container revision label missing while current-release exists" >&2
+    exit 1
+  fi
   echo "WARN: container revision label missing (likely pre-provenance deployment)"
 else
   [ "$container_revision" = "$EXPECTED_SHA" ] || {

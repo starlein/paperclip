@@ -27,7 +27,15 @@ jobs:
           chmod +x ./scripts/upstream-sync.sh
           ./scripts/upstream-sync.sh
 
+      - name: Stop when no upstream delta
+        if: ${{ hashFiles('.upstream-sync-noop') != '' }}
+        run: |
+          set -euo pipefail
+          echo "No upstream changes detected; skipping PR update."
+          cat .upstream-sync-summary.md
+
       - name: Open or update integration PR
+        if: ${{ hashFiles('.upstream-sync-noop') == '' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
