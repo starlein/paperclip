@@ -1,0 +1,9 @@
+# Deployment-critical paths require explicit owner review.
+.github/workflows/ @nydamon
+Dockerfile.vps @nydamon
+scripts/deploy-guard.sh @nydamon
+scripts/upstream-sync.sh @nydamon
+scripts/check-deploy-drift.sh @nydamon
+scripts/vps-install-paperclip.sh @nydamon
+doc/VPS-DEPLOYMENT.md @nydamon
+doc/deploy/ @nydamon

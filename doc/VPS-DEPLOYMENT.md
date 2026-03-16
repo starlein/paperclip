@@ -8,6 +8,7 @@ The deployment uses:
 - **GitHub Actions** for CI/CD automation
 - **Docker Compose** with `docker-compose.vps.yml` for production orchestration
 - **Immutable release directories** for safe, reproducible deployments
+- **`/opt/paperclip/current-release` pointer** as the source of truth for active release
 - **SSH key authentication** between GitHub Actions and the VPS
 
 Repository source of truth for VPS deploys:
@@ -101,6 +102,8 @@ The workflow runs automatically on:
 - Push to `master` branch on the `viraforge/paperclip` repository
 - Manual trigger via `workflow_dispatch`
 
+Deploy execution is restricted to manual `workflow_dispatch` runs. Pushes to `master` run verification only.
+
 ### Steps
 
 1. **Verify Job** (runs first):
@@ -121,7 +124,9 @@ The workflow runs automatically on:
    - Build Docker image
    - Run database migrations
    - Recreate server container
+   - Assert runtime provenance label matches `github.sha`
    - Validate deployment (health checks, env vars, logs)
+   - Atomically update `/opt/paperclip/current-release`
    - Cleanup old releases (keeps last 5)
 
 ### Immutable Releases
@@ -165,13 +170,19 @@ The deployment validates:
 
 ## Recovery Procedures
 
+**Policy:** Never edit source files directly on the VPS. All changes must be committed, reviewed, pass required checks, and be deployed through CI.
+
 ### If CI Deploy Fails
 
 1. **Check GitHub Actions logs** for specific failure reason
 2. **Verify VPS is reachable**: `ssh root@64.176.199.162`
 3. **Identify the active release directory**:
    ```bash
-   CURRENT_RELEASE=$(ls -td /opt/paperclip/releases/* | head -1)
+   if [ -f /opt/paperclip/current-release ]; then
+     CURRENT_RELEASE=$(cat /opt/paperclip/current-release)
+   else
+     CURRENT_RELEASE=$(ls -td /opt/paperclip/releases/* | head -1)
+   fi
    printf 'CURRENT_RELEASE=%s\n' "$CURRENT_RELEASE"
    ```
 4. **Check container status**:
@@ -189,8 +200,13 @@ If the automated deploy leaves the system in a bad state:
 # SSH to VPS
 ssh root@64.176.199.162
 
-CURRENT_RELEASE=$(ls -td /opt/paperclip/releases/* | head -1)
+if [ -f /opt/paperclip/current-release ]; then
+  CURRENT_RELEASE=$(cat /opt/paperclip/current-release)
+else
+  CURRENT_RELEASE=$(ls -td /opt/paperclip/releases/* | head -1)
+fi
 printf 'CURRENT_RELEASE=%s\n' "$CURRENT_RELEASE"
+cd "$CURRENT_RELEASE"
 
 # Check status
 docker compose --project-name paperclip --env-file /opt/paperclip/.env -f "$CURRENT_RELEASE/docker-compose.vps.yml" ps

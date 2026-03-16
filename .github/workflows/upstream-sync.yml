@@ -1,0 +1,59 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run upstream sync
+        run: |
+          set -euo pipefail
+          chmod +x ./scripts/upstream-sync.sh
+          ./scripts/upstream-sync.sh
+
+      - name: Stop when no upstream delta
+        if: ${{ hashFiles('.upstream-sync-noop') != '' }}
+        run: |
+          set -euo pipefail
+          echo "No upstream changes detected; skipping PR update."
+          cat .upstream-sync-summary.md
+
+      - name: Open or update integration PR
+        if: ${{ hashFiles('.upstream-sync-noop') == '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing_number=$(gh pr list \
+            --base master \
+            --head integration/upstream-sync \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "${existing_number:-}" ]; then
+            gh pr edit "$existing_number" --body "$(cat .upstream-sync-summary.md)"
+            echo "Updated PR #$existing_number"
+            exit 0
+          fi
+
+          gh pr create \
+            --base master \
+            --head integration/upstream-sync \
+            --title "chore: upstream sync $(date +%Y-%m-%d)" \
+            --body "$(cat .upstream-sync-summary.md)"
