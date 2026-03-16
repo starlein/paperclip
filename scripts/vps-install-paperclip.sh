@@ -9,6 +9,13 @@ PAPERCLIP_DIR="${PAPERCLIP_DIR:-/opt/paperclip}"
 PAPERCLIP_PORT="${PAPERCLIP_PORT:-3100}"
 VPS_IP="${VPS_IP:-64.176.199.162}"
 
+# This script is bootstrap-only. Managed hosts must deploy via CI.
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^paperclip-server'; then
+  echo "ERROR: Paperclip is already running on this host." >&2
+  echo "Use the GitHub Actions deploy-vultr workflow for all updates." >&2
+  exit 1
+fi
+
 echo "==> Paperclip VPS Install"
 echo "    Dir: $PAPERCLIP_DIR"
 echo "    Port: $PAPERCLIP_PORT"
@@ -60,27 +67,7 @@ EOF
 
 echo "==> Created .env (BETTER_AUTH_SECRET generated)"
 
-# 5. Patch Dockerfile if lockfile is out of sync (upstream drift)
-if grep -q 'frozen-lockfile' "$PAPERCLIP_DIR/Dockerfile"; then
-  sed -i 's/--frozen-lockfile/--no-frozen-lockfile/' "$PAPERCLIP_DIR/Dockerfile"
-  echo "==> Patched Dockerfile for lockfile flexibility"
-fi
-
-# 6. Build and run
-echo "==> Building and starting Paperclip..."
-cd "$PAPERCLIP_DIR"
-docker compose -f docker-compose.quickstart.yml up -d --build
-
-# 7. Wait and verify
-echo "==> Waiting for startup..."
-sleep 20
-if curl -sf "http://localhost:${PAPERCLIP_PORT}/api/health" > /dev/null; then
-  echo ""
-  echo "==> Paperclip is running!"
-  echo "    URL: http://${VPS_IP}:${PAPERCLIP_PORT}"
-  echo "    Health: $(curl -s "http://localhost:${PAPERCLIP_PORT}/api/health")"
-else
-  echo "==> Startup may still be in progress. Check logs:"
-  echo "    docker compose -f $PAPERCLIP_DIR/docker-compose.quickstart.yml logs -f"
-  exit 1
-fi
+# 5. Exit after bootstrap prep
+echo "==> Bootstrap complete."
+echo "    This script only prepares host dependencies, source checkout, and .env."
+echo "    For production deployment, run the GitHub Actions deploy-vultr workflow."

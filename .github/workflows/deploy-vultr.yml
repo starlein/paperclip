@@ -56,6 +56,7 @@ jobs:
           if-no-files-found: error
 
   deploy:
+    if: github.event_name == 'workflow_dispatch'
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -161,7 +162,7 @@ jobs:
           ssh -F "$HOME/.ssh/config" \
             vultr-deploy \
             "set -euo pipefail
-            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' build server"
+            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' build --build-arg COMMIT_SHA='${{ github.sha }}' server"
 
       - name: Run database migrations
         run: |
@@ -178,6 +179,19 @@ jobs:
             vultr-deploy \
             "set -euo pipefail
             docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' up -d --force-recreate --no-deps server"
+
+      - name: Assert image revision provenance
+        run: |
+          set -euo pipefail
+          ssh -F "$HOME/.ssh/config" \
+            vultr-deploy \
+            'set -euo pipefail
+            running_revision=$(docker inspect paperclip-server-1 --format '"'"'{{index .Config.Labels "org.opencontainers.image.revision"}}'"'"')
+            printf "RUNNING_REVISION=%s\n" "$running_revision"
+            if [ "$running_revision" != "${{ github.sha }}" ]; then
+              printf "MISMATCH: expected %s, got %s\n" "${{ github.sha }}" "$running_revision" >&2
+              exit 1
+            fi'
 
       - name: Validate remote compose state
         run: |
@@ -305,6 +319,16 @@ jobs:
             fi
             echo "Recent logs did not show a basic startup success signal" >&2
             exit 1'
+
+      - name: Write current release pointer
+        run: |
+          set -euo pipefail
+          ssh -F "$HOME/.ssh/config" \
+            vultr-deploy \
+            "set -euo pipefail
+            printf '%s' '$VULTR_RELEASE_DIR' > /opt/paperclip/current-release.tmp
+            mv /opt/paperclip/current-release.tmp /opt/paperclip/current-release
+            printf 'CURRENT_RELEASE=%s\n' \"\$(cat /opt/paperclip/current-release)\""
 
       - name: Cleanup old releases and Docker cache
         run: |
