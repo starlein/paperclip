@@ -108,6 +108,7 @@ The workflow runs automatically on:
 
 2. **Deploy Job** (after verify succeeds):
    - Download `ui/dist` artifact
+   - Run deploy guard (`./scripts/deploy-guard.sh --require-ref "$GITHUB_SHA" --allow-detached-head`)
    - Configure SSH with connection reuse
    - Create immutable release directory on VPS
    - Sync repository to release directory
@@ -192,6 +193,16 @@ docker compose -f docker-compose.vps.yml restart
 # Or recreate from last known good release
 # (find a recent release directory and deploy manually)
 ```
+
+### Manual Deploy Preflight (Required)
+
+If you run a manual deploy from a local checkout, always run:
+
+```bash
+./scripts/deploy-guard.sh --require-ref "$(git rev-parse HEAD)"
+```
+
+This blocks deployments from dirty worktrees (including untracked files), which prevents hidden VPS-only customizations from drifting away from git history.
 
 ### Restoring from Backup
 
