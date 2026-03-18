@@ -135,7 +135,76 @@ When adding endpoints:
 - Use company selection context for company-scoped pages
 - Surface failures clearly; do not silently ignore API errors
 
-## 10. Definition of Done
+## 10. SSH Access
+
+Agents with infrastructure responsibilities may SSH into assigned servers using key-based authentication only.
+
+### Production Change Policy (GitHub-only)
+
+Production hot fixes outside GitHub are forbidden.
+
+Required path for every production change:
+
+1. Commit changes to GitHub
+2. Open/update PR
+3. Required checks pass (`verify`, `policy`)
+4. Merge to `master`
+5. Deploy through GitHub Actions only (no VPS source edits)
+
+Explicitly forbidden for production application changes:
+
+- Direct editing of tracked source files on VPS (e.g. under `/opt/paperclip`)
+- Ad-hoc server patching (`sed -i`, manual file rewrites, quick local hacks)
+- Manual `docker compose build/up` as a deployment mechanism for app updates
+- Any change that cannot be traced to a git commit and CI run
+
+Emergency fixes still follow GitHub flow: commit -> checks -> merge -> workflow deploy.
+
+### Connie VPS
+
+Assigned to agents performing Connie infrastructure tasks (service patching, runtime inspection, archive operations).
+
+Environment variables required (must be set before use; block and escalate if missing):
+
+- `CONNIE_VPS_HOST` — IP or hostname of the Connie VPS
+- `CONNIE_VPS_USER` — SSH login user (typically `root`)
+- `CONNIE_SSH_KEY_PATH` — absolute path to the private key
+- `CONNIE_KNOWN_HOSTS_PATH` — absolute path to the known_hosts file for this server
+
+SSH command pattern:
+
+```bash
+ssh -i "$CONNIE_SSH_KEY_PATH" \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="$CONNIE_KNOWN_HOSTS_PATH" \
+  -o ConnectTimeout=10 \
+  "$CONNIE_VPS_USER@$CONNIE_VPS_HOST"
+```
+
+Validate access before any task that requires it:
+
+```bash
+ssh -i "$CONNIE_SSH_KEY_PATH" \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="$CONNIE_KNOWN_HOSTS_PATH" \
+  -o ConnectTimeout=10 \
+  "$CONNIE_VPS_USER@$CONNIE_VPS_HOST" \
+  "echo SSH_OK && hostname && whoami"
+```
+
+Expected output:
+
+```text
+SSH_OK
+connie-vps
+root
+```
+
+Paste exact stdout/stderr output into the task comment when validating. Do not assume access to any server not listed here.
+
+## 11. Definition of Done
 
 A change is done when all are true:
 

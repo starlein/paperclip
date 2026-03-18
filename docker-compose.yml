@@ -17,6 +17,7 @@ services:
 
   server:
     build: .
+    init: true
     ports:
       - "3100:3100"
     environment:

@@ -67,6 +67,100 @@
 - The container image does not include the `ps` utility; `docker exec ... ps` failing is not itself an app failure
 - URL: http://64.176.199.162:3100
 
+## Production deployment policy (GitHub-only)
+
+This is the enforced operating policy for production changes:
+
+- No hot fixes directly on the VPS.
+- No direct source edits under `/opt/paperclip` on the VPS.
+- No manual `docker compose up/build` on production hosts for application updates.
+- No emergency patching outside git history.
+- Every production change must be:
+  1. committed to GitHub,
+  2. validated by required checks (`verify` + `policy`),
+  3. merged to `master`,
+  4. deployed through GitHub Actions workflows only.
+
+### Allowed paths
+
+- Standard deploy: merge to `master`, then run approved workflow path.
+- Emergency deploy: use `workflow_dispatch` from a committed branch/commit in GitHub; still no VPS source edits.
+
+### Explicitly forbidden commands on production for app changes
+
+- `git reset --hard` against production source as a hot-fix mechanism
+- `sed -i` / ad-hoc patching of tracked source files on VPS
+- `docker compose -f docker-compose.quickstart.yml up --build` for production updates
+- editing workflow files or server code directly on the server and restarting containers
+
+### Compliance verification
+
+- Drift monitor must remain enabled (`deploy-drift-check.yml`).
+- Branch protection must keep `enforce_admins=true` and required checks `verify` + `policy`.
+- If drift is detected, fix via GitHub PR + CI deploy, not by patching the VPS.
+
+## Engineering responsibility model (current)
+
+This is the active engineering lifecycle model across repositories.
+
+### Role separation
+
+- Developers author software:
+  - Senior Codex Developer
+  - Senior Claude Code Engineer
+  - Senior Gemini Frontend Engineer
+  - Founding Engineer
+- AI Code Reviewer evaluates all PRs and assigns severity + verdict.
+- Senior Platform Engineer executes GitHub operations (branch/PR/update/merge/pipeline actions).
+- Release Manager controls deployment timing and release risk.
+- CTO owns technical execution and weekly engineering metrics.
+
+No single agent should create, approve, and deploy the same change end-to-end.
+
+### Required software pipeline
+
+Developer writes code
+-> Platform Engineer opens/updates PR
+-> AI Code Reviewer reviews
+-> Developer addresses findings
+-> Platform Engineer applies PR updates
+-> AI Code Reviewer final verdict (`PASS`, `PASS WITH NOTES`, `BLOCK`)
+-> Platform Engineer merges
+-> Release Manager schedules release
+-> Platform Engineer executes deploy workflow
+
+### Review loop rule
+
+Review feedback returns to the author agent directly.
+The Platform Engineer is not a reviewer-developer communication relay.
+
+Correct loop:
+
+AI Code Reviewer comments
+-> Author agent prepares fixes
+-> Platform Engineer applies fixes to PR branch
+-> AI Code Reviewer re-checks
+
+### High-risk categories
+
+Treat these as high-risk changes:
+
+- Auth/authz logic
+- Secrets/env handling
+- CI/CD workflow changes
+- Infrastructure config
+- Database migrations
+- Billing/payment logic
+- Destructive operations
+
+High-risk PRs require extra caution and may require human review.
+
+### Alfred and non-engineering support roles
+
+- Alfred provides systems/tooling/integration support only.
+- Alfred does not author production code and does not approve merges.
+- Compliance Attorney can request additional review on high-risk or regulated changes.
+
 ---
 
 ## How to add credentials / secrets to Paperclip agents
@@ -93,15 +187,12 @@ curl -s -X POST https://api.porkbun.com/api/json/v3/ping \
 # Expect: {"status":"SUCCESS","yourIp":"..."}
 ```
 
-**Cloudflare** credentials come in two forms. The user's account uses a **Global API Key** (not a Bearer token), so auth uses email + key headers:
+**Cloudflare** credentials use an **API Token** with `Authorization: Bearer`:
 ```bash
-curl -s -X GET "https://api.cloudflare.com/client/v4/user" \
-  -H "X-Auth-Email: nydamon@gmail.com" \
-  -H "X-Auth-Key: <key>" \
-  -H "Content-Type: application/json"
-# Expect: {"success":true,"result":{"email":"nydamon@gmail.com",...}}
+curl -s "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+  -H "Authorization: Bearer <token>"
+# Expect: {"result":{"status":"active"},"success":true,...}
 ```
-Do not use `Authorization: Bearer` for this account — that format is for API tokens, not Global API Keys.
 
 Do not proceed to Step 2 until both tests return success.
 
@@ -272,7 +363,6 @@ rm -f /tmp/gen-secrets.mjs
 
 | Mistake | Reality |
 |---|---|
-| Using `Authorization: Bearer` for Cloudflare | Only works for API Tokens. This account uses a Global API Key — use `X-Auth-Email` + `X-Auth-Key` headers. |
 | Providing only one Porkbun field | Porkbun requires both `apikey` (`pk1_...`) AND `secretapikey` (`sk1_...`). They are different. |
 | Importing `readFileSync` from `node:crypto` | `readFileSync` is in `node:fs`, not `node:crypto`. The script will fail silently if you mix them. |
 | Running the script on the VPS host (not in container) | The master key is inside the `paperclip-server-1` container, not on the host. `docker exec` is required. |
@@ -289,15 +379,15 @@ rm -f /tmp/gen-secrets.mjs
 | `github-token-fine-grained` | GitHub fine-grained token | Senior Platform Engineer |
 | `porkbun-api-key` | Porkbun domain API key (`pk1_...`) | Senior Platform Engineer |
 | `porkbun-secret-api-key` | Porkbun secret key (`sk1_...`) | Senior Platform Engineer |
-| `cloudflare-api-key` | Cloudflare Global API Key | Senior Platform Engineer |
+| `cloudflare-api-key` | Cloudflare API Token (Bearer) | Senior Platform Engineer |
 | `github-token-viraforge` | GitHub PAT for `viraforge-ai` (ViraForge company account, `nydamon+paperclip@gmail.com`) | Senior Platform Engineer |
 | `gws-service-account-key` | Google Workspace service account JSON key with domain-wide delegation (42 scopes, project `gam-project-2oeyh`) | Senior Platform Engineer |
 | `gws-oauth2-refresh-token` | Google Workspace OAuth2 refresh token for `damon@prsecurelogistics.com` (backup / user-level access) | Senior Platform Engineer |
 | `gws-client-secret` | Google Workspace GAM OAuth2 client secret (project `gam-project-2oeyh`) | Senior Platform Engineer |
 
-`CLOUDFLARE_AUTH_EMAIL` is stored as a plain env value (`nydamon@gmail.com`) in the Senior Platform Engineer's adapter config, not as a secret (it is not sensitive).
-
 `GWS_CLIENT_ID`, `GWS_ADMIN_EMAIL`, and `GWS_DOMAIN` are stored as plain env values in the Senior Platform Engineer's adapter config (not sensitive).
+
+`CLOUDFLARE_TOKEN` is a `secret_ref` in the Senior Platform Engineer's adapter config (injected as a Bearer token; no email header needed).
 
 ### Google Workspace notes
 
@@ -319,12 +409,38 @@ rm -f /tmp/gen-secrets.mjs
 
 ### GitHub token routing (which token to use for what)
 
+**Policy: GitHub tokens are held exclusively by the Senior Platform Engineer. No other agent receives any GitHub token. Engineers that need a Git push must create a subtask for the Senior Platform Engineer.**
+
+When the board needs to push a branch manually (e.g. a branch with `.github/workflows/` files that needs `workflow` scope), use the board-level push procedure documented below — do NOT give the token to the requesting agent.
+
 | Operation | Token to use | Why |
 |---|---|---|
+| Push any branch containing `.github/workflows/` | `GITHUB_TOKEN` | Only classic PAT has `workflow` scope — fine-grained PATs will always 401 |
 | Create/push to repo in `viraforge` org | `GITHUB_TOKEN_VIRAFORGE` | viraforge-ai is org member, keeps commits under ViraForge identity |
-| Create/push to personal `nydamon` repos | `GITHUB_TOKEN` or `GITHUB_TOKEN_FG` | both work |
+| Create/push to personal `nydamon` repos | `GITHUB_TOKEN` | Classic PAT; do NOT use `GITHUB_TOKEN_FG` — fine-grained PAT has no org visibility |
 | GitHub Actions workflow triggers | `GITHUB_TOKEN` | has `workflow` scope |
 | Fallback if VIRAFORGE token fails | `GITHUB_TOKEN` | nydamon is org admin with `repo` scope |
+
+### Board-level push procedure (for workflow-scoped pushes)
+
+When an agent reports "PAT missing workflow scope", the board should push manually:
+
+```bash
+# 1. Find which workspace has the branch
+docker exec paperclip-server-1 bash -c '
+  find /paperclip/instances/default/workspaces -name HEAD -path "*/.git/HEAD" | while read h; do
+    repo=$(dirname $(dirname $h))
+    branch=$(git -C "$repo" branch --list <branch-name> 2>/dev/null)
+    [ -n "$branch" ] && echo "FOUND: $repo"
+  done
+'
+
+# 2. Push using the workflow-scoped token (via board decrypt script)
+# Use the decrypt-and-push pattern from the gen-secrets playbook.
+# ALWAYS restore the remote URL to https://github.com/... after the push.
+```
+
+**Root cause of recurring "workflow scope" errors:** Agents that have both `GITHUB_TOKEN` and `GITHUB_TOKEN_FG` in their env tend to pick `GITHUB_TOKEN_FG` (fine-grained, no workflow scope) when pushing, causing 403s on workflow file changes. The permanent fix is to never give `GITHUB_TOKEN_FG` to any agent — if an agent needs Git push access at all, give them only `GITHUB_TOKEN`.
 
 ### GitHub org: `viraforge`
 
