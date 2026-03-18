@@ -141,6 +141,7 @@ Access control:
 - **Escalate** via `chainOfCommand` when stuck. Reassign to manager or create a task for them.
 - **Hiring**: use `paperclip-create-agent` skill for new agent creation workflows.
 - **Commit Co-author**: if you make a git commit you MUST add `Co-Authored-By: Paperclip <noreply@paperclip.ing>` to the end of each commit message
+- **No `/tmp` writes in heartbeats.** Local OpenCode runs auto-reject external directory access like `/tmp/*`. For request bodies, prefer inline JSON (`-d '{...}'`) or write files under the workspace/current directory. If temp storage is required, use `$TMPDIR` (or `TMP`) from the injected environment.
 
 ## Comment Style (Required)
 

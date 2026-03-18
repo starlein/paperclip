@@ -54,7 +54,6 @@ export const help: Record<string, string> = {
   wakeOnDemand: "Allow this agent to be woken by assignments, API calls, UI actions, or automated systems.",
   cooldownSec: "Minimum seconds between consecutive heartbeat runs.",
   maxConcurrentRuns: "Maximum number of heartbeat runs that can execute simultaneously for this agent.",
-  skipTimerWhenNoAssignedOpenIssue: "When enabled, scheduled interval heartbeats are skipped if the agent has no assigned task in an actionable state (todo, in progress, blocked, or in review). Assignment, approval, comment, and manual wakes are unaffected.",
   budgetMonthlyCents: "Monthly spending limit in cents. 0 means no limit.",
 };
 
@@ -118,15 +117,17 @@ export function ToggleField({
         {hint && <HintIcon text={hint} />}
       </div>
       <button
+        type="button"
+        aria-pressed={checked}
         className={cn(
-          "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
-          checked ? "bg-green-600" : "bg-muted"
+          "relative inline-flex h-5 w-9 items-center rounded-full border transition-colors",
+          checked ? "bg-green-600 border-green-600" : "bg-muted border-border"
         )}
         onClick={() => onChange(!checked)}
       >
         <span
           className={cn(
-            "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+            "inline-block h-3.5 w-3.5 rounded-full bg-background shadow-sm ring-1 ring-border/80 transition-transform",
             checked ? "translate-x-4.5" : "translate-x-0.5"
           )}
         />
@@ -166,15 +167,17 @@ export function ToggleWithNumber({
           {hint && <HintIcon text={hint} />}
         </div>
         <button
+          type="button"
+          aria-pressed={checked}
           className={cn(
-            "relative inline-flex h-5 w-9 items-center rounded-full transition-colors shrink-0",
-            checked ? "bg-green-600" : "bg-muted"
+            "relative inline-flex h-5 w-9 items-center rounded-full border transition-colors shrink-0",
+            checked ? "bg-green-600 border-green-600" : "bg-muted border-border"
           )}
           onClick={() => onCheckedChange(!checked)}
         >
           <span
             className={cn(
-              "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
+              "inline-block h-3.5 w-3.5 rounded-full bg-background shadow-sm ring-1 ring-border/80 transition-transform",
               checked ? "translate-x-4.5" : "translate-x-0.5"
             )}
           />
