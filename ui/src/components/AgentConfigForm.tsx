@@ -236,9 +236,16 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     }
     if (overlay.adapterType !== undefined) {
       patch.adapterType = overlay.adapterType;
-      // When adapter type changes, send only the new config — don't merge
-      // with old config since old adapter fields are meaningless for the new type
-      patch.adapterConfig = overlay.adapterConfig;
+      // Adapter-specific fields (model, effort, etc.) reset to new-type defaults via overlay.
+      // Cross-adapter fields are preserved — they have identical semantics across all local
+      // adapters and must not be silently dropped when the user switches adapter type.
+      const existingOnTypeChange = (agent.adapterConfig ?? {}) as Record<string, unknown>;
+      const crossAdapterFields = ["env", "cwd", "timeoutSec", "graceSec"] as const;
+      const preserved: Record<string, unknown> = {};
+      for (const key of crossAdapterFields) {
+        if (existingOnTypeChange[key] !== undefined) preserved[key] = existingOnTypeChange[key];
+      }
+      patch.adapterConfig = { ...overlay.adapterConfig, ...preserved };
     } else if (Object.keys(overlay.adapterConfig).length > 0) {
       const existing = (agent.adapterConfig ?? {}) as Record<string, unknown>;
       patch.adapterConfig = { ...existing, ...overlay.adapterConfig };
@@ -834,16 +841,6 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 numberPrefix="Run heartbeat every"
                 numberHint={help.intervalSec}
                 showNumber={eff("heartbeat", "enabled", heartbeat.enabled !== false)}
-              />
-              <ToggleField
-                label="Skip timer when no assigned open task"
-                hint={help.skipTimerWhenNoAssignedOpenIssue}
-                checked={eff(
-                  "heartbeat",
-                  "skipTimerWhenNoAssignedOpenIssue",
-                  heartbeat.skipTimerWhenNoAssignedOpenIssue === true,
-                )}
-                onChange={(v) => mark("heartbeat", "skipTimerWhenNoAssignedOpenIssue", v)}
               />
             </div>
             <CollapsibleSection
