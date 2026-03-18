@@ -20,6 +20,11 @@
   - `docker-compose.vps.yml`
   - `docker-compose.vps-override.yml`
 - Fast-build flow uses prebuilt `ui/dist` and skips the VPS UI build step
+- **GHCR-based deploy (2026-03-18):** Docker image is now built on GitHub Actions and pushed to `ghcr.io/viraforge/paperclip:<sha>`. VPS only pulls and recreates. `Deploy Vultr` is now `workflow_dispatch` only — no longer triggers on push to master.
+  - Image path: `ghcr.io/viraforge/paperclip:<github_sha>`
+  - VPS reads image tag from `PAPERCLIP_SERVER_IMAGE` env var during compose commands
+  - Current image pointer on VPS: `/opt/paperclip/current-image`
+  - Rollback: `PAPERCLIP_SERVER_IMAGE=$(cat /opt/paperclip/current-image-prev) docker compose ... up -d --force-recreate --no-deps server`
 - The production image now includes `openssh-client`
 - OpenCode is now deployed through the Paperclip-native runtime path instead of the earlier manual wrapper
 - The running container now uses:
@@ -39,6 +44,63 @@
   - `ssh -V`
   - `ssh-add`
   - `ssh-keyscan`
+
+## Agent devtools in production image
+
+Both `Dockerfile` and `Dockerfile.vps` now install the following in the production image for agent efficiency:
+- `ripgrep` — fast file search (`rg`); agents prefer this over `grep` fallback
+- `fd-find` — fast file finder (`fd`, symlinked from `fdfind`)
+- `procps` — provides `ps`, `top`, etc.
+- `tree` — directory tree display
+- `patch` — apply patch files
+
+## npm tool version pinning
+
+All four agent CLI tools are pinned via Docker `ARG` in both `Dockerfile` and `Dockerfile.vps`:
+
+| ARG | Current value |
+|-----|---------------|
+| `CLAUDE_CODE_VERSION` | `2.1.78` |
+| `GEMINI_CLI_VERSION` | `0.34.0` |
+| `CODEX_VERSION` | `0.115.0` |
+| `OPENCODE_VERSION` | `1.2.27` |
+
+These can be overridden at build time with `--build-arg`. The values were last updated 2026-03-18 to unblock the deploy pipeline after `@openai/codex@0.1.2504221644` (a non-existent beta version) caused `npm error notarget` failures since March 16.
+
+## Docker build: plugin-sdk must be compiled before server
+
+The server imports `@paperclipai/plugin-sdk` (workspace package at `packages/plugins/sdk/`). TypeScript's NodeNext module resolution requires `dist/` to exist before `tsc` runs on the server. Both Dockerfiles now do:
+
+```
+RUN pnpm --filter @paperclipai/plugin-sdk build && pnpm --filter @paperclipai/server build
+```
+
+The main `Dockerfile` also has `COPY packages/plugins/sdk/package.json packages/plugins/sdk/` in the `deps` stage. Omitting either step causes `TS2307: Cannot find module '@paperclipai/plugin-sdk'` and cascading TypeScript errors throughout the plugin system files.
+
+## GitHub plugin (paperclip-github)
+
+- Plugin ID: `0ec9cc46-eca5-48b0-aee9-61c4bdfceb9f`
+- Package path in container: `/app/packages/plugins/github-integration`
+- Status: `ready` (installed 2026-03-18)
+- Webhook endpoint: `http://64.176.199.162:3100/api/plugins/0ec9cc46-eca5-48b0-aee9-61c4bdfceb9f/webhooks/github-events`
+- Configured for repo: `Viraforge/paperclip`
+- Default assignee: Senior Platform Engineer (`227d0125-9d34-4287-8ee8-39c4903f85b0`)
+- GitHub token ref: `github-token` (secret_ref in agent env)
+- Webhook secret: encrypted; test ping verified `status: success` in `plugin_webhook_deliveries`
+
+## Known CI / PR workflow gotchas
+
+- **CONFLICTING PRs silently block CI**: GitHub won't trigger `pull_request` workflows on a PR in `CONFLICTING` state. Always check `gh pr view <N> --json mergeable,mergeStateStatus` before wondering why CI hasn't run. Rebase to fix.
+- **ai-review/verdict must be posted manually**: The `ai-review/verdict` required check is not automatically posted by the internal AI Code Reviewer. After review, post it via the GitHub Statuses API:
+  ```bash
+  gh api repos/Viraforge/paperclip/statuses/<SHA> \
+    -X POST -f state=success -f context="ai-review/verdict" \
+    -f description="PASS – ..." -f target_url="<PR URL>"
+  ```
+- **Deploy Vultr is `workflow_dispatch` only**: `deploy-vultr.yml` no longer triggers on push to master (removed 2026-03-18). Deploy requires:
+  ```bash
+  gh workflow run deploy-vultr.yml --repo Viraforge/paperclip --ref master
+  ```
 
 ## Runtime auth state
 

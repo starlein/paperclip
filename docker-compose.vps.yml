@@ -15,9 +15,7 @@ services:
       - pgdata:/var/lib/postgresql/data
 
   server:
-    build:
-      context: .
-      dockerfile: Dockerfile.vps
+    image: ${PAPERCLIP_SERVER_IMAGE:?PAPERCLIP_SERVER_IMAGE must be set}
     init: true
     restart: unless-stopped
     stop_grace_period: 30s

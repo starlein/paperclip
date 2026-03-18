@@ -41,6 +41,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Verify Dockerfile.vps workspace coverage
+        run: node scripts/check-dockerfile-vps-coverage.mjs
+
       - name: Release canary dry run
         run: |
           git checkout -B master HEAD

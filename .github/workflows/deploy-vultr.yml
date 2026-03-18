@@ -1,9 +1,6 @@
 name: Deploy Vultr
 
 on:
-  push:
-    branches:
-      - master
   workflow_dispatch:
 
 concurrency:
@@ -12,11 +9,12 @@ concurrency:
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
-  verify:
+  build-and-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -36,28 +34,33 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm -r typecheck
+      - name: Build UI
+        run: pnpm --filter @paperclipai/ui build
 
-      - name: Run tests
-        run: pnpm test:run
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build
-        run: pnpm build
-
-      - name: Verify Dockerfile.vps build
-        run: docker build -f Dockerfile.vps -t paperclip-vps-verify .
-
-      - name: Upload ui/dist
-        uses: actions/upload-artifact@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
         with:
-          name: ui-dist
-          path: ui/dist
-          if-no-files-found: error
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.vps
+          push: true
+          tags: ghcr.io/viraforge/paperclip:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
 
   deploy:
-    if: github.event_name == 'workflow_dispatch'
-    needs: verify
+    needs: build-and-push
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -67,16 +70,11 @@ jobs:
       VULTR_ENV_FILE: /opt/paperclip/.env
       VULTR_RELEASE_ID: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       VULTR_RELEASE_DIR: /opt/paperclip/releases/${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      PAPERCLIP_SERVER_IMAGE: ghcr.io/viraforge/paperclip:${{ github.sha }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Download ui/dist
-        uses: actions/download-artifact@v4
-        with:
-          name: ui-dist
-          path: ui/dist
 
       - name: Deploy guard (clean tree + pinned commit)
         run: |
@@ -156,13 +154,13 @@ jobs:
             mkdir -p /opt/paperclip/db-backups
             docker exec -i paperclip-db-1 pg_dump -U paperclip -d paperclip -Fc > "/opt/paperclip/db-backups/pre-deploy-${ts}.dump"'
 
-      - name: Build VPS server image
+      - name: Authenticate VPS to GHCR and pull server image
         run: |
           set -euo pipefail
-          ssh -F "$HOME/.ssh/config" \
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh -F "$HOME/.ssh/config" \
             vultr-deploy \
-            "set -euo pipefail
-            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' build --build-arg COMMIT_SHA='${{ github.sha }}' server"
+            "docker login ghcr.io -u '${{ github.actor }}' --password-stdin && \
+             docker pull '$PAPERCLIP_SERVER_IMAGE'"
 
       - name: Run database migrations
         run: |
@@ -170,7 +168,10 @@ jobs:
           ssh -F "$HOME/.ssh/config" \
             vultr-deploy \
             "set -euo pipefail
-            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' run --rm --no-deps server pnpm db:migrate"
+            PAPERCLIP_SERVER_IMAGE='$PAPERCLIP_SERVER_IMAGE' \
+            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' \
+              -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' \
+              run --rm --no-deps server pnpm db:migrate"
 
       - name: Recreate VPS server container
         run: |
@@ -178,7 +179,10 @@ jobs:
           ssh -F "$HOME/.ssh/config" \
             vultr-deploy \
             "set -euo pipefail
-            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' up -d --force-recreate --no-deps server"
+            PAPERCLIP_SERVER_IMAGE='$PAPERCLIP_SERVER_IMAGE' \
+            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' \
+              -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' \
+              up -d --force-recreate --no-deps server"
 
       - name: Assert image revision provenance
         run: |
@@ -199,7 +203,9 @@ jobs:
           ssh -F "$HOME/.ssh/config" \
             vultr-deploy \
             "set -euo pipefail
-            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' ps"
+            PAPERCLIP_SERVER_IMAGE='$PAPERCLIP_SERVER_IMAGE' \
+            docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' \
+              -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' ps"
 
       - name: Validate fresh server container timestamp
         run: |
@@ -320,15 +326,21 @@ jobs:
             echo "Recent logs did not show a basic startup success signal" >&2
             exit 1'
 
-      - name: Write current release pointer
+      - name: Write current release and image pointers
         run: |
           set -euo pipefail
           ssh -F "$HOME/.ssh/config" \
             vultr-deploy \
             "set -euo pipefail
+            if [ -f /opt/paperclip/current-image ]; then
+              cp /opt/paperclip/current-image /opt/paperclip/current-image-prev
+            fi
+            printf '%s' '$PAPERCLIP_SERVER_IMAGE' > /opt/paperclip/current-image.tmp
+            mv /opt/paperclip/current-image.tmp /opt/paperclip/current-image
             printf '%s' '$VULTR_RELEASE_DIR' > /opt/paperclip/current-release.tmp
             mv /opt/paperclip/current-release.tmp /opt/paperclip/current-release
-            printf 'CURRENT_RELEASE=%s\n' \"\$(cat /opt/paperclip/current-release)\""
+            printf 'CURRENT_RELEASE=%s\n' \"\$(cat /opt/paperclip/current-release)\"
+            printf 'CURRENT_IMAGE=%s\n' \"\$(cat /opt/paperclip/current-image)\""
 
       - name: Cleanup old releases and Docker cache
         run: |
@@ -341,5 +353,9 @@ jobs:
             mkdir -p "$releases_dir" "$backups_dir"
             ls -1dt "$releases_dir"/* 2>/dev/null | awk "NR>5" | xargs -r rm -rf --
             ls -1dt "$backups_dir"/pre-deploy-*.dump 2>/dev/null | awk "NR>10" | xargs -r rm -f --
+            prev_image=$(cat /opt/paperclip/current-image-prev 2>/dev/null || true)
+            if [ -n "$prev_image" ]; then
+              docker tag "$prev_image" paperclip-rollback:prev 2>/dev/null || true
+            fi
             docker image prune -af || true
             docker builder prune -af || true'
