@@ -17,7 +17,7 @@ Paperclip no longer uses release branches or Changesets for publishing.
 
 ## Why the CLI needs special packaging
 
-The CLI package, `paperclipai`, imports code from workspace packages such as:
+The CLI package, `@paperclipai_dld/cli`, imports code from workspace packages such as:
 
 - `@paperclipai_dld/server`
 - `@paperclipai_dld/db`
@@ -85,12 +85,12 @@ Canaries publish under the npm dist-tag `canary`.
 
 Example:
 
-- `paperclipai@2026.318.1-canary.2`
+- `@paperclipai_dld/cli@2026.318.1-canary.2`
 
-This keeps the default install path unchanged while allowing explicit installs with:
+Install:
 
 ```bash
-npx paperclipai@canary onboard
+npx @paperclipai_dld/cli@canary onboard
 ```
 
 ### Stable
@@ -99,7 +99,7 @@ Stable publishes use the npm dist-tag `latest`.
 
 Example:
 
-- `paperclipai@2026.318.0`
+- `@paperclipai_dld/cli@2026.318.0`
 
 Stable publishes do not create a release commit. Instead:
 
