@@ -12,11 +12,12 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # GITHUB_TOKEN (bot token) cannot read branch protection — requires admin PAT
+      GH_TOKEN: ${{ secrets.REPO_ADMIN_PAT }}
 
     steps:
       - name: Assert enforce_admins is enabled
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           enabled=$(gh api repos/Viraforge/paperclip/branches/master/protection/enforce_admins --jq ".enabled")
@@ -26,8 +27,6 @@ jobs:
           }
 
       - name: Assert required checks include verify and policy
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           checks=$(gh api repos/Viraforge/paperclip/branches/master/protection/required_status_checks --jq "[.checks[].context] | sort | join(\",\")")
@@ -42,8 +41,6 @@ jobs:
           }
 
       - name: Assert force pushes are blocked
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           force_pushes_enabled=$(gh api repos/Viraforge/paperclip/branches/master/protection --jq ".allow_force_pushes.enabled")
