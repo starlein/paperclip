@@ -272,6 +272,9 @@ require_clean_worktree() {
 require_on_master_branch() {
   local current_branch
   current_branch="$(git_current_branch)"
+  if [ -z "$current_branch" ] && [ "${GITHUB_ACTIONS:-}" = "true" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
+    current_branch="$GITHUB_REF_NAME"
+  fi
   if [ "$current_branch" != "master" ]; then
     release_fail "this release step must run from branch master, but current branch is ${current_branch:-<detached>}."
   fi
