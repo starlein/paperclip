@@ -12,6 +12,15 @@ Repo-side files that depend on this setup:
 - `.github/workflows/release.yml`
 - `.github/CODEOWNERS`
 
+### Workflow prerequisite: `setup-node` registry URL
+
+The `publish_canary` and `publish_stable` jobs **must** use `actions/setup-node` with:
+
+- `registry-url: https://registry.npmjs.org`
+- `always-auth: true`
+
+Without this, `pnpm publish` fails with **`npm ERR! code ENEEDAUTH`** even when `id-token: write` is set, because the npm CLI never receives OIDC-backed registry credentials.
+
 Note:
 
 - the release workflows intentionally use `pnpm install --no-frozen-lockfile`

@@ -88,6 +88,8 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          registry-url: https://registry.npmjs.org
+          always-auth: true
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
@@ -217,6 +219,8 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          registry-url: https://registry.npmjs.org
+          always-auth: true
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
