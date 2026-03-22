@@ -39,6 +39,40 @@ if (!isSameFile && existsSync(CWD_ENV_PATH)) {
 
 type DatabaseMode = "embedded-postgres" | "postgres";
 
+/**
+ * Union of persisted config, `PAPERCLIP_ALLOWED_HOSTNAMES`, and `PAPERCLIP_PUBLIC_URL` hostname.
+ * Previously, a non-empty env CSV replaced the file list entirely, so `paperclipai allowed-hostname`
+ * (and onboard defaults) could be ignored and lost effective hosts after env drift or redeploys.
+ */
+export function mergeAllowedHostnamesForConfig(input: {
+  fileAllowed: string[] | undefined | null;
+  envCsv: string | undefined | null;
+  publicBaseUrl: string | undefined | null;
+}): string[] {
+  const fromFile = (input.fileAllowed ?? [])
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+  const rawEnv = input.envCsv;
+  const fromEnv =
+    rawEnv === undefined || rawEnv === null
+      ? []
+      : rawEnv
+          .split(",")
+          .map((value) => value.trim().toLowerCase())
+          .filter((value) => value.length > 0);
+  let fromPublic: string[] = [];
+  const base = input.publicBaseUrl?.trim();
+  if (base) {
+    try {
+      const hostname = new URL(base).hostname.trim().toLowerCase();
+      if (hostname) fromPublic = [hostname];
+    } catch {
+      /* invalid URL */
+    }
+  }
+  return Array.from(new Set([...fromFile, ...fromEnv, ...fromPublic]));
+}
+
 export interface Config {
   deploymentMode: DeploymentMode;
   deploymentExposure: DeploymentExposure;
@@ -161,32 +195,11 @@ export function loadConfig(): Config {
     disableSignUpFromEnv !== undefined
       ? disableSignUpFromEnv === "true"
       : (fileConfig?.auth?.disableSignUp ?? false);
-  const allowedHostnamesFromEnvRaw = process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
-  const allowedHostnamesFromEnv = allowedHostnamesFromEnvRaw
-    ? allowedHostnamesFromEnvRaw
-      .split(",")
-      .map((value) => value.trim().toLowerCase())
-      .filter((value) => value.length > 0)
-    : null;
-  const publicUrlHostname = authPublicBaseUrl
-    ? (() => {
-      try {
-        return new URL(authPublicBaseUrl).hostname.trim().toLowerCase();
-      } catch {
-        return null;
-      }
-    })()
-    : null;
-  const allowedHostnames = Array.from(
-    new Set(
-      [
-        ...(allowedHostnamesFromEnv ?? fileConfig?.server.allowedHostnames ?? []),
-        ...(publicUrlHostname ? [publicUrlHostname] : []),
-      ]
-        .map((value) => value.trim().toLowerCase())
-        .filter(Boolean),
-    ),
-  );
+  const allowedHostnames = mergeAllowedHostnamesForConfig({
+    fileAllowed: fileConfig?.server.allowedHostnames,
+    envCsv: process.env.PAPERCLIP_ALLOWED_HOSTNAMES,
+    publicBaseUrl: authPublicBaseUrl,
+  });
   const companyDeletionEnvRaw = process.env.PAPERCLIP_ENABLE_COMPANY_DELETION;
   const companyDeletionEnabled =
     companyDeletionEnvRaw !== undefined

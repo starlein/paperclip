@@ -108,6 +108,8 @@ MINIMAX_API_KEY=<your_minimax_api_key>
 
 5. **`PAPERCLIP_ALLOWED_HOSTNAMES` (recommended when using a hostname):** Include the **VPS public IP** as well, e.g. `64.176.199.162`, comma-separated. Otherwise the private hostname gate may block **`Host: <ip>`** requests (including GitHub Actions deploy checks that curl `http://$VULTR_HOST/...`).
 
+6. **Allowed hostnames are a union** of: values in **`/paperclip/instances/default/config.json`** (`server.allowedHostnames`, e.g. from `pnpm paperclipai allowed-hostname …`), **`PAPERCLIP_ALLOWED_HOSTNAMES`**, and the hostname parsed from **`PAPERCLIP_PUBLIC_URL`**. Persisting the Cloudflare hostname via **`paperclipai allowed-hostname`** inside the container (or editing `config.json` on the volume) keeps it effective across restarts even if `.env` is temporarily wrong.
+
 Direct **`http://<ip>:3100`** remains available for debugging while **`edge`** serves **`http://<hostname>/`** through Cloudflare.
 
 ## Deployment Flow
