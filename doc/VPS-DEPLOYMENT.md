@@ -82,8 +82,11 @@ Add the private key contents and known_hosts output to GitHub secrets.
 Create `/opt/paperclip/.env` on the VPS with these required variables:
 
 ```bash
-# Required for Paperclip operation
-PAPERCLIP_PUBLIC_URL=http://64.176.199.162:3100
+# Required for Paperclip operation (use the URL users actually open in the browser)
+# Example with Cloudflare hostname + nginx edge on :80 (see "Cloudflare edge" below):
+PAPERCLIP_PUBLIC_URL=https://pc.example.com
+# Or direct to the app port (no Cloudflare / no edge):
+# PAPERCLIP_PUBLIC_URL=http://64.176.199.162:3100
 BETTER_AUTH_SECRET=$(openssl rand -base64 32)
 
 # Required for OpenCode agent support
@@ -93,6 +96,17 @@ MINIMAX_API_KEY=<your_minimax_api_key>
 ```
 
 **Note:** All these variables are required. The deployment will fail if any are missing.
+
+### 3. Cloudflare edge (Free plan) on port 80
+
+`docker-compose.vps.yml` includes an **`edge`** service (`nginx`) that listens on **host port 80** and reverse-proxies to the Paperclip container on **3100**. That avoids Cloudflare Enterprise “origin port rewrite” (not available on Free).
+
+1. **DNS:** Proxied **A** (or **AAAA**) record for your hostname → VPS IP.
+2. **SSL/TLS** in Cloudflare: **Flexible** (HTTPS visitor → Cloudflare, HTTP Cloudflare → origin on :80). For **Full** / **Full (strict)** you must terminate TLS on the origin (not covered by this default stack).
+3. **Firewall:** Allow **TCP 80** (and **443** only if you add TLS on the box) from the internet on the VPS / cloud firewall.
+4. **`PAPERCLIP_PUBLIC_URL`:** Set to **`https://<your-hostname>`** (same host users load in the browser) so auth callbacks and links are correct.
+
+Direct **`http://<ip>:3100`** remains available for debugging while **`edge`** serves **`http://<hostname>/`** through Cloudflare.
 
 ## Deployment Flow
 
@@ -123,7 +137,7 @@ Deploy execution is restricted to manual `workflow_dispatch` runs. Pushes to `ma
    - Backup production database
    - Build Docker image
    - Run database migrations
-   - Recreate server container
+   - Recreate **server** and **edge** (nginx on host `:80` → app `:3100`) containers
    - Assert runtime provenance label matches `github.sha`
    - Validate deployment (health checks, env vars, logs)
    - Atomically update `/opt/paperclip/current-release`
@@ -157,7 +171,7 @@ After successful deployment:
 The deployment validates:
 
 1. **Container freshness** - Server container started within last 15 minutes
-2. **Health endpoints** - Both localhost and external health checks pass
+2. **Health endpoints** - Localhost `:3100`, external `:3100`, and external **`:80`** (edge proxy) health checks pass
 3. **Static assets** - UI assets are served correctly
 4. **Environment variables** - All required vars present and non-empty:
    - `PAPERCLIP_OPENCODE_COMMAND`

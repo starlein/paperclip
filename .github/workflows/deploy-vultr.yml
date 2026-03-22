@@ -173,7 +173,7 @@ jobs:
               -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' \
               run --rm --no-deps server pnpm db:migrate"
 
-      - name: Recreate VPS server container
+      - name: Recreate VPS server and edge containers
         run: |
           set -euo pipefail
           ssh -F "$HOME/.ssh/config" \
@@ -182,7 +182,7 @@ jobs:
             PAPERCLIP_SERVER_IMAGE='$PAPERCLIP_SERVER_IMAGE' \
             docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' \
               -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' \
-              up -d --force-recreate --no-deps server"
+              up -d --force-recreate --no-deps server edge"
 
       - name: Assert image revision provenance
         run: |
@@ -249,6 +249,18 @@ jobs:
             sleep 5
           done
           echo "Timed out waiting for external host health" >&2
+          exit 1
+
+      - name: Wait for external port 80 edge health
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 12); do
+            if curl --connect-timeout 5 --max-time 10 -fsS "http://$VULTR_HOST/api/health" > /dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for http://$VULTR_HOST/api/health (nginx edge on :80). Open TCP 80 on the VPS firewall and ensure nothing else binds host port 80." >&2
           exit 1
 
       - name: Validate external static asset fetch

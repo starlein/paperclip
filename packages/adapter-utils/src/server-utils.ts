@@ -111,6 +111,8 @@ export function resolvePathValue(obj: Record<string, unknown>, dottedPath: strin
   if (cursor === null || cursor === undefined) return "";
   if (typeof cursor === "string") return cursor;
   if (typeof cursor === "number" || typeof cursor === "boolean") return String(cursor);
+  // Arrays/objects are not interpolatable path segments; [] would break URL/path templates.
+  if (Array.isArray(cursor)) return "";
 
   try {
     return JSON.stringify(cursor);
