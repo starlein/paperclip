@@ -620,8 +620,11 @@ export function createPluginWorkerHandle(
       stdio: ["pipe", "pipe", "pipe", "ipc"],
       execArgv: options.execArgv ?? [],
       env: workerEnv,
-      // Don't let the child keep the parent alive
-      detached: false,
+      // Use detached:true so each worker gets its own process group (PGID = worker PID).
+      // This prevents a kill(-serverPgid, signal) sent by an agent subprocess from
+      // cascading into the plugin workers — and vice versa.
+      // We do NOT call child.unref() so the workers still keep the server event loop alive.
+      detached: process.platform !== "win32",
     });
 
     return child;

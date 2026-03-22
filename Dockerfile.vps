@@ -43,6 +43,7 @@ ARG CLAUDE_CODE_VERSION=2.1.78
 ARG GEMINI_CLI_VERSION=0.34.0
 ARG CODEX_VERSION=0.115.0
 ARG OPENCODE_VERSION=1.2.27
+ARG PI_CODING_AGENT_VERSION=0.61.1
 ARG COMMIT_SHA=unknown
 LABEL org.opencontainers.image.revision=$COMMIT_SHA
 RUN apt-get update \
@@ -66,6 +67,7 @@ RUN mkdir -p /paperclip /opt/paperclip-opencode \
     "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     "@google/gemini-cli@${GEMINI_CLI_VERSION}" \
     "@openai/codex@${CODEX_VERSION}" \
+    "@mariozechner/pi-coding-agent@${PI_CODING_AGENT_VERSION}" \
   && npm install --prefix /opt/paperclip-opencode --omit=dev "opencode-ai@${OPENCODE_VERSION}" \
   && chmod +x /app/scripts/docker-entrypoint.sh /app/scripts/gh.sh \
   && chown -R node:node /paperclip /opt/paperclip-opencode

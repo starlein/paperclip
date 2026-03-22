@@ -725,6 +725,35 @@ function isMainModule(metaUrl: string): boolean {
 }
 
 if (isMainModule(import.meta.url)) {
+  // Log all process exits so we can diagnose unexpected restarts.
+  // Use stderr directly because the logger may not be initialized yet on SIGTERM.
+  process.on("exit", (code) => {
+    process.stderr.write(
+      JSON.stringify({ level: 30, time: Date.now(), msg: "process exiting", code }) + "\n",
+    );
+  });
+
+  // Handle termination signals gracefully and log before exiting.
+  // Without these handlers, Node.js exits with signal code 143/130 and no log.
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.on(sig, () => {
+      logger.warn({ signal: sig, pid: process.pid, ppid: process.ppid }, `${sig} received — shutting down`);
+      // Give pino a tick to flush the log line before exiting.
+      setImmediate(() => process.exit(0));
+    });
+  }
+
+  // Catch any unhandled exceptions/rejections and log them with a stack trace.
+  process.on("uncaughtException", (err) => {
+    logger.error({ err }, "uncaughtException — shutting down");
+    setImmediate(() => process.exit(1));
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    logger.error({ reason }, "unhandledRejection — shutting down");
+    setImmediate(() => process.exit(1));
+  });
+
   void startServer().catch((err) => {
     logger.error({ err }, "Paperclip server failed to start");
     process.exit(1);
