@@ -375,8 +375,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "ENOENT") {
-        await onLog(`instructions file not found: ${instructionsFilePath}, skipping`, "warn");
-        effectiveInstructionsFilePath = undefined;
+        await onLog("stderr", `[paperclip] instructions file not found: ${instructionsFilePath}, skipping\n`);
+        effectiveInstructionsFilePath = "";
       } else {
         throw err;
       }
