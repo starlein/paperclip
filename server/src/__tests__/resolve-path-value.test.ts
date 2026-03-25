@@ -3,7 +3,7 @@ import {
   expandAgentHomeInText,
   renderTemplate,
   resolvePathValue,
-} from "@paperclipai_dld/adapter-utils/server-utils";
+} from "@paperclipai/adapter-utils/server-utils";
 
 describe("resolvePathValue", () => {
   it("returns empty string for arrays instead of JSON (avoids [] path prefixes)", () => {

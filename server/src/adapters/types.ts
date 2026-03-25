@@ -20,4 +20,4 @@ export type {
   ResolvedSessionCompactionPolicy,
   SessionCompactionPolicy,
   ServerAdapterModule,
-} from "@paperclipai_dld/adapter-utils";
+} from "@paperclipai/adapter-utils";

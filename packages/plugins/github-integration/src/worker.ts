@@ -3,8 +3,8 @@ import {
   runWorker,
   type PluginContext,
   type PluginWebhookInput,
-} from "@paperclipai_dld/plugin-sdk";
-import type { Agent } from "@paperclipai_dld/shared";
+} from "@paperclipai/plugin-sdk";
+import type { Agent } from "@paperclipai/shared";
 import {
   DEFAULT_CONFIG,
   SUPPORTED_GITHUB_EVENTS,

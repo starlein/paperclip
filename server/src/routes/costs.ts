@@ -1,12 +1,12 @@
 import { Router } from "express";
-import type { Db } from "@paperclipai_dld/db";
+import type { Db } from "@paperclipai/db";
 import {
   createCostEventSchema,
   createFinanceEventSchema,
   resolveBudgetIncidentSchema,
   updateBudgetSchema,
   upsertBudgetPolicySchema,
-} from "@paperclipai_dld/shared";
+} from "@paperclipai/shared";
 import { validate } from "../middleware/validate.js";
 import {
   budgetService,
