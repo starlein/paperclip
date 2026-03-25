@@ -35,6 +35,14 @@ type ChildProcessWithEvents = ChildProcess & {
 };
 
 export const runningProcesses = new Map<string, RunningProcess>();
+
+export interface FinishedWorkspacePath {
+  workspacePath: string;
+  finishedAt: Date;
+}
+export const finishedWorkspacePaths = new Map<string, FinishedWorkspacePath>();
+export const FINISHED_WORKSPACE_PATH_RETENTION_MS = 30 * 60 * 1000;
+
 export const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 export const MAX_EXCERPT_BYTES = 32 * 1024;
 const SENSITIVE_ENV_KEY = /(key|token|secret|password|passwd|authorization|cookie)/i;

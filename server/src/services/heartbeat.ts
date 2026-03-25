@@ -3905,8 +3905,8 @@ export function heartbeatService(db: Db) {
         if (!issue.assigneeAgentId) continue;
         await db.update(issues).set({ processLostRetryAt: null, updatedAt: now }).where(eq(issues.id, issue.id));
         await enqueueWakeup(issue.assigneeAgentId, {
-          source: "on_demand",
-          triggerDetail: "process_lost_retry",
+          source: "automation",
+          triggerDetail: "system",
           reason: "process_lost_retry",
           requestedByActorType: "system",
           requestedByActorId: "heartbeat_scheduler",
