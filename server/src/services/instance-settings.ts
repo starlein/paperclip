@@ -58,20 +58,20 @@ export function instanceSettingsService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (existing) return existing;
 
-    const now = new Date().toISOString();
+    const now = new Date();
     const [created] = await db
       .insert(instanceSettings)
       .values({
         singletonKey: DEFAULT_SINGLETON_KEY,
         general: {},
         experimental: {},
-        createdAt: now as any,
-        updatedAt: now as any,
+        createdAt: now,
+        updatedAt: now,
       })
       .onConflictDoUpdate({
         target: [instanceSettings.singletonKey],
         set: {
-          updatedAt: now as any,
+          updatedAt: now,
         },
       })
       .returning();
@@ -116,12 +116,12 @@ export function instanceSettingsService(db: Db) {
         ...normalizeExperimentalSettings(current.experimental),
         ...patch,
       });
-      const now = new Date().toISOString();
+      const now = new Date();
       const [updated] = await db
         .update(instanceSettings)
         .set({
           experimental: { ...nextExperimental },
-          updatedAt: now as any,
+          updatedAt: now,
         })
         .where(eq(instanceSettings.id, current.id))
         .returning();
