@@ -488,8 +488,6 @@ export async function startServer(): Promise<StartedServer> {
     bindHost: config.host,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
-    stripePublishableKeyConfigured: Boolean(config.stripePublishableKey),
-    stripeSecretKeyConfigured: Boolean(config.stripeSecretKey),
     betterAuthHandler,
     resolveSession,
   });
@@ -538,19 +536,12 @@ export async function startServer(): Promise<StartedServer> {
       .catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed");
       });
-
-    // Release any locks whose run already reached a terminal state.
-    void heartbeat.expireTerminatedRunLocks().catch((err) => {
-      logger.error({ err }, "startup expiry of terminated-run locks failed");
-    });
     setInterval(() => {
       void heartbeat
         .tickTimers(new Date())
         .then((result) => {
           if (result.enqueued > 0) {
             logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-          } else if (result.skipped > 0) {
-            logger.info({ ...result }, "heartbeat timer tick: due agents skipped (no open tasks)");
           }
         })
         .catch((err) => {
@@ -576,21 +567,6 @@ export async function startServer(): Promise<StartedServer> {
         .catch((err) => {
           logger.error({ err }, "periodic heartbeat recovery failed");
         });
-
-      // Periodically expire any locks whose run is already terminal
-      void heartbeat.expireTerminatedRunLocks().catch((err) => {
-        logger.error({ err }, "periodic expiry of terminated-run locks failed");
-      });
-
-      // Periodically enqueue any due process_lost retries
-      void heartbeat.enqueueProcessLostRetries().catch((err) => {
-        logger.error({ err }, "periodic enqueue process_lost retries failed");
-      });
-
-      // Reap orphaned workspace processes (grandchildren that survived run completion)
-      void heartbeat.reapOrphanedWorkspaceProcesses().catch((err) => {
-        logger.error({ err }, "periodic orphan workspace process reap failed");
-      });
     }, config.heartbeatSchedulerIntervalMs);
   }
   
@@ -742,35 +718,6 @@ function isMainModule(metaUrl: string): boolean {
 }
 
 if (isMainModule(import.meta.url)) {
-  // Log all process exits so we can diagnose unexpected restarts.
-  // Use stderr directly because the logger may not be initialized yet on SIGTERM.
-  process.on("exit", (code) => {
-    process.stderr.write(
-      JSON.stringify({ level: 30, time: Date.now(), msg: "process exiting", code }) + "\n",
-    );
-  });
-
-  // Handle termination signals gracefully and log before exiting.
-  // Without these handlers, Node.js exits with signal code 143/130 and no log.
-  for (const sig of ["SIGTERM", "SIGINT"] as const) {
-    process.on(sig, () => {
-      logger.warn({ signal: sig, pid: process.pid, ppid: process.ppid }, `${sig} received — shutting down`);
-      // Give pino a tick to flush the log line before exiting.
-      setImmediate(() => process.exit(0));
-    });
-  }
-
-  // Catch any unhandled exceptions/rejections and log them with a stack trace.
-  process.on("uncaughtException", (err) => {
-    logger.error({ err }, "uncaughtException — shutting down");
-    setImmediate(() => process.exit(1));
-  });
-
-  process.on("unhandledRejection", (reason) => {
-    logger.error({ reason }, "unhandledRejection — shutting down");
-    setImmediate(() => process.exit(1));
-  });
-
   void startServer().catch((err) => {
     logger.error({ err }, "Paperclip server failed to start");
     process.exit(1);
