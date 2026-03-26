@@ -253,7 +253,16 @@ else
     [ -z "$pkg_dir" ] && continue
     release_info "  Publishing $pkg_name@$pkg_version"
     cd "$REPO_ROOT/$pkg_dir"
-    pnpm publish --no-git-checks --tag "$DIST_TAG" --access public
+    if ! pnpm publish --no-git-checks --tag "$DIST_TAG" --access public; then
+      # npm sometimes returns a spurious 404 on first publish to a new scope or on
+      # registry propagation lag. Verify the version actually landed before failing.
+      release_warn "pnpm publish returned an error for $pkg_name@$pkg_version — verifying npm..."
+      if wait_for_npm_package_version "$pkg_name" "$pkg_version" 6 5; then
+        release_warn "  Version $pkg_name@$pkg_version confirmed on npm despite publish error. Continuing."
+      else
+        release_fail "Failed to publish $pkg_name@$pkg_version and version was not found on npm after retries."
+      fi
+    fi
   done <<< "$VERSIONED_PACKAGE_INFO"
   release_info "  ✓ Published all packages under dist-tag $DIST_TAG"
 fi
