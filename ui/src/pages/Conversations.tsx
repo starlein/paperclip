@@ -871,6 +871,8 @@ export function Conversations() {
           queryKey: queryKeys.conversations.list(selectedCompanyId!),
         });
         handleSelect(issue.id);
+      } catch {
+        pushToast({ title: "Failed to start conversation", tone: "error" });
       } finally {
         setCreating(false);
       }
