@@ -247,8 +247,12 @@ function ConversationList({
                           if (!renameCommitted.current && editDraft.trim()) {
                             renameCommitted.current = true;
                             const agentLabel = agent?.name ?? label;
-                            await onRename(issue.id, agentLabel, editDraft.trim());
-                            onSelect(issue.id);
+                            try {
+                              await onRename(issue.id, agentLabel, editDraft.trim());
+                              onSelect(issue.id);
+                            } catch {
+                              renameCommitted.current = false;
+                            }
                           }
                           setEditingId(null);
                         }
@@ -258,8 +262,12 @@ function ConversationList({
                         if (!renameCommitted.current && editDraft.trim()) {
                           renameCommitted.current = true;
                           const agentLabel = agent?.name ?? label;
-                          await onRename(issue.id, agentLabel, editDraft.trim());
-                          onSelect(issue.id);
+                          try {
+                            await onRename(issue.id, agentLabel, editDraft.trim());
+                            onSelect(issue.id);
+                          } catch {
+                            renameCommitted.current = false;
+                          }
                         }
                         setEditingId(null);
                       }}
@@ -693,6 +701,9 @@ function ConversationView({ issueId, companyId, agents, onClose }: ConversationV
           tone: "warn",
         });
       }
+    },
+    onError: () => {
+      pushToast({ title: "Failed to send message", tone: "error" });
     },
   });
 
@@ -1173,9 +1184,14 @@ export function Conversations() {
           onNew={handleNew}
           onArchive={handleArchive}
           onRename={async (issueId, agentLabel, topic) => {
-            await renameConversation(issueId, agentLabel, topic);
-            queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId) });
-            queryClient.invalidateQueries({ queryKey: queryKeys.conversations.list(selectedCompanyId!) });
+            try {
+              await renameConversation(issueId, agentLabel, topic);
+              queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId) });
+              queryClient.invalidateQueries({ queryKey: queryKeys.conversations.list(selectedCompanyId!) });
+            } catch {
+              pushToast({ title: "Failed to rename conversation", tone: "error" });
+              throw new Error("rename failed");
+            }
           }}
         />
       </div>

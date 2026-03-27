@@ -21,7 +21,7 @@ export function workspaceFileRoutes(db: Db) {
     relativePath: string,
   ): Promise<string | null> {
     const realCwd = await fs.realpath(cwd);
-    const resolved = path.resolve(cwd, relativePath);
+    const resolved = path.resolve(realCwd, relativePath);
     try {
       const realResolved = await fs.realpath(resolved);
       if (
@@ -33,7 +33,6 @@ export function workspaceFileRoutes(db: Db) {
       return realResolved;
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        // Path doesn't exist — check that the logical path is within cwd
         if (
           resolved !== realCwd &&
           !resolved.startsWith(realCwd + path.sep)
@@ -55,8 +54,7 @@ export function workspaceFileRoutes(db: Db) {
     relativePath: string,
   ): Promise<string | null> {
     const realCwd = await fs.realpath(cwd);
-    const resolved = path.resolve(cwd, relativePath);
-    // Logical check first
+    const resolved = path.resolve(realCwd, relativePath);
     if (
       resolved !== realCwd &&
       !resolved.startsWith(realCwd + path.sep)
