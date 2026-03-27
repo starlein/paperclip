@@ -1,4 +1,5 @@
 import { Router } from "express";
+import v8 from "node:v8";
 import type { Db } from "@paperclipai/db";
 import { and, count, eq, gt, inArray, isNull, sql } from "drizzle-orm";
 import { heartbeatRuns, instanceUserRoles, invites } from "@paperclipai/db";
@@ -86,6 +87,38 @@ export function healthRoutes(
         companyDeletionEnabled: opts.companyDeletionEnabled,
       },
       ...(devServer ? { devServer } : {}),
+    });
+  });
+
+  router.post("/heapdump", (_req, res) => {
+    const filename = v8.writeHeapSnapshot();
+    res.json({ path: filename });
+  });
+
+  router.get("/memory", (_req, res) => {
+    const mem = process.memoryUsage();
+    const heap = v8.getHeapStatistics();
+    const spaces = v8.getHeapSpaceStatistics();
+    res.json({
+      process: {
+        rss: Math.round(mem.rss / 1024 / 1024),
+        heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+        heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+        external: Math.round(mem.external / 1024 / 1024),
+        arrayBuffers: Math.round(mem.arrayBuffers / 1024 / 1024),
+      },
+      heap: {
+        totalMB: Math.round(heap.total_heap_size / 1024 / 1024),
+        usedMB: Math.round(heap.used_heap_size / 1024 / 1024),
+        limitMB: Math.round(heap.heap_size_limit / 1024 / 1024),
+        mallocedMB: Math.round(heap.malloced_memory / 1024 / 1024),
+      },
+      spaces: spaces.map((s) => ({
+        name: s.space_name,
+        sizeMB: Math.round(s.space_size / 1024 / 1024),
+        usedMB: Math.round(s.space_used_size / 1024 / 1024),
+      })),
+      uptimeSeconds: Math.round(process.uptime()),
     });
   });
 
