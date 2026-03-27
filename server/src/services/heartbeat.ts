@@ -158,7 +158,22 @@ const heartbeatRunListColumns = {
   exitCode: heartbeatRuns.exitCode,
   signal: heartbeatRuns.signal,
   usageJson: heartbeatRuns.usageJson,
-  resultJson: heartbeatRuns.resultJson,
+  // Extract only the small summary fields from resultJson in SQL so the
+  // multi-MB stdout/stderr payloads never leave PostgreSQL.  The full
+  // resultJson column can be 4+ MB per row; with 10k+ rows the list
+  // endpoint was loading ~400 MB into the Node.js heap every poll.
+  resultJson: sql<Record<string, unknown> | null>`
+    CASE WHEN ${heartbeatRuns.resultJson} IS NOT NULL THEN
+      jsonb_strip_nulls(jsonb_build_object(
+        'summary', left(${heartbeatRuns.resultJson}->>'summary', 500),
+        'result',  left(${heartbeatRuns.resultJson}->>'result',  500),
+        'message', left(${heartbeatRuns.resultJson}->>'message', 500),
+        'error',   left(${heartbeatRuns.resultJson}->>'error',   500),
+        'total_cost_usd', ${heartbeatRuns.resultJson}->'total_cost_usd',
+        'cost_usd',       ${heartbeatRuns.resultJson}->'cost_usd',
+        'costUsd',        ${heartbeatRuns.resultJson}->'costUsd'
+      ))
+    ELSE NULL END`.as("resultJson"),
   sessionIdBefore: heartbeatRuns.sessionIdBefore,
   sessionIdAfter: heartbeatRuns.sessionIdAfter,
   logStore: heartbeatRuns.logStore,
@@ -3695,11 +3710,10 @@ export function heartbeatService(db: Db) {
         )
         .orderBy(desc(heartbeatRuns.createdAt));
 
-      const rows = limit ? await query.limit(limit) : await query;
-      return rows.map((row) => ({
-        ...row,
-        resultJson: summarizeHeartbeatRunResultJson(row.resultJson),
-      }));
+      // resultJson is already summarized at the SQL level in
+      // heartbeatRunListColumns — no JS-level re-summarization needed.
+      const effectiveLimit = limit ?? 200;
+      return query.limit(effectiveLimit);
     },
 
     getRun,
