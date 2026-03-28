@@ -20,7 +20,7 @@ import {
   readPaperclipRuntimeSkillEntries,
   resolvePaperclipDesiredSkillNames,
 } from "@paperclipai/adapter-utils/server-utils";
-import { isOpenCodeUnknownSessionError, parseOpenCodeJsonl } from "./parse.js";
+import { isEditConcurrencyError, isOpenCodeUnknownSessionError, parseOpenCodeJsonl } from "./parse.js";
 import { ensureOpenCodeModelConfiguredAndAvailable } from "./models.js";
 import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
 
@@ -393,6 +393,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await onLog(
       "stdout",
       `[paperclip] OpenCode session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
+    );
+    const retry = await runAttempt(null);
+    return toResult(retry, true);
+  }
+
+  // Retry on Edit tool concurrency race: "Could not find oldString in file" occurs when a
+  // concurrent heartbeat modifies a shared file between the LLM's read and edit steps.
+  // A fresh session re-reads all files from current disk state, breaking the race.
+  if (initialFailed && isEditConcurrencyError(initial.proc.stdout, initial.rawStderr)) {
+    await onLog(
+      "stdout",
+      `[paperclip] Edit concurrency error detected (file modified between read and edit); retrying with a fresh session.\n`,
     );
     const retry = await runAttempt(null);
     return toResult(retry, true);
