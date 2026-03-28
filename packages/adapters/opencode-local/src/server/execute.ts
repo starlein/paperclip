@@ -401,13 +401,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // Retry on Edit tool concurrency race: "Could not find oldString in file" occurs when a
   // concurrent heartbeat modifies a shared file between the LLM's read and edit steps.
   // A fresh session re-reads all files from current disk state, breaking the race.
+  // We retry up to MAX_EDIT_RETRIES times with increasing delays + jitter because a single
+  // retry may also collide when multiple concurrent heartbeats edit the same shared file.
+  const MAX_EDIT_RETRIES = 3;
+  let lastAttempt = initial;
   if (initialFailed && isEditConcurrencyError(initial.proc.stdout, initial.rawStderr)) {
-    await onLog(
-      "stdout",
-      `[paperclip] Edit concurrency error detected (file modified between read and edit); retrying with a fresh session.\n`,
-    );
-    const retry = await runAttempt(null);
-    return toResult(retry, true);
+    for (let i = 1; i <= MAX_EDIT_RETRIES; i++) {
+      const delayMs = Math.floor(500 * i + Math.random() * 1000);
+      await onLog(
+        "stdout",
+        `[paperclip] Edit concurrency error detected (retry ${i}/${MAX_EDIT_RETRIES}); waiting ${delayMs}ms then retrying with a fresh session.\n`,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      lastAttempt = await runAttempt(null);
+      const retryFailed =
+        !lastAttempt.proc.timedOut &&
+        ((lastAttempt.proc.exitCode ?? 0) !== 0 || Boolean(lastAttempt.parsed.errorMessage));
+      if (!retryFailed || !isEditConcurrencyError(lastAttempt.proc.stdout, lastAttempt.rawStderr)) {
+        break; // succeeded or hit a different error — stop retrying
+      }
+    }
+    return toResult(lastAttempt, true);
   }
 
   return toResult(initial);
