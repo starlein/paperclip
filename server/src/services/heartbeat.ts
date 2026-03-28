@@ -1952,6 +1952,16 @@ export function heartbeatService(db: Db) {
   }
 
   async function executeRun(runId: string) {
+    // Global concurrency gate — check BEFORE claiming so deferred runs stay
+    // in "queued" status rather than leaking to "running" with no process.
+    if (activeRunExecutions.size >= HEARTBEAT_GLOBAL_MAX_CONCURRENT_RUNS) {
+      logger.info(
+        { runId, active: activeRunExecutions.size, limit: HEARTBEAT_GLOBAL_MAX_CONCURRENT_RUNS },
+        "global concurrent run limit reached — deferring run",
+      );
+      return;
+    }
+
     let run = await getRun(runId);
     if (!run) return;
     if (run.status !== "queued" && run.status !== "running") return;
@@ -1963,17 +1973,6 @@ export function heartbeatService(db: Db) {
         return;
       }
       run = claimed;
-    }
-
-    // Global concurrency gate — prevents OOM when many agents heartbeat
-    // simultaneously.  Excess runs stay queued and are picked up once a
-    // slot opens (the queue promotion in finalizeRun handles this).
-    if (activeRunExecutions.size >= HEARTBEAT_GLOBAL_MAX_CONCURRENT_RUNS) {
-      logger.info(
-        { runId: run.id, active: activeRunExecutions.size, limit: HEARTBEAT_GLOBAL_MAX_CONCURRENT_RUNS },
-        "global concurrent run limit reached — deferring run",
-      );
-      return;
     }
 
     activeRunExecutions.add(run.id);

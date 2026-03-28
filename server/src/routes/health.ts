@@ -7,6 +7,7 @@ import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import { readPersistedDevServerStatus, toDevServerHealthStatus } from "../dev-server-status.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { serverVersion } from "../version.js";
+import { assertBoard } from "./authz.js";
 
 export function healthRoutes(
   db?: Db,
@@ -90,12 +91,14 @@ export function healthRoutes(
     });
   });
 
-  router.post("/heapdump", (_req, res) => {
+  router.post("/heapdump", (req, res) => {
+    assertBoard(req);
     const filename = v8.writeHeapSnapshot();
     res.json({ path: filename });
   });
 
-  router.get("/memory", (_req, res) => {
+  router.get("/memory", (req, res) => {
+    assertBoard(req);
     const mem = process.memoryUsage();
     const heap = v8.getHeapStatistics();
     const spaces = v8.getHeapSpaceStatistics();
