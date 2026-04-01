@@ -74,6 +74,7 @@ If you change schema/API behavior, update all impacted layers:
 - Approval gates for governed actions
 - Budget hard-stop auto-pause behavior
 - Activity logging for mutating actions
+- QA via direct assignment (not @-mentions in comments)
 
 4. Do not replace strategic docs wholesale unless asked.
 Prefer additive updates. Keep `doc/SPEC.md` and `doc/SPEC-implementation.md` aligned.
