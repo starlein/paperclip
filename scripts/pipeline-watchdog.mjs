@@ -8,7 +8,7 @@ const DEFAULT_MIN_ACTIONABLE_AGE_SECONDS = 90;
 
 export function isDispatchableAgent(agent) {
   if (!agent) return false;
-  return !["paused", "error"].includes(agent.status);
+  return !["paused", "error", "terminated", "pending_approval"].includes(agent.status);
 }
 
 export function classifyIssueDispatch(issue, agent, { minActionableAgeSeconds = DEFAULT_MIN_ACTIONABLE_AGE_SECONDS, now = new Date() } = {}) {
@@ -30,10 +30,11 @@ export function classifyIssueDispatch(issue, agent, { minActionableAgeSeconds = 
 }
 
 export function detectStrandedAssignments(issues, agentById, options = {}) {
+  const resolvedOptions = { ...options, now: options.now ?? new Date() };
   return issues
     .map((issue) => {
       const agent = issue.assigneeAgentId ? agentById.get(issue.assigneeAgentId) ?? null : null;
-      const dispatchState = classifyIssueDispatch(issue, agent, options);
+      const dispatchState = classifyIssueDispatch(issue, agent, resolvedOptions);
       return {
         ...issue,
         assignee: agent?.name ?? null,

@@ -7,6 +7,7 @@ const {
   classifyIssueDispatch,
   detectStrandedAssignments,
   detectMiscategorizedRtaaTasks,
+  summarizeByStatus,
   formatWatchdogReport,
 } = await import("../../../scripts/pipeline-watchdog.mjs");
 
@@ -30,9 +31,26 @@ describe("pipeline watchdog", () => {
     pauseReason: "manual",
   };
 
-  it("treats idle agents as dispatchable and paused agents as non-dispatchable", () => {
+  const terminatedAgent = {
+    id: "agent-terminated",
+    name: "Terminated",
+    status: "terminated",
+    pauseReason: null,
+  };
+  const pendingApprovalAgent = {
+    id: "agent-pending",
+    name: "PendingApproval",
+    status: "pending_approval",
+    pauseReason: null,
+  };
+
+  it("treats idle agents as dispatchable and paused/terminated/pending_approval as non-dispatchable", () => {
     expect(isDispatchableAgent(idleAgent)).toBe(true);
+    expect(isDispatchableAgent(runningAgent)).toBe(true);
     expect(isDispatchableAgent(pausedAgent)).toBe(false);
+    expect(isDispatchableAgent(terminatedAgent)).toBe(false);
+    expect(isDispatchableAgent(pendingApprovalAgent)).toBe(false);
+    expect(isDispatchableAgent({ id: "err", name: "Err", status: "error", pauseReason: null })).toBe(false);
     expect(isDispatchableAgent(null)).toBe(false);
   });
 
@@ -52,6 +70,90 @@ describe("pipeline watchdog", () => {
     expect(classifyIssueDispatch(issue, pausedAgent, { now: NOW })).toBe("non-dispatchable-agent");
     expect(classifyIssueDispatch({ ...issue, status: "blocked" }, idleAgent, { now: NOW })).toBe("blocked-awaiting-unblock");
     expect(classifyIssueDispatch({ ...issue, assigneeAgentId: null, assigneeUserId: "user-1", status: "in_review" }, null, { now: NOW })).toBe("assigned-user-review");
+  });
+
+  it("classifies dispatched issues (with run IDs)", () => {
+    const issue = {
+      identifier: "DLD-10",
+      status: "in_progress",
+      assigneeAgentId: idleAgent.id,
+      assigneeUserId: null,
+      executionRunId: "run-123",
+      checkoutRunId: null,
+      updatedAt: "2026-04-01T00:00:00Z",
+    };
+    expect(classifyIssueDispatch(issue, idleAgent, { now: NOW })).toBe("dispatched");
+    expect(classifyIssueDispatch({ ...issue, executionRunId: null, checkoutRunId: "run-456" }, idleAgent, { now: NOW })).toBe("dispatched");
+  });
+
+  it("classifies unassigned and blocked-unassigned issues", () => {
+    const base = {
+      identifier: "DLD-11",
+      assigneeAgentId: null,
+      assigneeUserId: null,
+      executionRunId: null,
+      checkoutRunId: null,
+      updatedAt: "2026-04-01T00:00:00Z",
+    };
+    expect(classifyIssueDispatch({ ...base, status: "todo" }, null, { now: NOW })).toBe("unassigned");
+    expect(classifyIssueDispatch({ ...base, status: "blocked" }, null, { now: NOW })).toBe("blocked-unassigned");
+  });
+
+  it("classifies unknown-agent when agent not in map", () => {
+    const issue = {
+      identifier: "DLD-12",
+      status: "in_progress",
+      assigneeAgentId: "nonexistent-agent",
+      assigneeUserId: null,
+      executionRunId: null,
+      checkoutRunId: null,
+      updatedAt: "2026-04-01T00:00:00Z",
+    };
+    expect(classifyIssueDispatch(issue, null, { now: NOW })).toBe("unknown-agent");
+  });
+
+  it("classifies assigned-user for non-review human assignment", () => {
+    const issue = {
+      identifier: "DLD-13",
+      status: "in_progress",
+      assigneeAgentId: null,
+      assigneeUserId: "user-1",
+      executionRunId: null,
+      checkoutRunId: null,
+      updatedAt: "2026-04-01T00:00:00Z",
+    };
+    expect(classifyIssueDispatch(issue, null, { now: NOW })).toBe("assigned-user");
+  });
+
+  it("classifies awaiting-review-pickup for in_review agent issues", () => {
+    const issue = {
+      identifier: "DLD-14",
+      status: "in_review",
+      assigneeAgentId: idleAgent.id,
+      assigneeUserId: null,
+      executionRunId: null,
+      checkoutRunId: null,
+      updatedAt: "2026-04-01T00:00:00Z",
+    };
+    expect(classifyIssueDispatch(issue, idleAgent, { now: NOW })).toBe("awaiting-review-pickup");
+  });
+
+  it("summarizeByStatus counts correctly", () => {
+    const issues = [
+      { status: "in_progress" },
+      { status: "in_progress" },
+      { status: "todo" },
+      { status: "blocked" },
+    ];
+    expect(summarizeByStatus(issues)).toEqual({ in_progress: 2, todo: 1, blocked: 1 });
+    expect(summarizeByStatus([])).toEqual({});
+  });
+
+  it("detectMiscategorizedRtaaTasks returns empty when no project ID", () => {
+    const issues = [{ parentId: "root", projectId: null }];
+    expect(detectMiscategorizedRtaaTasks(issues, { rtaaProjectId: null, rootIssueIds: ["root"] })).toEqual([]);
+    expect(detectMiscategorizedRtaaTasks(issues, { rtaaProjectId: "proj", rootIssueIds: [] })).toEqual([]);
+    expect(detectMiscategorizedRtaaTasks(issues)).toEqual([]);
   });
 
   it("finds stranded assignments and miscategorized RTAA tasks", () => {

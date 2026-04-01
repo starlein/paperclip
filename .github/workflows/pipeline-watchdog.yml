@@ -24,19 +24,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
 
       - name: Run observe-only watchdog
         shell: bash
@@ -45,6 +36,7 @@ jobs:
           node scripts/pipeline-watchdog.mjs | tee pipeline-watchdog-report.md
 
       - name: Upload watchdog report artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-watchdog-report
