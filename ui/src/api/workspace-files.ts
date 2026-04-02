@@ -30,7 +30,24 @@ export const workspaceFilesApi = {
     ),
 
   list: (companyId: string, workspaceId: string, dirPath = ".", showHidden = false) =>
-    api.get<{ files: WorkspaceFileEntry[] }>(
+    api.get<{ files: WorkspaceFileEntry[]; truncated?: boolean }>(
       `/companies/${companyId}/workspace-files/list?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(dirPath)}&showHidden=${showHidden}`,
+    ),
+
+  move: (companyId: string, workspaceId: string, from: string, to: string) =>
+    api.post<{ ok: true }>(
+      `/companies/${companyId}/workspace-files/move`,
+      { workspaceId, from, to, copy: false },
+    ),
+
+  copy: (companyId: string, workspaceId: string, from: string, to: string) =>
+    api.post<{ ok: true }>(
+      `/companies/${companyId}/workspace-files/move`,
+      { workspaceId, from, to, copy: true },
+    ),
+
+  remove: (companyId: string, workspaceId: string, filePath: string, recursive = false) =>
+    api.delete<{ ok: true }>(
+      `/companies/${companyId}/workspace-files?workspaceId=${encodeURIComponent(workspaceId)}&path=${encodeURIComponent(filePath)}${recursive ? "&recursive=true" : ""}`,
     ),
 };

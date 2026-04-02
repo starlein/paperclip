@@ -16,6 +16,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   Loader2,
   Save,
   X,
@@ -24,6 +29,9 @@ import {
   ChevronLeft,
   FolderOpen,
   RefreshCw,
+  Copy,
+  ArrowRightLeft,
+  Trash2,
 } from "lucide-react";
 import { cn } from "../lib/utils";
 
@@ -38,6 +46,7 @@ interface FileBrowserProps {
   onShowHiddenChange: (show: boolean) => void;
   onSelectFile: (filePath: string) => void;
   onClose: () => void;
+  onError?: (message: string) => void;
 }
 
 function FileBrowser({
@@ -49,7 +58,15 @@ function FileBrowser({
   onShowHiddenChange: setShowHidden,
   onSelectFile,
   onClose,
+  onError,
 }: FileBrowserProps) {
+  const queryClient = useQueryClient();
+  const [promptAction, setPromptAction] = useState<{
+    kind: "move" | "copy";
+    entry: WorkspaceFileEntry;
+  } | null>(null);
+  const [promptValue, setPromptValue] = useState("");
+  const [actionBusy, setActionBusy] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: [...queryKeys.workspaceFiles.list(workspaceId, currentDir), showHidden],
@@ -58,6 +75,12 @@ function FileBrowser({
   });
 
   const files = data?.files ?? [];
+
+  const invalidateDir = useCallback(() => {
+    queryClient.invalidateQueries({
+      queryKey: queryKeys.workspaceFiles.list(workspaceId, currentDir),
+    });
+  }, [queryClient, workspaceId, currentDir]);
 
   const handleNavigate = useCallback(
     (entry: WorkspaceFileEntry) => {
@@ -77,6 +100,43 @@ function FileBrowser({
     setCurrentDir(parts.length === 0 ? "." : parts.join("/"));
   }, [currentDir, setCurrentDir]);
 
+  const handleDelete = useCallback(
+    async (entry: WorkspaceFileEntry) => {
+      const label = entry.isDirectory ? `Delete folder "${entry.name}" and all its contents` : `Delete "${entry.name}"`;
+      if (!window.confirm(`${label}? This cannot be undone.`)) return;
+      setActionBusy(true);
+      try {
+        await workspaceFilesApi.remove(companyId, workspaceId, entry.path, entry.isDirectory);
+        invalidateDir();
+      } catch {
+        onError?.("Failed to delete.");
+      } finally {
+        setActionBusy(false);
+      }
+    },
+    [companyId, workspaceId, invalidateDir, onError],
+  );
+
+  const handleMoveOrCopy = useCallback(async () => {
+    if (!promptAction || !promptValue.trim()) return;
+    setActionBusy(true);
+    try {
+      const dest = promptValue.trim();
+      if (promptAction.kind === "copy") {
+        await workspaceFilesApi.copy(companyId, workspaceId, promptAction.entry.path, dest);
+      } else {
+        await workspaceFilesApi.move(companyId, workspaceId, promptAction.entry.path, dest);
+      }
+      invalidateDir();
+      setPromptAction(null);
+      setPromptValue("");
+    } catch {
+      onError?.(`Failed to ${promptAction.kind}.`);
+    } finally {
+      setActionBusy(false);
+    }
+  }, [companyId, workspaceId, promptAction, promptValue, invalidateDir, onError]);
+
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col">
@@ -89,6 +149,30 @@ function FileBrowser({
             Select a file to view or edit.
           </DialogDescription>
         </DialogHeader>
+
+        {/* Move/copy destination prompt */}
+        {promptAction && (
+          <div className="flex items-center gap-2 px-1 py-2 border-b border-border">
+            <span className="text-xs text-muted-foreground shrink-0 capitalize">{promptAction.kind}:</span>
+            <input
+              autoFocus
+              className="font-mono text-xs bg-transparent border-b border-foreground/30 focus:border-foreground focus:outline-none flex-1 min-w-0"
+              value={promptValue}
+              onChange={(e) => setPromptValue(e.target.value)}
+              placeholder="Destination path..."
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); handleMoveOrCopy(); }
+                if (e.key === "Escape") { setPromptAction(null); setPromptValue(""); }
+              }}
+            />
+            <Button variant="outline" size="sm" className="h-6 text-xs px-2" onClick={handleMoveOrCopy} disabled={actionBusy || !promptValue.trim()}>
+              {actionBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : "Go"}
+            </Button>
+            <Button variant="ghost" size="sm" className="h-6 text-xs px-2" onClick={() => { setPromptAction(null); setPromptValue(""); }}>
+              Cancel
+            </Button>
+          </div>
+        )}
 
         {/* Current path + back button */}
         <div className="flex items-center gap-2 text-xs text-muted-foreground border-b border-border pb-2">
@@ -144,19 +228,64 @@ function FileBrowser({
           ) : (
             <div className="flex flex-col">
               {files.map((entry) => (
-                <button
+                <div
                   key={entry.path}
-                  type="button"
-                  onClick={() => handleNavigate(entry)}
-                  className="flex items-center gap-2.5 px-3 py-2 text-left text-sm hover:bg-accent/50 transition-colors rounded-sm"
+                  className="group flex items-center gap-2.5 px-3 py-2 text-left text-sm hover:bg-accent/50 transition-colors rounded-sm"
                 >
-                  {entry.isDirectory ? (
-                    <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
-                  ) : (
-                    <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
-                  )}
-                  <span className="truncate">{entry.name}</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => handleNavigate(entry)}
+                    className="flex items-center gap-2.5 min-w-0 flex-1"
+                  >
+                    {entry.isDirectory ? (
+                      <Folder className="h-4 w-4 text-muted-foreground shrink-0" />
+                    ) : (
+                      <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+                    )}
+                    <span className="truncate">{entry.name}</span>
+                  </button>
+                  <span className="flex items-center gap-0.5 shrink-0">
+                    <Tooltip delayDuration={300}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                          onClick={(e) => { e.stopPropagation(); setPromptAction({ kind: "move", entry }); setPromptValue(entry.path); }}
+                          disabled={actionBusy}
+                        >
+                          <ArrowRightLeft className="h-3 w-3" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-xs">Move</TooltipContent>
+                    </Tooltip>
+                    <Tooltip delayDuration={300}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+                          onClick={(e) => { e.stopPropagation(); setPromptAction({ kind: "copy", entry }); setPromptValue(entry.path); }}
+                          disabled={actionBusy}
+                        >
+                          <Copy className="h-3 w-3" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-xs">Copy</TooltipContent>
+                    </Tooltip>
+                    <Tooltip delayDuration={300}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors"
+                          onClick={(e) => { e.stopPropagation(); handleDelete(entry); }}
+                          disabled={actionBusy}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom" className="text-xs">Delete</TooltipContent>
+                    </Tooltip>
+                  </span>
+                </div>
               ))}
             </div>
           )}
@@ -377,6 +506,7 @@ interface WorkspaceFileBrowserProps {
   workspaceId: string;
   onClose: () => void;
   onSaved?: () => void;
+  onError?: (message: string) => void;
   initialFile?: string | null;
   initialDir?: string | null;
 }
@@ -386,6 +516,7 @@ export function WorkspaceFileBrowser({
   workspaceId,
   onClose,
   onSaved,
+  onError,
   initialFile,
   initialDir,
 }: WorkspaceFileBrowserProps) {
@@ -428,6 +559,7 @@ export function WorkspaceFileBrowser({
       onShowHiddenChange={setBrowserShowHidden}
       onSelectFile={setSelectedFile}
       onClose={onClose}
+      onError={onError}
     />
   );
 }

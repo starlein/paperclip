@@ -627,8 +627,8 @@ export function CommentThread({
               }}
             />
           )}
-          <Button size="sm" disabled={!canSubmit} onClick={handleSubmit}>
-            {submitting ? "Posting..." : (submitLabel ?? "Comment")}
+          <Button size="sm" className="min-w-[5rem]" disabled={!canSubmit} onClick={handleSubmit}>
+            {submitting ? "Sending..." : (submitLabel ?? "Comment")}
           </Button>
         </div>
       </div>

@@ -292,5 +292,152 @@ export function workspaceFileRoutes(db: Db) {
     },
   );
 
+  // ── Move or copy a file ────────────────────────────────────────────────────
+
+  router.post(
+    "/companies/:companyId/workspace-files/move",
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+
+      const { workspaceId, from, to, copy } = req.body ?? {};
+
+      if (!workspaceId || !from || !to) {
+        res.status(422).json({ error: "workspaceId, from, and to are required" });
+        return;
+      }
+      if (typeof from !== "string" || typeof to !== "string") {
+        res.status(422).json({ error: "from and to must be strings" });
+        return;
+      }
+
+      const workspace = await lookupWorkspace(companyId, workspaceId);
+      if (!workspace || !workspace.cwd) {
+        res.status(404).json({ error: "Workspace not found or has no local directory" });
+        return;
+      }
+
+      const absSrc = await resolveWithinWorkspace(workspace.cwd, from);
+      if (!absSrc) {
+        res.status(403).json({ error: "Source path is outside workspace directory" });
+        return;
+      }
+
+      const absDest = await resolveWithinWorkspaceForWrite(workspace.cwd, to);
+      if (!absDest) {
+        res.status(403).json({ error: "Destination path is outside workspace directory" });
+        return;
+      }
+
+      // Reject if destination already exists (no silent overwrite)
+      try {
+        await fs.access(absDest);
+        res.status(409).json({ error: "Destination already exists" });
+        return;
+      } catch {
+        // ENOENT is expected — destination doesn't exist yet
+      }
+
+      try {
+        await fs.mkdir(path.dirname(absDest), { recursive: true });
+        if (copy) {
+          await fs.cp(absSrc, absDest, { recursive: true });
+        } else {
+          try {
+            await fs.rename(absSrc, absDest);
+          } catch (err: unknown) {
+            if (errCode(err) === "EXDEV") {
+              await fs.cp(absSrc, absDest, { recursive: true });
+              await fs.rm(absSrc, { recursive: true });
+            } else {
+              throw err;
+            }
+          }
+        }
+        res.json({ ok: true });
+      } catch (err: unknown) {
+        const code = errCode(err);
+        if (code === "ENOENT") {
+          res.status(404).json({ error: "Source file not found" });
+        } else if (code === "EACCES") {
+          res.status(403).json({ error: "Permission denied" });
+        } else {
+          res.status(500).json({ error: `Failed to ${copy ? "copy" : "move"} file` });
+        }
+      }
+    },
+  );
+
+  // ── Delete a file or directory ────────────────────────────────────────────
+
+  router.delete(
+    "/companies/:companyId/workspace-files",
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+
+      const workspaceId = req.query.workspaceId as string | undefined;
+      const filePath = req.query.path as string | undefined;
+      const recursive = String(req.query.recursive).toLowerCase() === "true";
+
+      if (!workspaceId || !filePath) {
+        res.status(422).json({ error: "workspaceId and path are required" });
+        return;
+      }
+
+      const workspace = await lookupWorkspace(companyId, workspaceId);
+      if (!workspace || !workspace.cwd) {
+        res.status(404).json({ error: "Workspace not found or has no local directory" });
+        return;
+      }
+
+      const absolutePath = await resolveWithinWorkspace(workspace.cwd, filePath);
+      if (!absolutePath) {
+        res.status(403).json({ error: "Path is outside workspace directory" });
+        return;
+      }
+
+      let realCwd: string;
+      try {
+        realCwd = await fs.realpath(workspace.cwd);
+      } catch {
+        res.status(404).json({ error: "Workspace directory not found" });
+        return;
+      }
+      if (absolutePath === realCwd) {
+        res.status(403).json({ error: "Cannot delete the workspace root" });
+        return;
+      }
+
+      // Require explicit recursive flag for directories
+      try {
+        const stat = await fs.stat(absolutePath);
+        if (stat.isDirectory() && !recursive) {
+          res.status(422).json({ error: "Path is a directory — pass recursive=true to delete" });
+          return;
+        }
+      } catch (err: unknown) {
+        if (errCode(err) === "ENOENT") {
+          res.status(404).json({ error: "File not found" });
+          return;
+        }
+      }
+
+      try {
+        await fs.rm(absolutePath, { recursive });
+        res.json({ ok: true });
+      } catch (err: unknown) {
+        const code = errCode(err);
+        if (code === "ENOENT") {
+          res.status(404).json({ error: "File not found" });
+        } else if (code === "EACCES") {
+          res.status(403).json({ error: "Permission denied" });
+        } else {
+          res.status(500).json({ error: "Failed to delete" });
+        }
+      }
+    },
+  );
+
   return router;
 }

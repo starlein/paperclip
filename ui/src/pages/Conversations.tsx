@@ -1067,6 +1067,9 @@ function ConversationView({ issueId, companyId, agents, onClose, sidebarCollapse
           onSaved={() => {
             pushToast({ title: "File saved", tone: "success" });
           }}
+          onError={(msg) => {
+            pushToast({ title: msg, tone: "error" });
+          }}
         />
       )}
 
@@ -1080,6 +1083,9 @@ function ConversationView({ issueId, companyId, agents, onClose, sidebarCollapse
           onSaved={() => {
             pushToast({ title: "File saved", tone: "success" });
           }}
+          onError={(msg) => {
+            pushToast({ title: msg, tone: "error" });
+          }}
         />
       )}
 
@@ -1092,6 +1098,9 @@ function ConversationView({ issueId, companyId, agents, onClose, sidebarCollapse
           onClose={() => setBrowsingDir(null)}
           onSaved={() => {
             pushToast({ title: "File saved", tone: "success" });
+          }}
+          onError={(msg) => {
+            pushToast({ title: msg, tone: "error" });
           }}
         />
       )}
