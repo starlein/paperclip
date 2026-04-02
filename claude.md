@@ -361,15 +361,48 @@ The delivery gate also verifies at gate time: `→ done` requires the PR work pr
 
 Board users bypass all URL validation.
 
+### Assignment policy gate (`assertAgentAssignmentPolicy`)
+
+| Check | Enforcement |
+|---|---|
+| Ownership | Agent must be current assignee (control-plane roles bypass) |
+| Dispatchability | Target agent must not be paused/error/terminated/pending_approval |
+| Role matrix | `engineer→[qa]`, `devops→[qa]`, `qa→[engineer,devops]`, control-plane→any |
+| Status consistency | Engineer→QA expects `in_review`; QA→engineer expects `in_progress` (logged, not blocked) |
+| Same-role lateral | Blocked for non-control-plane actors |
+
+**Gate ordering in PATCH `/issues/:id`:**
+1. `assertCompanyAccess()` — company membership
+2. Assignment detection (`assigneeWillChange`)
+3. `assertCanAssignTasks()` — coarse "can this actor attempt assignment at all?"
+4. `assertAgentAssignmentPolicy()` — contextual "is this specific assignment permitted?"
+5. `assertAgentRunCheckoutOwnership()` — checkout lock
+6. `assertAgentTransition()` — status state machine
+7. `assertDeliveryGate()` — work product requirements
+8. `assertQAGate()` — peer QA approval
+
+**Escape hatches:**
+- Board users bypass all agent-only gates
+- Control-plane roles (CEO, CTO) bypass ownership and role matrix, but NOT dispatchability
+- Agent returning issue to creator (agent→user, not agent→agent) bypasses assignment gates — this is safe because it only fires when `assigneeAgentId=null` and `assigneeUserId=createdByUserId`
+
+**Activity log actions:**
+- `issue.assignment_policy_blocked` — policy rejection with gate name and reason
+
+**Server-only logging:**
+- Status-role handoff inconsistencies logged at `warn` level via server logger (not issue activity feed)
+
 ### Key files
 
-- `server/src/routes/issues.ts` — `assertAgentTransition()`, `assertDeliveryGate()`, `assertQAGate()`, URL patterns, creation-time validation
+- `server/src/routes/issues.ts` — `assertAgentTransition()`, `assertDeliveryGate()`, `assertQAGate()`, `assertAgentAssignmentPolicy()`, URL patterns, creation-time validation
+- `server/src/utils/agent-dispatchability.ts` — `isDispatchableAgent()` shared predicate
 - `server/src/__tests__/transition-gate.test.ts` — 12 transition gate tests
 - `server/src/__tests__/delivery-gate.test.ts` — 10 delivery gate tests (including URL verification)
 - `server/src/__tests__/qa-gate.test.ts` — 13 QA gate tests (including 3 self-QA prevention cases)
+- `server/src/__tests__/assignment-policy-gate.test.ts` — 16 assignment policy tests
 - `server/src/__tests__/work-product-verification.test.ts` — 11 work product URL verification tests
 - `server/src/services/workspace-runtime.ts` — workspace ready comment
-- `server/src/onboarding-assets/default/AGENTS.md` — Code Delivery Protocol + QA Approval Protocol
+- `server/src/onboarding-assets/default/AGENTS.md` — Code Delivery Protocol + QA Approval Protocol + Assignment Policy
 - `server/src/onboarding-assets/ceo/HEARTBEAT.md` — CEO delivery/QA enforcement guidance
 - `AGENTS.md` — Definition of Done items 5–6
 - `doc/plans/paperclip-enforceable-system-design-v3.md` — Architecture decision record

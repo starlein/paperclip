@@ -36,6 +36,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
+import { isDispatchableAgent } from "../utils/agent-dispatchability.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 
@@ -215,6 +216,106 @@ export function issueRoutes(db: Db, storage: StorageService) {
         reason: "Cannot mark done without QA approval. A comment containing 'QA: PASS' from a different reviewer is required. The assigned agent cannot approve their own work.",
       };
     }
+    return null;
+  }
+
+  // ---------- Assignment policy gate ----------
+  // Control-plane roles bypass ownership and role-matrix restrictions.
+  // They are still subject to target existence, company, and dispatchability checks.
+  const CONTROL_PLANE_ROLES = new Set(["ceo", "cto"]);
+
+  // Narrow handoff matrix: only the minimum needed to solve real workflow handoffs.
+  // Widen as new use cases emerge.
+  const ALLOWED_HANDOFFS: Record<string, readonly string[]> = {
+    engineer: ["qa"],
+    devops: ["qa"],
+    qa: ["engineer", "devops"],
+  };
+
+  // Lightweight status-role consistency: expected status for role handoff pairs.
+  // Mismatches are logged but not blocked (the transition gate already prevents
+  // truly illegal status moves).
+  const EXPECTED_HANDOFF_STATUS: Record<string, string> = {
+    "engineer->qa": "in_review",
+    "devops->qa": "in_review",
+    "qa->engineer": "in_progress",
+    "qa->devops": "in_progress",
+  };
+
+  async function assertAgentAssignmentPolicy(
+    req: Request,
+    issue: { id: string; companyId: string; assigneeAgentId: string | null },
+    targetAssigneeAgentId: string,
+    targetStatus: string | undefined,
+  ): Promise<{ gate: string; reason: string } | null> {
+    // Board users bypass entirely
+    if (req.actor.type !== "agent") return null;
+
+    const actorAgentId = req.actor.agentId;
+    if (!actorAgentId) return { gate: "assignment_policy_error", reason: "Agent authentication required." };
+
+    const [actorAgent, targetAgent] = await Promise.all([
+      agentsSvc.getById(actorAgentId),
+      agentsSvc.getById(targetAssigneeAgentId),
+    ]);
+
+    // Target must exist and belong to the same company
+    if (!targetAgent || targetAgent.companyId !== issue.companyId) {
+      return { gate: "assignment_target_not_found", reason: "Target agent not found in this company." };
+    }
+
+    const isControlPlane = actorAgent && CONTROL_PLANE_ROLES.has(actorAgent.role);
+
+    // 1. Ownership check (control-plane bypasses)
+    if (!isControlPlane) {
+      const ownsIssue = issue.assigneeAgentId === actorAgentId;
+      if (!ownsIssue) {
+        return {
+          gate: "assignment_ownership_required",
+          reason: "Agents can only reassign issues they currently own. Control-plane roles (CEO, CTO) can reassign any issue.",
+        };
+      }
+    }
+
+    // 2. Dispatchability check (applies even to control-plane — don't assign to broken agents)
+    if (!isDispatchableAgent(targetAgent)) {
+      return {
+        gate: "assignment_target_not_dispatchable",
+        reason: `Cannot assign to agent '${targetAgent.name}' in '${targetAgent.status}' state. Target must be active, idle, or running.`,
+      };
+    }
+
+    // 3. Role handoff matrix (control-plane bypasses)
+    if (!isControlPlane && actorAgent) {
+      const allowed = ALLOWED_HANDOFFS[actorAgent.role];
+      if (!allowed || !allowed.includes(targetAgent.role)) {
+        return {
+          gate: "assignment_role_not_allowed",
+          reason: `Role '${actorAgent.role}' cannot hand off to role '${targetAgent.role}'. Allowed targets: ${(allowed ?? []).join(", ") || "none (use control-plane actor)"}.`,
+        };
+      }
+    }
+
+    // 4. Status-role consistency advisory (server log only — not issue activity feed)
+    if (actorAgent && targetStatus) {
+      const handoffKey = `${actorAgent.role}->${targetAgent.role}`;
+      const expectedStatus = EXPECTED_HANDOFF_STATUS[handoffKey];
+      if (expectedStatus && targetStatus !== expectedStatus) {
+        logger.warn(
+          {
+            issueId: issue.id,
+            companyId: issue.companyId,
+            handoff: handoffKey,
+            expectedStatus,
+            actualStatus: targetStatus,
+            actorAgentId: actorAgent.id,
+            targetAgentId: targetAgent.id,
+          },
+          "Assignment handoff status inconsistency (advisory — transition gate validates legality)",
+        );
+      }
+    }
+
     return null;
   }
 
@@ -984,7 +1085,40 @@ export function issueRoutes(db: Db, storage: StorageService) {
 
     if (assigneeWillChange) {
       if (!isAgentReturningIssueToCreator) {
+        // Coarse permission check: is this actor allowed to attempt assignment at all?
         await assertCanAssignTasks(req, existing.companyId);
+
+        // Contextual policy gate: is this specific assignment permitted?
+        if (typeof req.body.assigneeAgentId === "string") {
+          const policyResult = await assertAgentAssignmentPolicy(
+            req,
+            existing,
+            req.body.assigneeAgentId,
+            req.body.status,
+          );
+          if (policyResult) {
+            const actor = getActorInfo(req);
+            await logActivity(db, {
+              companyId: existing.companyId,
+              actorType: actor.actorType,
+              actorId: actor.actorId,
+              agentId: actor.agentId,
+              runId: actor.runId,
+              action: "issue.assignment_policy_blocked",
+              entityType: "issue",
+              entityId: existing.id,
+              details: {
+                gate: policyResult.gate,
+                reason: policyResult.reason,
+                targetAssigneeAgentId: req.body.assigneeAgentId,
+                currentAssigneeAgentId: existing.assigneeAgentId,
+                targetStatus: req.body.status ?? existing.status,
+              },
+            });
+            res.status(422).json({ error: policyResult.reason, gate: policyResult.gate });
+            return;
+          }
+        }
       }
     }
     if (!(await assertAgentRunCheckoutOwnership(req, res, existing))) return;

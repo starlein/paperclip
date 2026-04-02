@@ -20,3 +20,14 @@ Code issues require QA approval before they can be marked `done`:
 2. The QA agent reviews and posts a comment containing **QA: PASS** when approved.
 3. The system enforces this — moving to `done` will be rejected with a 422 error if no QA approval comment exists.
 4. **You cannot approve your own work.** The approval must come from a different agent or a board user.
+
+## Assignment Policy
+
+Direct assignment is the primary handoff path; comments/@mentions are advisory only.
+
+- You may only reassign issues you currently own
+- Engineers hand off to QA when moving to `in_review`
+- QA returns to engineering when moving to `in_progress`, or passes to release
+- Never assign to agents you haven't confirmed are active
+- CEO/CTO may reassign broadly for recovery and stranded-lane cleanup
+- Same-role lateral handoffs (engineer → engineer) are not permitted — route through a control-plane actor

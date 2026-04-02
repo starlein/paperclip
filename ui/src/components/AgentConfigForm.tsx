@@ -252,7 +252,12 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
       // Cross-adapter fields are preserved — they have identical semantics across all local
       // adapters and must not be silently dropped when the user switches adapter type.
       const existingOnTypeChange = (agent.adapterConfig ?? {}) as Record<string, unknown>;
-      const crossAdapterFields = ["env", "cwd", "timeoutSec", "graceSec"] as const;
+      const crossAdapterFields = [
+        "env", "cwd", "timeoutSec", "graceSec",
+        "dangerouslySkipPermissions", "maxTurnsPerRun",
+        "command", "extraArgs",
+        "workspaceStrategy", "workspaceRuntime",
+      ] as const;
       const preserved: Record<string, unknown> = {};
       for (const key of crossAdapterFields) {
         if (existingOnTypeChange[key] !== undefined) preserved[key] = existingOnTypeChange[key];

@@ -20,7 +20,7 @@ import {
   projectWorkspaces,
   projects,
 } from "@paperclipai/db";
-import { extractAgentMentionIds, extractProjectMentionIds } from "@paperclipai/shared";
+import { extractAgentMentionIds, extractProjectMentionIds, normalizeAgentUrlKey } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import {
   defaultIssueExecutionWorkspaceSettingsForProject,
@@ -1563,7 +1563,14 @@ export function issueService(db: Db) {
         .from(agents).where(eq(agents.companyId, companyId));
       const resolved = new Set<string>(explicitAgentMentionIds);
       for (const agent of rows) {
+        // Direct name match (handles single-word names like "CEO")
         if (tokens.has(agent.name.toLowerCase())) {
+          resolved.add(agent.id);
+          continue;
+        }
+        // Kebab-key match: @qa-agent resolves to "QA Agent" via normalizeAgentUrlKey
+        const agentKey = normalizeAgentUrlKey(agent.name);
+        if (agentKey && tokens.has(agentKey)) {
           resolved.add(agent.id);
         }
       }
