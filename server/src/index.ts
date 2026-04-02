@@ -567,6 +567,18 @@ export async function startServer(): Promise<StartedServer> {
         .catch((err) => {
           logger.error({ err }, "periodic heartbeat recovery failed");
         });
+
+      // Sweep stale execution locks from issues whose runs have terminated.
+      void heartbeat
+        .expireTerminatedRunLocks()
+        .then((result) => {
+          if (result.expired > 0) {
+            logger.info({ ...result }, "expired stale execution locks");
+          }
+        })
+        .catch((err) => {
+          logger.error({ err }, "stale execution lock sweep failed");
+        });
     }, config.heartbeatSchedulerIntervalMs);
   }
   

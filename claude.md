@@ -418,6 +418,31 @@ Board users bypass all URL validation.
 
 ---
 
+## Stale execution lock sweeper
+
+Issues carry an `executionRunId` lock that prevents concurrent dispatch. Normally `releaseIssueExecutionAndPromote()` clears the lock when a heartbeat run finishes. If a run crashes or cleanup fails, the lock becomes stale — permanently blocking the issue from re-dispatch.
+
+**`expireTerminatedRunLocks()`** in `server/src/services/heartbeat.ts` runs on every scheduler tick (~30s) via `server/src/index.ts`. It scans issues with a non-null `executionRunId`, checks if the referenced heartbeat run is in a terminal state (`succeeded`, `failed`, `cancelled`, `timed_out`) or missing from the database, and clears the lock (only if `checkoutRunId` is also null to avoid interfering with active checkouts).
+
+Expired locks are logged at `warn` level. A summary is logged at `info` level when any locks are cleared in a sweep cycle.
+
+**Manual override** (for emergencies before the sweeper catches it):
+```sql
+UPDATE issues SET execution_run_id = NULL WHERE identifier = 'DLD-XXXX';
+```
+
+---
+
+## No-op PATCH short-circuit
+
+The PATCH `/issues/:id` handler detects when all fields in the request body already match the existing issue values and there is no comment or reopen request. In that case it returns the existing issue immediately without writing to the database, logging activity, or triggering agent wakeups.
+
+This prevents agents (especially the CEO) from polluting the activity log with redundant reassignment spam — e.g., re-sending `assigneeAgentId` every heartbeat cycle when the target agent is already assigned.
+
+**Location:** `server/src/routes/issues.ts`, after `updateFields` destructuring (before gates).
+
+---
+
 ## Pipeline watchdog (observe-only)
 
 External safety layer that detects dispatch anomalies, stranded assignments, and RTAA categorization drift. Runs every 15 minutes via GitHub Actions. Does **not** mutate state — observe and report only.

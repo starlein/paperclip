@@ -1205,6 +1205,21 @@ export function issueRoutes(db: Db, storage: StorageService) {
     if (hiddenAtRaw !== undefined) {
       updateFields.hiddenAt = hiddenAtRaw ? new Date(hiddenAtRaw) : null;
     }
+
+    // Short-circuit no-op updates: if nothing is actually changing, return early.
+    // This prevents agents (especially CEO) from spamming redundant reassignments
+    // that pollute the activity log and trigger unnecessary wakeups.
+    if (!commentBody && !reopenRequested) {
+      const isNoop = Object.keys(updateFields).every((key) => {
+        if (!(key in existing)) return false;
+        return (existing as Record<string, unknown>)[key] === (updateFields as Record<string, unknown>)[key];
+      });
+      if (isNoop) {
+        res.json(existing);
+        return;
+      }
+    }
+
     if (commentBody && reopenRequested === true && isClosed && updateFields.status === undefined) {
       if (req.actor.type === "agent") {
         await logActivity(db, {

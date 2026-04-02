@@ -3997,7 +3997,7 @@ export function heartbeatService(db: Db) {
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, row.executionRunId))
           .limit(1);
-        const terminalStatuses = ["done", "failed", "cancelled"];
+        const terminalStatuses = ["succeeded", "failed", "cancelled", "timed_out"];
         if (!run || !terminalStatuses.includes(run.status)) continue;
 
         await db
