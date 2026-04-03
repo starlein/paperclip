@@ -6,7 +6,7 @@ const {
   isDispatchableAgent,
   classifyIssueDispatch,
   detectStrandedAssignments,
-  detectMiscategorizedRtaaTasks,
+  detectMiscategorizedViracueTasks,
   summarizeByStatus,
   analyzeReviewHandoff,
   detectReviewHandoffGaps,
@@ -151,14 +151,14 @@ describe("pipeline watchdog", () => {
     expect(summarizeByStatus([])).toEqual({});
   });
 
-  it("detectMiscategorizedRtaaTasks returns empty when no project ID", () => {
+  it("detectMiscategorizedViracueTasks returns empty when no project ID", () => {
     const issues = [{ parentId: "root", projectId: null }];
-    expect(detectMiscategorizedRtaaTasks(issues, { rtaaProjectId: null, rootIssueIds: ["root"] })).toEqual([]);
-    expect(detectMiscategorizedRtaaTasks(issues, { rtaaProjectId: "proj", rootIssueIds: [] })).toEqual([]);
-    expect(detectMiscategorizedRtaaTasks(issues)).toEqual([]);
+    expect(detectMiscategorizedViracueTasks(issues, { viracueProjectId: null, rootIssueIds: ["root"] })).toEqual([]);
+    expect(detectMiscategorizedViracueTasks(issues, { viracueProjectId: "proj", rootIssueIds: [] })).toEqual([]);
+    expect(detectMiscategorizedViracueTasks(issues)).toEqual([]);
   });
 
-  it("finds stranded assignments and miscategorized RTAA tasks", () => {
+  it("finds stranded assignments and miscategorized ViraCue tasks", () => {
     const issues = [
       {
         identifier: "DLD-2",
@@ -169,7 +169,7 @@ describe("pipeline watchdog", () => {
         executionRunId: null,
         checkoutRunId: null,
         updatedAt: "2026-04-01T00:00:00Z",
-        projectId: "rtaa-project",
+        projectId: "viracue-project",
         parentId: null,
       },
       {
@@ -181,12 +181,12 @@ describe("pipeline watchdog", () => {
         executionRunId: null,
         checkoutRunId: null,
         updatedAt: "2026-04-01T00:00:00Z",
-        projectId: "rtaa-project",
+        projectId: "viracue-project",
         parentId: null,
       },
       {
         identifier: "DLD-4",
-        title: "RTAA child missing project",
+        title: "ViraCue child missing project",
         status: "blocked",
         assigneeAgentId: idleAgent.id,
         assigneeUserId: null,
@@ -194,7 +194,7 @@ describe("pipeline watchdog", () => {
         checkoutRunId: null,
         updatedAt: "2026-04-01T00:09:45Z",
         projectId: null,
-        parentId: "root-rtaa",
+        parentId: "root-viracue",
       },
     ];
     const agentById = new Map([
@@ -205,9 +205,9 @@ describe("pipeline watchdog", () => {
     const stranded = detectStrandedAssignments(issues, agentById, { now: NOW });
     expect(stranded.map((issue) => issue.identifier)).toEqual(["DLD-2", "DLD-3"]);
 
-    const miscategorized = detectMiscategorizedRtaaTasks(issues, {
-      rtaaProjectId: "rtaa-project",
-      rootIssueIds: ["root-rtaa"],
+    const miscategorized = detectMiscategorizedViracueTasks(issues, {
+      viracueProjectId: "viracue-project",
+      rootIssueIds: ["root-viracue"],
     });
     expect(miscategorized.map((issue) => issue.identifier)).toEqual(["DLD-4"]);
   });

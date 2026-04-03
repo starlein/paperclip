@@ -1,6 +1,6 @@
 ---
 title: Pipeline watchdog (observe-only)
-summary: External watchdog for detecting dispatch anomalies, stranded assignments, and RTAA task categorization drift without forking core Paperclip behavior.
+summary: External watchdog for detecting dispatch anomalies, stranded assignments, and ViraCue task categorization drift without forking core Paperclip behavior.
 ---
 
 ## Purpose
@@ -18,8 +18,8 @@ The initial implementation scans active issues and agents, then reports:
    - blocked issues are reported separately and are not treated as missed-dispatch by default
 2. **Stranded assignments**
    - active work sitting on paused or errored agents
-3. **RTAA categorization drift**
-   - ViraCue / Realtime Agent Assistant work that is not filed under the RTAA project
+3. **ViraCue categorization drift**
+   - ViraCue tasks that are not filed under the ViraCue project
 4. **Review handoff gaps**
    - `in_review` code/delivery lanes missing a single structured handoff comment with `Summary:`, `Branch:`, `Commit:`, `PR:`, `Checks:`, `Reviewer:`, and `Caveats:` fields
 
@@ -59,7 +59,7 @@ PAPERCLIP_COMPANY_ID
 Optional:
 
 ```sh
-WATCHDOG_RTAA_PROJECT_ID
+WATCHDOG_VIRACUE_PROJECT_ID
 WATCHDOG_ROOT_ISSUES
 WATCHDOG_MIN_ACTIONABLE_AGE_SECONDS
 ```
@@ -92,9 +92,9 @@ Required repository secrets:
 - `PAPERCLIP_API_KEY`
 - `PAPERCLIP_COMPANY_ID`
 
-Optional repository secrets for RTAA / product-specific categorization checks:
+Optional repository secrets for ViraCue / product-specific categorization checks:
 
-- `WATCHDOG_RTAA_PROJECT_ID`
+- `WATCHDOG_VIRACUE_PROJECT_ID`
 - `WATCHDOG_ROOT_ISSUES`
 
 ## Interpreting output
@@ -108,9 +108,9 @@ If an issue is listed as stranded, it typically means one of:
 - assigned to an unknown / invalid agent id
 - actionable and unassigned
 
-### Miscategorized RTAA tasks
+### Miscategorized ViraCue tasks
 
-These are product-specific ViraCue / RTAA tasks that should be under the RTAA project but are not.
+These are ViraCue tasks that should be under the ViraCue project but are not.
 
 ## Current operating mode
 

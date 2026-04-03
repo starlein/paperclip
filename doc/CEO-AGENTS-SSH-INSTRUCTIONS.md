@@ -26,16 +26,16 @@ Use the following environment variable naming convention per server:
 - `<SERVER>_SSH_KEY_PATH`
 - `<SERVER>_KNOWN_HOSTS_PATH`
 
-For Railway-hosted infrastructure targets such as `RTAA`, only add SSH instructions if there is an actual reachable SSH host for that environment. Do not assume every Railway service supports direct SSH like a traditional VPS.
+For Railway-hosted infrastructure targets such as ViraCue, only add SSH instructions if there is an actual reachable SSH host for that environment. Do not assume every Railway service supports direct SSH like a traditional VPS.
 
-If `RTAA` has SSH access, standardize on:
+If ViraCue has SSH access, standardize on:
 
-- `RTAA_VPS_HOST`
-- `RTAA_VPS_USER`
-- `RTAA_SSH_KEY_PATH`
-- `RTAA_KNOWN_HOSTS_PATH`
+- `VIRACUE_VPS_HOST`
+- `VIRACUE_VPS_USER`
+- `VIRACUE_SSH_KEY_PATH`
+- `VIRACUE_KNOWN_HOSTS_PATH`
 
-If `RTAA` is managed only through Railway and has no direct SSH endpoint, do not add SSH validation steps for it. Instead, instruct the relevant agents to manage it through Railway tooling and environment-specific operational docs.
+If ViraCue is managed only through Railway and has no direct SSH endpoint, do not add SSH validation steps for it. Instead, instruct the relevant agents to manage it through Railway tooling and environment-specific operational docs.
 
 Include this command pattern in the instructions:
 

@@ -56,10 +56,10 @@ export function detectStrandedAssignments(issues, agentById, options = {}) {
     );
 }
 
-export function detectMiscategorizedRtaaTasks(issues, { rtaaProjectId = null, rootIssueIds = [] } = {}) {
-  if (!rtaaProjectId || rootIssueIds.length === 0) return [];
+export function detectMiscategorizedViracueTasks(issues, { viracueProjectId = null, rootIssueIds = [] } = {}) {
+  if (!viracueProjectId || rootIssueIds.length === 0) return [];
   const rootSet = new Set(rootIssueIds.filter(Boolean));
-  return issues.filter((issue) => rootSet.has(issue.parentId) && issue.projectId !== rtaaProjectId);
+  return issues.filter((issue) => rootSet.has(issue.parentId) && issue.projectId !== viracueProjectId);
 }
 
 export function summarizeByStatus(issues) {
@@ -125,7 +125,7 @@ export function formatWatchdogReport({ companyId, issues, stranded, miscategoriz
   lines.push(`- Active issues scanned: ${issues.length}`);
   lines.push(`- Status counts: ${Object.entries(counts).map(([k,v]) => `${k}=${v}`).join(", ") || "none"}`);
   lines.push(`- Stranded assignments: ${stranded.length}`);
-  lines.push(`- Miscategorized RTAA tasks: ${miscategorized.length}`);
+  lines.push(`- Miscategorized ViraCue tasks: ${miscategorized.length}`);
   lines.push(`- Review handoff gaps: ${reviewHandoffGaps.length}`);
   lines.push("");
 
@@ -141,7 +141,7 @@ export function formatWatchdogReport({ companyId, issues, stranded, miscategoriz
   }
   lines.push("");
 
-  lines.push(`## Miscategorized RTAA tasks`);
+  lines.push(`## Miscategorized ViraCue tasks`);
   if (miscategorized.length === 0) {
     lines.push(`- None detected`);
   } else {
@@ -214,7 +214,7 @@ export async function runWatchdog({
   baseUrl,
   token,
   companyId,
-  rtaaProjectId = null,
+  viracueProjectId = null,
   rootIssueIds = [],
   minActionableAgeSeconds = DEFAULT_MIN_ACTIONABLE_AGE_SECONDS,
   log = console.log,
@@ -227,7 +227,7 @@ export async function runWatchdog({
   const { agents, issues, commentsByIssue, workProductsByIssue } = await loadWatchdogData({ baseUrl, token, companyId });
   const agentById = new Map(agents.map((agent) => [agent.id, agent]));
   const stranded = detectStrandedAssignments(issues, agentById, { minActionableAgeSeconds });
-  const miscategorized = detectMiscategorizedRtaaTasks(issues, { rtaaProjectId, rootIssueIds });
+  const miscategorized = detectMiscategorizedViracueTasks(issues, { viracueProjectId, rootIssueIds });
   const reviewHandoffGaps = detectReviewHandoffGaps(issues, commentsByIssue, workProductsByIssue);
 
   const report = formatWatchdogReport({
@@ -259,7 +259,7 @@ async function main() {
     baseUrl: process.env.PAPERCLIP_BASE_URL,
     token: process.env.PAPERCLIP_API_KEY,
     companyId: process.env.PAPERCLIP_COMPANY_ID,
-    rtaaProjectId: process.env.WATCHDOG_RTAA_PROJECT_ID || null,
+    viracueProjectId: process.env.WATCHDOG_VIRACUE_PROJECT_ID || process.env.WATCHDOG_RTAA_PROJECT_ID || null,
     rootIssueIds,
     minActionableAgeSeconds: Number.parseInt(process.env.WATCHDOG_MIN_ACTIONABLE_AGE_SECONDS ?? '', 10) || DEFAULT_MIN_ACTIONABLE_AGE_SECONDS,
   });
