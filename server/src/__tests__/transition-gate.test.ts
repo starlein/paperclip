@@ -192,7 +192,8 @@ describe("transition gate", () => {
   });
 
   it("agent: in_progress → in_review allowed", async () => {
-    const issue = makeIssue({ status: "in_progress" });
+    // assigneeAgentId set to a different agent so the review handoff gate doesn't fire
+    const issue = makeIssue({ status: "in_progress", assigneeAgentId: "agent-other" });
     mockIssueService.getById.mockResolvedValue(issue);
     mockIssueService.update.mockResolvedValue({ ...issue, status: "in_review" });
     mockWorkProductService.listForIssue.mockResolvedValue([

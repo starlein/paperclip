@@ -1113,32 +1113,83 @@ export function issueRoutes(db: Db, storage: StorageService) {
     }
     assertCompanyAccess(req, existing.companyId);
 
-    // Auto-assign from @mention: when an agent transitions to in_review with a comment
-    // mentioning another agent but omits assigneeAgentId, infer the assignment.
-    // This prevents the common pattern where agents @mention a QA agent but forget
-    // to include assigneeAgentId, leaving the issue assigned to themselves.
+    // Auto-assign from @mention: when an agent transitions to in_review without setting
+    // assigneeAgentId, infer the assignment from @mentions in the PATCH comment or
+    // recent comments (within 2 minutes). This prevents the common pattern where agents
+    // @mention a QA agent in a separate comment but forget to include assigneeAgentId
+    // in the status-change PATCH, leaving the issue assigned to themselves.
     if (
       req.actor.type === "agent" &&
       req.body.status === "in_review" &&
-      req.body.comment &&
       req.body.assigneeAgentId === undefined
     ) {
       try {
-        const mentionedIds = await svc.findMentionedAgents(existing.companyId, req.body.comment);
-        if (mentionedIds.length > 0) {
-          // Pick the first mentioned agent that isn't the current actor
-          const targetId = mentionedIds.find((mid) => mid !== req.actor.agentId);
-          if (targetId) {
-            req.body.assigneeAgentId = targetId;
-            logger.info(
-              { issueId: id, mentionedAgentId: targetId, actorAgentId: req.actor.agentId },
-              "auto-inferred assigneeAgentId from @mention in in_review transition",
-            );
+        let targetId: string | undefined;
+
+        // First: check the inline PATCH comment for @mentions
+        if (req.body.comment) {
+          const mentionedIds = await svc.findMentionedAgents(existing.companyId, req.body.comment);
+          targetId = mentionedIds.find((mid) => mid !== req.actor.agentId);
+        }
+
+        // Second: if no mention found in the PATCH comment, check recent comments
+        // on this issue (last 2 minutes) for @mentions — covers the split-call pattern
+        // where the agent posts the @mention in a separate comment before the status change.
+        if (!targetId) {
+          const recentComments = await svc.listComments(existing.id, { order: "desc", limit: 5 });
+          const twoMinutesAgo = Date.now() - 2 * 60 * 1000;
+          for (const comment of recentComments) {
+            const commentTime = new Date(comment.createdAt).getTime();
+            if (commentTime < twoMinutesAgo) break;
+            const mentionedIds = await svc.findMentionedAgents(existing.companyId, comment.body);
+            targetId = mentionedIds.find((mid) => mid !== req.actor.agentId);
+            if (targetId) break;
           }
+        }
+
+        if (targetId) {
+          req.body.assigneeAgentId = targetId;
+          logger.info(
+            { issueId: id, mentionedAgentId: targetId, actorAgentId: req.actor.agentId },
+            "auto-inferred assigneeAgentId from @mention in in_review transition",
+          );
         }
       } catch (err) {
         logger.warn({ err, issueId: id }, "failed to resolve @mentions for auto-assign inference");
       }
+    }
+
+    // Review handoff gate: agents transitioning to in_review MUST hand off to a different
+    // assignee. If auto-infer didn't find a mention and the agent didn't set assigneeAgentId,
+    // the issue would stay assigned to the transitioning agent — which stalls the pipeline.
+    if (
+      req.actor.type === "agent" &&
+      req.body.status === "in_review" &&
+      existing.status !== "in_review" &&
+      req.body.assigneeAgentId === undefined &&
+      existing.assigneeAgentId === req.actor.agentId
+    ) {
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: existing.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        action: "issue.review_handoff_blocked",
+        entityType: "issue",
+        entityId: existing.id,
+        details: {
+          gate: "review_handoff_required",
+          reason: "Transitioning to in_review requires assigning to a different agent (e.g. QA). Set assigneeAgentId or @mention the reviewer in your comment.",
+          currentAssigneeAgentId: existing.assigneeAgentId,
+        },
+      });
+      res.status(422).json({
+        error: "Transitioning to in_review requires assigning to a different agent (e.g. QA). Set assigneeAgentId or @mention the reviewer in your comment.",
+        gate: "review_handoff_required",
+      });
+      return;
     }
 
     const assigneeWillChange =

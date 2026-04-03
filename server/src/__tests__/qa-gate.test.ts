@@ -217,8 +217,10 @@ describe("qa gate", () => {
   });
 
   it("agent → in_review, no QA pass → 200 (gate only on done)", async () => {
-    mockIssueService.getById.mockResolvedValue(codeIssue);
-    mockIssueService.update.mockResolvedValue({ ...codeIssue, status: "in_review" });
+    // assigneeAgentId differs from actor so review handoff gate doesn't fire
+    const issue = { ...codeIssue, assigneeAgentId: "agent-other" };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({ ...issue, status: "in_review" });
     mockIssueService.listComments.mockResolvedValue([]);
     mockWorkProductService.listForIssue.mockResolvedValue([
       { type: "branch", status: "active" },
@@ -226,7 +228,7 @@ describe("qa gate", () => {
 
     const app = createAgentApp();
     const res = await request(app)
-      .patch(`/api/issues/${codeIssue.id}`)
+      .patch(`/api/issues/${issue.id}`)
       .send({ status: "in_review", comment: "Ready for review" });
 
     expect(res.status).toBe(200);

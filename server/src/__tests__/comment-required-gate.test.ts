@@ -161,7 +161,8 @@ describe("comment-required gate", () => {
   });
 
   it("rejects agent status change without comment", async () => {
-    const issue = makeIssue({ status: "in_progress" });
+    // assigneeAgentId differs from actor so review handoff gate doesn't fire
+    const issue = makeIssue({ status: "in_progress", assigneeAgentId: "agent-other" });
     mockIssueService.getById.mockResolvedValue(issue);
 
     const res = await request(createAgentApp(AGENT_1))
@@ -185,7 +186,8 @@ describe("comment-required gate", () => {
   });
 
   it("allows agent status change WITH comment", async () => {
-    const issue = makeIssue({ status: "in_progress" });
+    // assigneeAgentId differs from actor so review handoff gate doesn't fire
+    const issue = makeIssue({ status: "in_progress", assigneeAgentId: "agent-other" });
     mockIssueService.getById.mockResolvedValue(issue);
     mockIssueService.update.mockResolvedValue({ ...issue, status: "in_review" });
     mockIssueService.addComment.mockResolvedValue({ id: "c-1", body: "Moving to review" });
@@ -239,7 +241,8 @@ describe("comment-required gate", () => {
   });
 
   it("logs comment-required rejection to activity log", async () => {
-    const issue = makeIssue({ status: "in_progress" });
+    // assigneeAgentId differs from actor so review handoff gate doesn't fire
+    const issue = makeIssue({ status: "in_progress", assigneeAgentId: "agent-other" });
     mockIssueService.getById.mockResolvedValue(issue);
 
     await request(createAgentApp(AGENT_1))

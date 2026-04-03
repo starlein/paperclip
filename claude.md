@@ -117,25 +117,54 @@ docker exec paperclip-db-1 psql -U paperclip paperclip -t -A -c "
 #   /paperclip/.codex/skills/<id>/SKILL.md
 ```
 
-## pi-autoresearch extension (Research Agent)
+## pi-autoresearch extension (Research Agent ONLY)
 
 - **Agent**: Research Agent (`4e6ee9ed-5c9d-4e41-851c-00160d19c81d`), adapter `pi_local`, model `zai/glm-5`
 - **Extension source**: https://github.com/davebcn87/pi-autoresearch
-- **Extension path**: `/paperclip/.pi/agent/extensions/pi-autoresearch/index.ts`
-- **Skill path**: `/paperclip/.pi/agent/skills/autoresearch-create/SKILL.md`
-- **Framework doc**: `/paperclip/.pi/agent/pi_autoresearch_team_experiment_framework.md`
+- **Extension path**: `/paperclip/instances/default/workspaces/4e6ee9ed-5c9d-4e41-851c-00160d19c81d/.pi-extensions/pi-autoresearch/index.ts`
 - **pi CLI**: baked into `Dockerfile.vps` via `PI_CODING_AGENT_VERSION` ARG (currently `0.61.1`)
-- **Persistence**: volume-based (`/paperclip/.pi/`). Survives container recreation, NOT volume wipes.
-- **Reinstall if lost**:
-  ```bash
-  docker exec paperclip-server-1 bash -c '
-    cd /tmp && git clone --depth 1 https://github.com/davebcn87/pi-autoresearch.git &&
-    mkdir -p /paperclip/.pi/agent/extensions /paperclip/.pi/agent/skills &&
-    cp -r pi-autoresearch/extensions/pi-autoresearch /paperclip/.pi/agent/extensions/ &&
-    cp -r pi-autoresearch/skills/autoresearch-create /paperclip/.pi/agent/skills/ &&
-    rm -rf /tmp/pi-autoresearch
-  '
-  ```
+- **Persistence**: volume-based. Survives container recreation, NOT volume wipes.
+
+### CRITICAL: Autoresearch isolation rules
+
+The pi-autoresearch extension MUST be isolated to the Research Agent only. Contamination across agents caused a critical incident (2026-04-03) where ALL pi_local agents ran experiments uncontrollably, burning tokens for hours across 6+ cleanup passes.
+
+**Contamination vectors (all discovered the hard way):**
+
+| Vector | Why it triggers experiments | Prevention |
+|---|---|---|
+| `autoresearch.md` in agent cwd | Pi CLI detects it and enters autoresearch mode | NEVER create `autoresearch.*` files in non-Research workspaces |
+| `/paperclip/.pi/agent/skills/autoresearch-create/` | Shared skill directory — ALL pi_local agents read it | Skill was REMOVED from shared dir. Do NOT reinstall there |
+| `/paperclip/.pi/agent/extensions/pi-autoresearch/` | Shared extension directory — ALL pi_local agents load it | Extension was MOVED to Research Agent's workspace only |
+| `/paperclip/.pi/agent/pi_autoresearch_team_experiment_framework.md` | Shared framework doc — ALL pi_local agents read it | REMOVED from shared dir. Lives only in Research Agent workspace |
+| Pi session files (`/paperclip/.pi/paperclips/*.jsonl`) | Carry full conversation history including experiment context | Must purge non-Research sessions after contamination |
+| `session-history.md` / `corrections.md` / `AGENTS.md` | LLM reads these at session start; experiment references cause it to continue experiments | Must scrub "autoresearch" and "experiment" references from all non-Research agent workspace files |
+| Hidden temp files (`.session-history*.md`, `.run_*.md`, `.sh-rotate-*`) | Pi CLI creates temp copies of session files; these persist and re-contaminate | Delete ALL hidden `.md` files in non-Research workspaces |
+| Git checkout subdirectories (`rtaa/`, `paperclip-dld1613/`) | Contain `docs/pi-autoresearch-framework.md` and `claude.md` with autoresearch refs | Must search AND clean subdirectories, not just workspace root |
+| Project directories (`/paperclip/instances/default/projects/`) | Separate from workspaces — contain their own session files and hidden temp artifacts | Must search these too; often overlooked |
+| DB session state (`agent_runtime_state.session_id`, `agent_task_sessions.session_params_json`) | Stale session IDs reconnect to contaminated sessions | Must NULL out both tables |
+
+**If contamination recurs:**
+1. Pause ALL pi_local agents immediately (except Research Agent) to stop the regeneration cycle
+2. Cancel all running heartbeat runs
+3. Kill all `pi` processes: `docker exec paperclip-server-1 pkill -9 -f pi`
+4. Run the cleanup script (see below) — agents create new temp files faster than you can clean them while running
+5. Clear DB sessions (both `agent_runtime_state` and `agent_task_sessions`)
+6. Verify with `grep -rl -i autoresearch /paperclip/ --include="*.md" | grep -v 4e6ee9ed | grep -v /.git/ | grep -v /.claude/`
+7. Only unpause after verification passes
+
+**Reinstall for Research Agent only (if lost):**
+```bash
+docker exec paperclip-server-1 bash -c '
+  cd /tmp && git clone --depth 1 https://github.com/davebcn87/pi-autoresearch.git &&
+  DEST=/paperclip/instances/default/workspaces/4e6ee9ed-5c9d-4e41-851c-00160d19c81d/.pi-extensions &&
+  mkdir -p "$DEST" &&
+  cp -r pi-autoresearch/extensions/pi-autoresearch "$DEST/" &&
+  rm -rf /tmp/pi-autoresearch
+'
+# Do NOT install to /paperclip/.pi/agent/skills/ or /paperclip/.pi/agent/extensions/
+# Those are SHARED directories visible to ALL pi_local agents
+```
 
 ## GitHub plugin (paperclip-github)
 
@@ -338,7 +367,7 @@ Agents follow a forward-only state machine. Terminal states (done, cancelled) ca
 
 ### Gate ordering
 
-Transition gate fires first (cheapest check), then delivery gate, then QA gate, then comment-required gate. This ensures invalid moves are rejected before checking work products, QA approval, or comment presence.
+Auto-infer @mention fires first (enriches `assigneeAgentId`), then review handoff gate, then transition gate, then delivery gate, then QA gate, then comment-required gate. This ensures the handoff check runs before any other validation.
 
 ### Escape hatches (all gates)
 
@@ -348,6 +377,7 @@ Transition gate fires first (cheapest check), then delivery gate, then QA gate, 
 ### Observability
 
 Rejected transitions are logged in the activity log:
+- `issue.review_handoff_blocked` — in_review without assignee change
 - `issue.transition_blocked` — invalid agent state transition
 - `issue.delivery_gate_blocked` — missing work products
 - `issue.qa_gate_blocked` — missing QA approval
@@ -379,14 +409,16 @@ Board users bypass all URL validation.
 
 **Gate ordering in PATCH `/issues/:id`:**
 1. `assertCompanyAccess()` — company membership
-2. Assignment detection (`assigneeWillChange`)
-3. `assertCanAssignTasks()` — coarse "can this actor attempt assignment at all?"
-4. `assertAgentAssignmentPolicy()` — contextual "is this specific assignment permitted?"
-5. `assertAgentRunCheckoutOwnership()` — checkout lock
-6. `assertAgentTransition()` — status state machine
-7. `assertDeliveryGate()` — work product requirements
-8. `assertQAGate()` — peer QA approval
-9. `assertAgentCommentRequired()` — mandatory comment on status/assignee changes
+2. Auto-infer @mention (enriches `assigneeAgentId` from comments)
+3. Review handoff gate — blocks `in_review` without assignee change
+4. Assignment detection (`assigneeWillChange`)
+5. `assertCanAssignTasks()` — coarse "can this actor attempt assignment at all?"
+6. `assertAgentAssignmentPolicy()` — contextual "is this specific assignment permitted?"
+7. `assertAgentRunCheckoutOwnership()` — checkout lock
+8. `assertAgentTransition()` — status state machine
+9. `assertDeliveryGate()` — work product requirements
+10. `assertQAGate()` — peer QA approval
+11. `assertAgentCommentRequired()` — mandatory comment on status/assignee changes
 
 **Escape hatches:**
 - Board users bypass all agent-only gates
@@ -408,6 +440,7 @@ Board users bypass all URL validation.
 - `server/src/__tests__/qa-gate.test.ts` — 13 QA gate tests (including 3 self-QA prevention cases)
 - `server/src/__tests__/assignment-policy-gate.test.ts` — 16 assignment policy tests
 - `server/src/__tests__/comment-required-gate.test.ts` — 7 comment-required gate tests
+- `server/src/__tests__/review-handoff-gate.test.ts` — 8 review handoff gate tests
 - `server/src/__tests__/agent-dispatchability.test.ts` — 8 dispatchability predicate tests
 - `server/src/__tests__/mention-agent-matching.test.ts` — 15 mention resolution tests
 - `server/src/__tests__/work-product-verification.test.ts` — 11 work product URL verification tests
@@ -471,15 +504,43 @@ This prevents agents (especially the CEO) from polluting the activity log with r
 
 When an agent transitions an issue to `in_review` and includes a comment with an `@mention` of another agent but **omits `assigneeAgentId`** from the PATCH body, the server auto-infers the assignment from the mentioned agent. This prevents the common pattern where agents `@mention` a QA agent for review handoff but forget to set `assigneeAgentId`, leaving the issue assigned to themselves and stalling the pipeline.
 
+**Two-pass inference:**
+1. **Inline comment check**: Scans the `comment` field in the PATCH body for `@mentions`
+2. **Recent comment fallback**: If no mention found in the PATCH comment, scans the last 5 comments on the issue (within a 2-minute window) for `@mentions`. This handles the "split-call pattern" where agents post an `@mention` in a separate comment before the status-change PATCH.
+
 **Behavior:**
 - Only fires for agent actors (board users bypass)
 - Only fires on `status: "in_review"` transitions
 - Only fires when `assigneeAgentId` is absent from the request body
 - Picks the first mentioned agent that isn't the current actor
+- Recent comment fallback ignores comments older than 2 minutes
 - The inferred `assigneeAgentId` flows through all normal gates (assignment policy, dispatchability, etc.)
 - Logged at `info` level: `"auto-inferred assigneeAgentId from @mention in in_review transition"`
 
 **Location:** `server/src/routes/issues.ts`, before `assigneeWillChange` computation.
+
+---
+
+## Review handoff gate (`assertReviewHandoff`)
+
+Agents transitioning an issue to `in_review` **must** hand off to a different assignee. If auto-infer didn't find a mention and the agent didn't set `assigneeAgentId`, the issue would stay assigned to the transitioning agent — stalling the pipeline because no reviewer picks it up.
+
+**Conditions (all must be true for the gate to fire):**
+- Actor is an agent (board users bypass)
+- Target status is `in_review`
+- Current status is NOT already `in_review` (re-patches are allowed)
+- `assigneeAgentId` is not in the PATCH body
+- Issue's current `assigneeAgentId` matches the actor's agent ID
+
+**Returns:** 422 with `gate: "review_handoff_required"`
+
+**Activity log action:** `issue.review_handoff_blocked`
+
+**Gate ordering:** Fires after auto-infer but before transition gate, delivery gate, QA gate, and comment-required gate.
+
+**Key files:**
+- `server/src/routes/issues.ts` — inline gate logic (not a separate function)
+- `server/src/__tests__/review-handoff-gate.test.ts` — 8 dedicated tests
 
 ---
 

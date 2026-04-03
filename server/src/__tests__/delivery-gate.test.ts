@@ -146,12 +146,14 @@ describe("delivery gate", () => {
   });
 
   it("agent → in_review on code issue with no work products → 422", async () => {
-    mockIssueService.getById.mockResolvedValue(codeIssue);
+    // assigneeAgentId differs from actor so review handoff gate doesn't fire
+    const issue = { ...codeIssue, assigneeAgentId: "agent-other" };
+    mockIssueService.getById.mockResolvedValue(issue);
     mockWorkProductService.listForIssue.mockResolvedValue([]);
 
     const app = createAgentApp();
     const res = await request(app)
-      .patch(`/api/issues/${codeIssue.id}`)
+      .patch(`/api/issues/${issue.id}`)
       .send({ status: "in_review" });
 
     expect(res.status).toBe(422);
@@ -220,15 +222,17 @@ describe("delivery gate", () => {
   });
 
   it("agent → in_review on code issue with branch work product → 200", async () => {
-    mockIssueService.getById.mockResolvedValue(codeIssue);
-    mockIssueService.update.mockResolvedValue({ ...codeIssue, status: "in_review" });
+    // assigneeAgentId differs from actor so review handoff gate doesn't fire
+    const issue = { ...codeIssue, assigneeAgentId: "agent-other" };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({ ...issue, status: "in_review" });
     mockWorkProductService.listForIssue.mockResolvedValue([
       { type: "branch", status: "active" },
     ]);
 
     const app = createAgentApp();
     const res = await request(app)
-      .patch(`/api/issues/${codeIssue.id}`)
+      .patch(`/api/issues/${issue.id}`)
       .send({ status: "in_review", comment: "Ready for review" });
 
     expect(res.status).toBe(200);
@@ -280,12 +284,14 @@ describe("delivery gate", () => {
   });
 
   it("activity log contains gate details on rejection", async () => {
-    mockIssueService.getById.mockResolvedValue(codeIssue);
+    // assigneeAgentId differs from actor so review handoff gate doesn't fire
+    const issue = { ...codeIssue, assigneeAgentId: "agent-other" };
+    mockIssueService.getById.mockResolvedValue(issue);
     mockWorkProductService.listForIssue.mockResolvedValue([]);
 
     const app = createAgentApp();
     await request(app)
-      .patch(`/api/issues/${codeIssue.id}`)
+      .patch(`/api/issues/${issue.id}`)
       .send({ status: "in_review" });
 
     expect(mockLogActivity).toHaveBeenCalledWith(
