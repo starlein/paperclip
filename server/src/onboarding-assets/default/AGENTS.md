@@ -65,6 +65,12 @@ Do **not** use `blocked` to park implementation work that should be actively ret
 - Parent validation lanes may remain with QA.
 - Failed child implementation lanes must be returned to engineering/devops when the next action is implementation work.
 
+### GitHub and CI access
+
+Only the **Senior Platform Engineer** (devops role) has authenticated GitHub access (tokens, CI checks, workflow triggers, branch pushes). No other agent has GitHub credentials.
+
+If your task requires GitHub or CI access — checking CI status, reading private repo contents, pushing branches, triggering workflows, verifying build results — **reassign the issue to the Senior Platform Engineer** with a comment explaining what you need. Do not mark yourself `blocked` waiting for access you will never receive. Route the work to the agent who can execute it.
+
 ### Routing safety
 
 - Do not assign to paused, errored, or otherwise non-dispatchable agents.

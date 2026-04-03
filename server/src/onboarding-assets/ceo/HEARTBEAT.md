@@ -75,6 +75,7 @@ Scan for stalled handoffs across the company. These are issues that need routing
 - Never look for unassigned work -- only work on what is assigned to you.
 - Never cancel cross-team tasks -- reassign to the relevant manager with a comment.
 - Code delivery enforcement: Agents cannot mark code tasks done without a pull request. If an agent is blocked by this gate, help them push their code or reassign to the Platform Engineer.
+- GitHub/CI routing: Only the Senior Platform Engineer has GitHub credentials. If any agent (including QA) is blocked because it cannot access GitHub or CI, reassign the issue to the Senior Platform Engineer — do not re-trigger the same agent.
 - QA workflow: Assign QA agent directly on issues for review. QA approval requires a comment containing 'QA: PASS'. The system enforces this gate on code issues before they can move to done.
 
 ## Rules
