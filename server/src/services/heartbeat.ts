@@ -4149,7 +4149,11 @@ export function heartbeatService(db: Db) {
     },
 
     async expireTerminatedRunLocks() {
-      // Find issues with an active execution lock whose run has already reached a terminal state.
+      // Find issues with an active execution lock whose run has already reached a terminal state
+      // OR whose run has been stuck in "queued" status past a staleness threshold.
+      const STALE_QUEUED_LOCK_MS = 5 * 60 * 1000; // 5 minutes — matches reapOrphanedRuns threshold
+      const now = new Date();
+
       const lockedIssues = await db
         .select({
           issueId: issues.id,
@@ -4163,19 +4167,35 @@ export function heartbeatService(db: Db) {
       for (const row of lockedIssues) {
         if (!row.executionRunId) continue;
         const [run] = await db
-          .select({ status: heartbeatRuns.status })
+          .select({ status: heartbeatRuns.status, createdAt: heartbeatRuns.createdAt })
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, row.executionRunId))
           .limit(1);
+
         const terminalStatuses = ["succeeded", "failed", "cancelled", "timed_out"];
-        if (!run || !terminalStatuses.includes(run.status)) continue;
+        const isTerminal = !run || terminalStatuses.includes(run.status);
+        const isStaleQueued =
+          run?.status === "queued" &&
+          run.createdAt &&
+          now.getTime() - new Date(run.createdAt).getTime() > STALE_QUEUED_LOCK_MS;
+
+        if (!isTerminal && !isStaleQueued) continue;
 
         await db
           .update(issues)
-          .set({ executionLockedAt: null, executionRunId: null, executionAgentNameKey: null, updatedAt: new Date() })
+          .set({ executionLockedAt: null, executionRunId: null, executionAgentNameKey: null, updatedAt: now })
           .where(and(eq(issues.id, row.issueId), isNull(issues.checkoutRunId)));
 
-        logger.warn({ issueId: row.issueId, executionRunId: row.executionRunId }, "expired stale execution lock for terminated run");
+        if (isStaleQueued) {
+          // Also cancel the stale queued run so it doesn't re-lock on resumeQueuedRuns
+          await db
+            .update(heartbeatRuns)
+            .set({ status: "cancelled", finishedAt: now, error: "Stale queued run — never started executing within 5m threshold" })
+            .where(and(eq(heartbeatRuns.id, row.executionRunId), eq(heartbeatRuns.status, "queued")));
+          logger.warn({ issueId: row.issueId, executionRunId: row.executionRunId }, "expired stale execution lock for queued run that never started");
+        } else {
+          logger.warn({ issueId: row.issueId, executionRunId: row.executionRunId }, "expired stale execution lock for terminated run");
+        }
         expired.push(row.issueId);
       }
       return { expired: expired.length };
