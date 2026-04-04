@@ -4161,7 +4161,7 @@ export function heartbeatService(db: Db) {
           executionRunId: issues.executionRunId,
         })
         .from(issues)
-        .where(and(isNotNull(issues.executionLockedAt), isNotNull(issues.executionRunId)));
+        .where(isNotNull(issues.executionRunId));
 
       const expired: string[] = [];
       for (const row of lockedIssues) {
