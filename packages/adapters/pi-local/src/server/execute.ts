@@ -184,6 +184,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (approvalId) env.PAPERCLIP_APPROVAL_ID = approvalId;
   if (approvalStatus) env.PAPERCLIP_APPROVAL_STATUS = approvalStatus;
   if (linkedIssueIds.length > 0) env.PAPERCLIP_LINKED_ISSUE_IDS = linkedIssueIds.join(",");
+  if (typeof context.paperclipCanAssignTasks === "boolean") {
+    env.PAPERCLIP_CAN_ASSIGN_TASKS = context.paperclipCanAssignTasks ? "true" : "false";
+  }
   if (workspaceCwd) env.PAPERCLIP_WORKSPACE_CWD = workspaceCwd;
   if (workspaceSource) env.PAPERCLIP_WORKSPACE_SOURCE = workspaceSource;
   if (workspaceId) env.PAPERCLIP_WORKSPACE_ID = workspaceId;
@@ -221,6 +224,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   });
 
   const timeoutSec = asNumber(config.timeoutSec, 0);
+  const maxTurnsPerRun = asNumber(config.maxTurnsPerRun, 0);
+  // Pi CLI has no --max-turns flag. If maxTurnsPerRun is set but timeoutSec is not,
+  // derive a timeout as a soft enforcement (approx 2 min per turn).
+  const effectiveTimeoutSec = timeoutSec > 0
+    ? timeoutSec
+    : maxTurnsPerRun > 0
+      ? maxTurnsPerRun * 120
+      : 0;
   const graceSec = asNumber(config.graceSec, 20);
   const extraArgs = (() => {
     const fromExtraArgs = asStringArray(config.extraArgs);
@@ -304,9 +315,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const permissionNote = asString(context.paperclipPermissionNote, "").trim();
+  const apiUrlNote = env.PAPERCLIP_API_URL
+    ? `## Paperclip API\n\nYour local Paperclip API URL is: ${env.PAPERCLIP_API_URL}\nAll API calls (GET/POST/PATCH on /api/...) MUST use this URL. Do NOT use api.paperclip.ing or any other external URL.`
+    : "";
   const userPrompt = joinPromptSections([
     renderedBootstrapPrompt,
     sessionHandoffNote,
+    permissionNote,
+    apiUrlNote,
     renderedHeartbeatPrompt,
   ]);
   const promptMetrics = {
@@ -314,6 +331,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     promptChars: userPrompt.length,
     bootstrapPromptChars: renderedBootstrapPrompt.length,
     sessionHandoffChars: sessionHandoffNote.length,
+    permissionNoteChars: permissionNote.length,
+    apiUrlNoteChars: apiUrlNote.length,
     heartbeatPromptChars: renderedHeartbeatPrompt.length,
   };
 
@@ -400,7 +419,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const proc = await runChildProcess(runId, command, args, {
       cwd,
       env: runtimeEnv,
-      timeoutSec,
+      timeoutSec: effectiveTimeoutSec,
       graceSec,
       onSpawn,
       onLog: bufferedOnLog,
@@ -431,7 +450,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: attempt.proc.exitCode,
         signal: attempt.proc.signal,
         timedOut: true,
-        errorMessage: `Timed out after ${timeoutSec}s`,
+        errorMessage: `Timed out after ${effectiveTimeoutSec}s`,
         clearSession: clearSessionOnMissingSession,
       };
     }
