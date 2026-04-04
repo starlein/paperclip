@@ -24,6 +24,13 @@ export const JOB_KEYS = {
   syncLinkedIssues: "sync-linked-issues",
 } as const;
 
+export type WorkflowSeverity = "critical" | "standard" | "informational";
+
+/** Number of failures of the same workflow within the escalation window before a root-cause issue is created. */
+export const ROOT_CAUSE_ESCALATION_THRESHOLD = 3;
+/** Sliding window (ms) for counting failures toward root-cause escalation. */
+export const ROOT_CAUSE_ESCALATION_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 export const DEFAULT_CONFIG = {
   webhookSecret: undefined,
   companyId: undefined,
@@ -34,6 +41,7 @@ export const DEFAULT_CONFIG = {
   syncDirection: "bidirectional" as const,
   syncComments: false,
   skipSignatureVerification: false,
+  workflowSeverity: {} as Record<string, WorkflowSeverity>,
 };
 
 export type PluginConfig = {
@@ -46,4 +54,9 @@ export type PluginConfig = {
   syncDirection?: "bidirectional" | "github-to-paperclip" | "paperclip-to-github";
   syncComments?: boolean;
   skipSignatureVerification?: boolean;
+  /** Per-workflow severity tier.  Key = workflow name (e.g. "Deploy Vultr").
+   *  - "critical": always create issue, priority urgent
+   *  - "standard": (default) create issue, priority high
+   *  - "informational": log only, no issue created */
+  workflowSeverity?: Record<string, WorkflowSeverity>;
 };

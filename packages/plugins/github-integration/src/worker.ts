@@ -7,10 +7,13 @@ import {
 import type { Agent } from "@paperclipai/shared";
 import {
   DEFAULT_CONFIG,
+  ROOT_CAUSE_ESCALATION_THRESHOLD,
+  ROOT_CAUSE_ESCALATION_WINDOW_MS,
   SUPPORTED_GITHUB_EVENTS,
   WEBHOOK_KEYS,
   type PluginConfig,
   type SupportedGitHubEvent,
+  type WorkflowSeverity,
 } from "./constants.js";
 import type {
   GitHubCheckRunEvent,
@@ -148,6 +151,103 @@ async function markDelivery(deliveryId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Workflow failure tracking — root-cause escalation
+// ---------------------------------------------------------------------------
+
+interface FailureRecord {
+  /** workflow/check name + repo key */
+  key: string;
+  timestamps: number[];
+  /** Paperclip issue ID for the root-cause diagnostic issue (once created) */
+  rootCauseIssueId?: string;
+}
+
+const FAILURE_TRACKER_STATE_KEY = "workflow-failure-tracker";
+
+async function getFailureTracker(): Promise<Record<string, FailureRecord>> {
+  if (!ctx) return {};
+  try {
+    const raw = await ctx.state.get({
+      scopeKind: "instance",
+      stateKey: FAILURE_TRACKER_STATE_KEY,
+    });
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, FailureRecord>;
+    if (typeof raw === "string") return JSON.parse(raw) as Record<string, FailureRecord>;
+    return {};
+  } catch {
+    return {};
+  }
+}
+
+async function saveFailureTracker(tracker: Record<string, FailureRecord>): Promise<void> {
+  if (!ctx) return;
+  try {
+    await ctx.state.set(
+      { scopeKind: "instance", stateKey: FAILURE_TRACKER_STATE_KEY },
+      tracker,
+    );
+  } catch {
+    // best-effort
+  }
+}
+
+/**
+ * Record a workflow failure and return whether root-cause escalation should
+ * fire.  Returns the tracker entry (with a `rootCauseIssueId` if one was
+ * already created in a prior cycle).
+ */
+async function recordWorkflowFailure(
+  workflowKey: string,
+): Promise<{ shouldEscalate: boolean; record: FailureRecord }> {
+  const now = Date.now();
+  const tracker = await getFailureTracker();
+  const existing = tracker[workflowKey] ?? { key: workflowKey, timestamps: [] };
+
+  // Prune timestamps outside the escalation window
+  existing.timestamps = existing.timestamps.filter(
+    (ts) => now - ts < ROOT_CAUSE_ESCALATION_WINDOW_MS,
+  );
+  existing.timestamps.push(now);
+  tracker[workflowKey] = existing;
+  await saveFailureTracker(tracker);
+
+  const shouldEscalate =
+    existing.timestamps.length >= ROOT_CAUSE_ESCALATION_THRESHOLD &&
+    !existing.rootCauseIssueId;
+
+  return { shouldEscalate, record: existing };
+}
+
+async function markRootCauseIssueCreated(
+  workflowKey: string,
+  issueId: string,
+): Promise<void> {
+  const tracker = await getFailureTracker();
+  const existing = tracker[workflowKey];
+  if (existing) {
+    existing.rootCauseIssueId = issueId;
+    await saveFailureTracker(tracker);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Severity helpers
+// ---------------------------------------------------------------------------
+
+function getWorkflowSeverity(config: Required<PluginConfig>, workflowName: string): WorkflowSeverity {
+  return config.workflowSeverity?.[workflowName] ?? "standard";
+}
+
+/** Map severity to issue priority.  "informational" is excluded because those
+ *  workflows skip issue creation entirely (early return in handleWorkflowRun). */
+function severityToPriority(severity: Exclude<WorkflowSeverity, "informational">): "critical" | "high" {
+  switch (severity) {
+    case "critical": return "critical";
+    case "standard": return "high";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CI issue dedup — find existing open issue by title prefix
 // ---------------------------------------------------------------------------
 
@@ -179,6 +279,72 @@ async function findExistingCIIssue(
 }
 
 // ---------------------------------------------------------------------------
+// Root-cause diagnostic issue creation
+// ---------------------------------------------------------------------------
+
+async function createRootCauseIssue(
+  config: Required<PluginConfig>,
+  workflowKey: string,
+  workflowName: string,
+  repo: string,
+  record: FailureRecord,
+  assigneeAgentId: string | undefined,
+): Promise<void> {
+  if (!ctx) return;
+
+  const rootCauseTitle = `Root cause: recurring "${workflowName}" failures on ${repo}`;
+
+  // Check if a root-cause issue already exists
+  const existing = await findExistingCIIssue(config.companyId!, rootCauseTitle);
+  if (existing) {
+    ctx.logger.info(`Root-cause issue already exists: ${existing.id}`);
+    await markRootCauseIssueCreated(workflowKey, existing.id);
+    return;
+  }
+
+  const failureCount = record.timestamps.length;
+  const description = [
+    `## Root Cause Investigation Required`,
+    "",
+    `**"${workflowName}"** on \`${repo}\` has failed **${failureCount} times** in the last 24 hours.`,
+    "",
+    `This is a recurring failure pattern that needs root-cause investigation rather than`,
+    `individual symptom fixes. Each failure creates or updates a "CI failure:" issue, but`,
+    `the underlying cause has not been resolved.`,
+    "",
+    `### Action Required`,
+    "",
+    `1. Investigate why "${workflowName}" keeps failing`,
+    `2. Identify the root cause (auth, infra, config, code)`,
+    `3. Implement a fix that prevents recurrence`,
+    `4. Mark this issue done only when the workflow has succeeded consistently`,
+    "",
+    `---`,
+    `*Auto-created by GitHub plugin after ${failureCount} failures in 24h*`,
+  ].join("\n");
+
+  ctx.logger.info(`Creating root-cause diagnostic issue: ${rootCauseTitle}`);
+
+  try {
+    const created = await ctx.issues.create({
+      companyId: config.companyId!,
+      goalId: config.goalId || undefined,
+      title: rootCauseTitle,
+      description,
+      priority: "critical",
+      status: "backlog",
+      assigneeAgentId,
+    });
+
+    if (created?.id) {
+      await markRootCauseIssueCreated(workflowKey, created.id);
+    }
+  } catch (err) {
+    ctx.logger.warn(`Failed to create root-cause issue: ${err}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Event handlers
 // ---------------------------------------------------------------------------
 
@@ -195,6 +361,14 @@ async function handleWorkflowRun(payload: GitHubWorkflowRunEvent): Promise<void>
   }
 
   const repo = payload.repository.full_name;
+  const severity = getWorkflowSeverity(config, run.name);
+
+  // Informational workflows: log only, no issue creation
+  if (severity === "informational") {
+    ctx?.logger.info(`Informational workflow failure (skipping issue): ${run.name} on ${repo} #${run.run_number}`);
+    return;
+  }
+
   const commitAuthor = run.head_commit?.author;
   const prNumbers = run.pull_requests.map((pr) => pr.number);
 
@@ -211,6 +385,10 @@ async function handleWorkflowRun(payload: GitHubWorkflowRunEvent): Promise<void>
     if (commented) return;
   }
 
+  // Track failure for root-cause escalation
+  const workflowKey = `${run.name}::${repo}`;
+  const { shouldEscalate, record } = await recordWorkflowFailure(workflowKey);
+
   const titlePrefix = `CI failure: ${run.name} on ${repo}`;
   const title = `${titlePrefix} #${run.run_number}`;
   const description = buildWorkflowRunDescription(payload);
@@ -219,6 +397,11 @@ async function handleWorkflowRun(payload: GitHubWorkflowRunEvent): Promise<void>
   if (existing) {
     ctx?.logger.info(`Commenting on existing issue ${existing.id} instead of creating duplicate`);
     await ctx!.issues.createComment(existing.id, `**Re-occurrence:** ${title}\n\n${description}`, config.companyId);
+
+    // Check for root-cause escalation even on re-occurrence
+    if (shouldEscalate) {
+      await createRootCauseIssue(config, workflowKey, run.name, repo, record, assigneeAgentId);
+    }
     return;
   }
 
@@ -229,10 +412,15 @@ async function handleWorkflowRun(payload: GitHubWorkflowRunEvent): Promise<void>
     goalId: config.goalId || undefined,
     title,
     description,
-    priority: "high",
+    priority: severityToPriority(severity as Exclude<WorkflowSeverity, "informational">),
     status: "backlog",
     assigneeAgentId,
   });
+
+  // Root-cause escalation on new issue creation too
+  if (shouldEscalate) {
+    await createRootCauseIssue(config, workflowKey, run.name, repo, record, assigneeAgentId);
+  }
 }
 
 async function handleCheckRun(payload: GitHubCheckRunEvent): Promise<void> {
@@ -255,20 +443,28 @@ async function handleCheckRun(payload: GitHubCheckRunEvent): Promise<void> {
     if (commented) return;
   }
 
+  // Track failure for root-cause escalation
+  const workflowKey = `check::${check.name}::${repo}`;
+  const { shouldEscalate, record } = await recordWorkflowFailure(workflowKey);
+
   const titlePrefix = `PR gate failure: ${check.name} on ${repo}`;
   const title = `${titlePrefix}`;
   const description = buildCheckRunDescription(payload);
+
+  const assigneeAgentId = config.defaultAssigneeAgentId || undefined;
 
   const existing = await findExistingCIIssue(config.companyId, titlePrefix);
   if (existing) {
     ctx?.logger.info(`Commenting on existing issue ${existing.id} instead of creating duplicate`);
     await ctx!.issues.createComment(existing.id, `**Re-occurrence:** ${title}\n\n${description}`, config.companyId);
+
+    if (shouldEscalate) {
+      await createRootCauseIssue(config, workflowKey, check.name, repo, record, assigneeAgentId);
+    }
     return;
   }
 
   ctx?.logger.info(`Creating issue: ${title}`);
-
-  const assigneeAgentId = config.defaultAssigneeAgentId || undefined;
 
   await ctx!.issues.create({
     companyId: config.companyId,
@@ -279,6 +475,10 @@ async function handleCheckRun(payload: GitHubCheckRunEvent): Promise<void> {
     status: "backlog",
     assigneeAgentId,
   });
+
+  if (shouldEscalate) {
+    await createRootCauseIssue(config, workflowKey, check.name, repo, record, assigneeAgentId);
+  }
 }
 
 // ---------------------------------------------------------------------------

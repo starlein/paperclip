@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { BillingType, ExecutionWorkspace, ExecutionWorkspaceConfig } from "@paperclipai/shared";
 import {
@@ -2056,6 +2056,33 @@ export function heartbeatService(db: Db) {
         },
       });
 
+      // Log consolidated process_lost activity on the issue (when retry is
+      // exhausted) so that recurring crashes are visible in the issue feed
+      // rather than scattered across individual run events.
+      const runContext = parseObject(run.contextSnapshot);
+      const processLostIssueId = readNonEmptyString(runContext.issueId);
+      if (!shouldRetry && processLostIssueId) {
+        try {
+          await logActivity(db, {
+            companyId: run.companyId,
+            actorType: "system",
+            actorId: "heartbeat_process_recovery",
+            action: "issue.process_lost_exhausted",
+            entityType: "issue",
+            entityId: processLostIssueId,
+            agentId: run.agentId,
+            runId: run.id,
+            details: {
+              message: `${baseMessage}. Retry exhausted — agent moved to error state.`,
+              processLossRetryCount: run.processLossRetryCount ?? 0,
+              processPid: run.processPid,
+            },
+          });
+        } catch (actErr) {
+          logger.error({ err: actErr }, "failed to log process_lost activity");
+        }
+      }
+
       await finalizeAgentStatus(run.agentId, "failed");
       await startNextQueuedRunForAgent(run.agentId);
       runningProcesses.delete(run.id);
@@ -3001,6 +3028,84 @@ export function heartbeatService(db: Db) {
         }
       }
       await finalizeAgentStatus(agent.id, outcome);
+
+      // ── adapter_failed circuit breaker ──
+      // If this run failed with adapter_failed, check the previous run for the
+      // same agent.  Two consecutive adapter_failed results indicate a systemic
+      // problem (auth expired, model unavailable, broken config).  Pause the
+      // agent to stop burning tokens and log an activity event for visibility.
+      if (outcome === "failed") {
+        const currentErrorCode = adapterResult.errorCode ?? "adapter_failed";
+        if (currentErrorCode === "adapter_failed") {
+          try {
+            const previousRuns = await db
+              .select({
+                id: heartbeatRuns.id,
+                errorCode: heartbeatRuns.errorCode,
+              })
+              .from(heartbeatRuns)
+              .where(
+                and(
+                  eq(heartbeatRuns.agentId, agent.id),
+                  ne(heartbeatRuns.id, run.id),
+                  inArray(heartbeatRuns.status, ["failed", "succeeded", "cancelled", "timed_out"]),
+                ),
+              )
+              .orderBy(desc(heartbeatRuns.createdAt))
+              .limit(1);
+
+            const prevRun = previousRuns[0];
+            if (prevRun?.errorCode === "adapter_failed") {
+              logger.warn(
+                { agentId: agent.id, runId: run.id, prevRunId: prevRun.id },
+                "adapter_failed circuit breaker: 2 consecutive failures, pausing agent",
+              );
+
+              await db
+                .update(agents)
+                .set({
+                  status: "paused",
+                  pauseReason: "adapter_failed_circuit_breaker",
+                  updatedAt: new Date(),
+                })
+                .where(eq(agents.id, agent.id));
+
+              const runContext = parseObject(run.contextSnapshot);
+              const issueId = readNonEmptyString(runContext.issueId);
+              if (issueId) {
+                await logActivity(db, {
+                  companyId: agent.companyId,
+                  actorType: "system",
+                  actorId: "adapter_failed_circuit_breaker",
+                  action: "agent.circuit_breaker_paused",
+                  entityType: "issue",
+                  entityId: issueId,
+                  agentId: agent.id,
+                  runId: run.id,
+                  details: {
+                    gate: "adapter_failed_circuit_breaker",
+                    consecutiveFailures: 2,
+                    lastError: adapterResult.errorMessage ?? "Adapter failed",
+                    message: `Agent paused after 2 consecutive adapter failures. Reset to idle to retry.`,
+                  },
+                });
+              }
+
+              publishLiveEvent({
+                companyId: agent.companyId,
+                type: "agent.status",
+                payload: {
+                  agentId: agent.id,
+                  status: "paused",
+                  pauseReason: "adapter_failed_circuit_breaker",
+                },
+              });
+            }
+          } catch (cbErr) {
+            logger.error({ err: cbErr, agentId: agent.id }, "adapter_failed circuit breaker check failed");
+          }
+        }
+      }
 
       // Release large adapter result to allow GC before the run scope ends.
       // resultJson can be multi-MB (raw stdout/stderr from CLI adapters).

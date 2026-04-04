@@ -20,12 +20,13 @@
   - `docker-compose.vps.yml`
   - `docker-compose.vps-override.yml`
 - Fast-build flow uses prebuilt `ui/dist` and skips the VPS UI build step
-- **CI: merge vs deploy vs npm (three separate actions):** (1) Merge PR → `verify` + `policy` on the PR. (2) Ship the app → run **`deploy-vultr.yml`** when ready (`gh workflow run deploy-vultr.yml --repo Viraforge/paperclip --ref master`). (3) Publish npm canary/stable → run **`release.yml`** with workflow_dispatch (`channel` `canary` or `stable`); **not** triggered by merge. Canary also runs on a **nightly schedule** (02:00 UTC). Requires **`NPM_TOKEN`** in GitHub Environments `npm-canary` and `npm-stable`.
-- **GHCR-based deploy (2026-03-18):** Docker image is now built on GitHub Actions and pushed to `ghcr.io/viraforge/paperclip:<sha>`. VPS only pulls and recreates. `Deploy Vultr` is now `workflow_dispatch` only — no longer triggers on push to master.
-  - Image path: `ghcr.io/viraforge/paperclip:<github_sha>`
+- **CI: merge → auto-deploy → npm (three separate actions):** (1) Merge PR → `verify` + `policy` + `ai-review/verdict` on the PR → auto-merge. (2) Push to master auto-triggers **`deploy-vultr.yml`** — builds image with `Dockerfile.vps`, pushes to GHCR, deploys to VPS. Manual fallback: `gh workflow run deploy-vultr.yml --repo Viraforge/paperclip --ref master`. (3) Publish npm canary/stable → run **`release.yml`** with workflow_dispatch (`channel` `canary` or `stable`); **not** triggered by merge. Canary also runs on a **nightly schedule** (02:00 UTC). Requires **`NPM_TOKEN`** in GitHub Environments `npm-canary` and `npm-stable`.
+- **GHCR-based deploy (2026-03-18, updated 2026-04-04):** Docker image is built on GitHub Actions and pushed to `ghcr.io/viraforge/paperclip:<sha>` + `:latest`. VPS pulls and recreates. `Deploy Vultr` triggers automatically on push to master AND via `workflow_dispatch` fallback.
+  - Image path: `ghcr.io/viraforge/paperclip:<github_sha>` (also tagged `:latest`)
   - VPS reads image tag from `PAPERCLIP_SERVER_IMAGE` env var during compose commands
   - Current image pointer on VPS: `/opt/paperclip/current-image`
   - Rollback: `PAPERCLIP_SERVER_IMAGE=$(cat /opt/paperclip/current-image-prev) docker compose ... up -d --force-recreate --no-deps server`
+- **`docker.yml` is tags-only (2026-04-04):** The general Docker workflow only triggers on version tags (`v*`) and manual dispatch. It does NOT trigger on push to master — `deploy-vultr.yml` handles that with the VPS-specific `Dockerfile.vps`.
 - The production image now includes `openssh-client`
 - OpenCode is now deployed through the Paperclip-native runtime path instead of the earlier manual wrapper
 - The running container now uses:
@@ -187,11 +188,13 @@ docker exec paperclip-server-1 bash -c '
     -f description="PASS – ..." -f target_url="<PR URL>"
   ```
   **Required secret**: `OPENROUTER_API_KEY` must be configured in GitHub Actions secrets.
-- **Deploy Vultr is `workflow_dispatch` only**: `deploy-vultr.yml` no longer triggers on push to master (removed 2026-03-18). Deploy requires:
+- **Deploy Vultr auto-triggers on push to master (2026-04-04)**: `deploy-vultr.yml` now triggers automatically when code is pushed to master (including auto-merges). Manual fallback still available:
   ```bash
   gh workflow run deploy-vultr.yml --repo Viraforge/paperclip --ref master
   ```
-- **Drift check fires whenever master is ahead of VPS**: `deploy-drift-check.yml` runs on a schedule and will fail any time master has commits that haven't been deployed. This is expected and intentional — it means you need to run `deploy-vultr.yml`. It is NOT a bug and should NOT be disabled.
+  The concurrency guard (`cancel-in-progress: false`) ensures rapid merges queue safely — each deploy waits for the previous one to complete.
+- **`docker.yml` is tags-only**: The general Docker workflow only triggers on version tags (`v*`) and manual dispatch. It does NOT build on push to master — `deploy-vultr.yml` handles production image builds with `Dockerfile.vps`.
+- **Drift check validates deploy health**: `deploy-drift-check.yml` runs on a schedule. With auto-deploy enabled, a failing drift check means the deploy workflow FAILED, not that someone forgot to deploy. Investigate the failed deploy run.
 - **Lockfile changes must go through `refresh-lockfile.yml`**: Never commit `pnpm-lock.yaml` manually in a PR — `pr-policy` will block it. The correct path when the lockfile is stale:
   1. Trigger the workflow: `gh workflow run refresh-lockfile.yml --repo Viraforge/paperclip --ref master`
   2. The workflow pushes the updated lockfile to branch `chore/refresh-lockfile` but **cannot create the PR** (GitHub Actions lacks PR creation permission in this repo).
@@ -487,6 +490,21 @@ UPDATE issues SET execution_run_id = NULL WHERE identifier = 'DLD-XXXX';
 - `packages/db/src/schema/issues.ts` — `activationRetriggerCount` column
 - `packages/db/src/migrations/0045_activation_retrigger.sql` — migration
 - `server/src/__tests__/unpicked-assignment-sweep.test.ts` — 5 unit tests
+
+---
+
+## adapter_failed circuit breaker
+
+When a heartbeat run finishes with `errorCode: "adapter_failed"`, the finalizer checks the previous completed run for the same agent. If that run also had `adapter_failed`, the agent is paused with `pauseReason: "adapter_failed_circuit_breaker"` instead of endlessly retrying.
+
+**Behavior:**
+- Triggers after 2 consecutive `adapter_failed` runs for the same agent
+- Sets agent status to `paused` with `pauseReason: "adapter_failed_circuit_breaker"`
+- Logs `agent.circuit_breaker_paused` activity on the issue (if available from run context)
+- Publishes live event so the UI reflects the pause immediately
+- To retry: set agent status back to `idle` via the UI or API
+
+**Location:** `server/src/services/heartbeat.ts`, after `finalizeAgentStatus()` in the run completion path.
 
 ---
 

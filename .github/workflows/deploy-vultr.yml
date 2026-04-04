@@ -1,6 +1,8 @@
 name: Deploy Vultr
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
 
 concurrency:
@@ -53,7 +55,9 @@ jobs:
           context: .
           file: Dockerfile.vps
           push: true
-          tags: ghcr.io/viraforge/paperclip:${{ github.sha }}
+          tags: |
+            ghcr.io/viraforge/paperclip:${{ github.sha }}
+            ghcr.io/viraforge/paperclip:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
