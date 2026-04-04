@@ -1,6 +1,4 @@
-FROM node:lts-trixie-slim AS base
-ARG USER_UID=1000
-ARG USER_GID=1000
+FROM node:22-trixie-slim AS base
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates gosu curl git wget ripgrep python3 \
   && mkdir -p -m 755 /etc/apt/keyrings \

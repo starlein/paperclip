@@ -990,7 +990,7 @@ export function issueService(db: Db) {
     },
 
     countRecentByAgent: async (agentId: string, windowMs: number = 3_600_000) => {
-      const since = new Date(Date.now() - windowMs);
+      const since = new Date(Date.now() - windowMs).toISOString();
       const [row] = await db
         .select({ count: sql<number>`count(*)` })
         .from(issues)
