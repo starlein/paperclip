@@ -524,14 +524,19 @@ export async function startServer(): Promise<StartedServer> {
   });
   const uiMode = config.uiDevMiddleware ? "vite-dev" : config.serveUi ? "static" : "none";
   const storageService = createStorageServiceFromConfig(config);
+  const hasFeedbackExportConfig =
+    Boolean(config.feedbackExportBackendUrl?.trim()) ||
+    Boolean(config.feedbackExportBackendToken?.trim());
   const feedback = feedbackService(db as any, {
-    shareClient: createFeedbackTraceShareClientFromConfig(config),
+    shareClient: hasFeedbackExportConfig
+      ? createFeedbackTraceShareClientFromConfig(config)
+      : undefined,
   });
   const app = await createApp(db as any, {
     uiMode,
     serverPort: listenPort,
     storageService,
-    feedbackExportService: feedback,
+    feedbackExportService: hasFeedbackExportConfig ? feedback : undefined,
     deploymentMode: config.deploymentMode,
     deploymentExposure: config.deploymentExposure,
     allowedHostnames: config.allowedHostnames,
