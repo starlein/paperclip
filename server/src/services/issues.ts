@@ -1948,6 +1948,17 @@ export function issueService(db: Db) {
         const agentKey = normalizeAgentUrlKey(agent.name);
         if (agentKey && tokens.has(agentKey)) {
           resolved.add(agent.id);
+          continue;
+        }
+        // Multi-word greedy match: agents write "@QA Agent" (with space) but the
+        // regex only captures "QA". Check if "@<Full Name>" appears in the body.
+        const nameLower = agent.name.toLowerCase();
+        if (nameLower.includes(" ")) {
+          const escaped = agent.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const pattern = new RegExp(`@${escaped}\\b`, "gi");
+          if (pattern.test(body)) {
+            resolved.add(agent.id);
+          }
         }
       }
       return [...resolved];

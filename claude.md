@@ -425,7 +425,7 @@ Board users bypass all URL validation.
 |---|---|
 | Ownership | Agent must be current assignee (control-plane roles bypass) |
 | Dispatchability | Target agent must not be paused/error/terminated/pending_approval |
-| Role matrix | `engineer→[qa,devops]`, `devops→[qa]`, `qa→[engineer,devops]`, control-plane→any |
+| Role matrix | All roles can escalate to management (CEO, CTO). Operational: `engineer→[qa,devops]`, `devops→[qa,engineer]`, `qa→[engineer,devops]`, `pm→[engineer,devops,qa]`, `cmo→[engineer,devops,qa,pm]`, `researcher→[engineer,qa]`, `general→[engineer,qa,devops]`. Control-plane→any. |
 | Status consistency | Engineer→QA expects `in_review`; QA→engineer expects `in_progress` (logged, not blocked) |
 | Same-role lateral | Blocked for non-control-plane actors |
 
@@ -460,11 +460,11 @@ Board users bypass all URL validation.
 - `server/src/__tests__/transition-gate.test.ts` — 12 transition gate tests
 - `server/src/__tests__/delivery-gate.test.ts` — 10 delivery gate tests (including URL verification)
 - `server/src/__tests__/qa-gate.test.ts` — 13 QA gate tests (including 3 self-QA prevention cases)
-- `server/src/__tests__/assignment-policy-gate.test.ts` — 16 assignment policy tests
+- `server/src/__tests__/assignment-policy-gate.test.ts` — 21 assignment policy tests
 - `server/src/__tests__/comment-required-gate.test.ts` — 7 comment-required gate tests
 - `server/src/__tests__/review-handoff-gate.test.ts` — 8 review handoff gate tests
 - `server/src/__tests__/agent-dispatchability.test.ts` — 8 dispatchability predicate tests
-- `server/src/__tests__/mention-agent-matching.test.ts` — 15 mention resolution tests
+- `server/src/__tests__/mention-agent-matching.test.ts` — 19 mention resolution tests
 - `server/src/__tests__/work-product-verification.test.ts` — 11 work product URL verification tests
 - `server/src/services/workspace-runtime.ts` — workspace ready comment
 - `server/src/onboarding-assets/default/AGENTS.md` — Code Delivery Protocol + QA Approval Protocol + Assignment Policy
@@ -795,7 +795,7 @@ Live-tested on production (2026-04-02): Comment `@release-manager` on DLD-1556 s
 
 - `server/src/services/issues.ts` — `findMentionedAgents()` (the fix)
 - `packages/shared/src/agent-url-key.ts` — `normalizeAgentUrlKey()` (shared utility)
-- `server/src/__tests__/mention-agent-matching.test.ts` — 15 unit tests for mention resolution
+- `server/src/__tests__/mention-agent-matching.test.ts` — 19 unit tests for mention resolution
 
 ### Mention syntax reference
 

@@ -5,7 +5,8 @@ import { normalizeAgentMentionToken } from "../services/issues.js";
 /**
  * Simulates the matching logic in findMentionedAgents() (services/issues.ts)
  * without requiring a database connection.  The regex, token normalisation,
- * and two-pass comparison (direct name ∪ kebab-key) mirror production exactly.
+ * and three-pass comparison (direct name ∪ kebab-key ∪ multi-word greedy)
+ * mirror production exactly.
  */
 function matchMentionedAgents(
   body: string,
@@ -32,6 +33,16 @@ function matchMentionedAgents(
     const agentKey = normalizeAgentUrlKey(agent.name);
     if (agentKey && tokens.has(agentKey)) {
       resolved.add(agent.id);
+      continue;
+    }
+    // Pass 3: multi-word greedy match ("@QA Agent" in body text)
+    const nameLower = agent.name.toLowerCase();
+    if (nameLower.includes(" ")) {
+      const escaped = agent.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(`@${escaped}\\b`, "gi");
+      if (pattern.test(body)) {
+        resolved.add(agent.id);
+      }
     }
   }
   return [...resolved];
@@ -97,6 +108,24 @@ describe("mention agent matching", () => {
   it("resolves mix of single-word and kebab-case mentions", () => {
     const result = matchMentionedAgents("@hermes @senior-platform-engineer coordinate", AGENTS);
     expect(result.sort()).toEqual(["a5", "a7"]);
+  });
+
+  // --- Multi-word names via natural space syntax ---
+
+  it("matches '@QA Agent' with space to 'QA Agent'", () => {
+    expect(matchMentionedAgents("@QA Agent — please review", AGENTS)).toEqual(["a3"]);
+  });
+
+  it("matches '@Senior Platform Engineer' with spaces", () => {
+    expect(matchMentionedAgents("@Senior Platform Engineer check this", AGENTS)).toEqual(["a5"]);
+  });
+
+  it("matches '@QA Agent' case-insensitively", () => {
+    expect(matchMentionedAgents("@qa agent please review", AGENTS)).toEqual(["a3"]);
+  });
+
+  it("matches '@Release Manager' with space", () => {
+    expect(matchMentionedAgents("@Release Manager ship it", AGENTS)).toEqual(["a6"]);
   });
 
   // --- Edge cases ---

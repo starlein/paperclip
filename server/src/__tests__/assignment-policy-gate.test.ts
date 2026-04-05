@@ -29,6 +29,7 @@ const CMO_1       = "aaaa0005-0005-4005-8005-000000000005";
 const ENGINEER_2  = "aaaa0006-0006-4006-8006-000000000006";
 const DEVOPS_1    = "aaaa0007-0007-4007-8007-000000000007";
 const CROSS_1     = "aaaa0008-0008-4008-8008-000000000008";
+const CTO_1       = "aaaa0009-0009-4009-8009-000000000009";
 const NONEXISTENT = "aaaa0099-0099-4099-8099-000000000099";
 
 const engineerAgent = {
@@ -101,6 +102,16 @@ const devopsAgent = {
   permissions: { canCreateAgents: false },
 };
 
+const ctoAgent = {
+  id: CTO_1,
+  companyId: "company-1",
+  name: "CTO",
+  role: "cto",
+  status: "active",
+  pauseReason: null,
+  permissions: { canCreateAgents: true },
+};
+
 const crossCompanyAgent = {
   id: CROSS_1,
   companyId: "other-company",
@@ -119,6 +130,7 @@ const agentMap: Record<string, typeof engineerAgent> = {
   [CMO_1]: cmoAgent,
   [ENGINEER_2]: otherEngineer,
   [DEVOPS_1]: devopsAgent,
+  [CTO_1]: ctoAgent,
   [CROSS_1]: crossCompanyAgent,
 };
 
@@ -296,6 +308,66 @@ describe("assignment policy gate", () => {
     const res = await request(createAgentApp(ENGINEER_1))
       .patch(`/api/issues/${issue.id}`)
       .send({ assigneeAgentId: DEVOPS_1, comment: "Needs SPE for VPS access" });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("devops (SPE) can assign to engineer for code handoff", async () => {
+    const issue = makeIssue({ assigneeAgentId: DEVOPS_1, status: "in_progress" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({
+      ...issue,
+      assigneeAgentId: ENGINEER_1,
+    });
+
+    const res = await request(createAgentApp(DEVOPS_1))
+      .patch(`/api/issues/${issue.id}`)
+      .send({ assigneeAgentId: ENGINEER_1, comment: "Returning to engineer" });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("engineer can escalate to CTO (management escalation)", async () => {
+    const issue = makeIssue({ assigneeAgentId: ENGINEER_1, status: "in_progress" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({
+      ...issue,
+      assigneeAgentId: CTO_1,
+    });
+
+    const res = await request(createAgentApp(ENGINEER_1))
+      .patch(`/api/issues/${issue.id}`)
+      .send({ assigneeAgentId: CTO_1, comment: "Escalating to CTO for decision" });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("devops can escalate to CEO (management escalation)", async () => {
+    const issue = makeIssue({ assigneeAgentId: DEVOPS_1, status: "in_progress" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({
+      ...issue,
+      assigneeAgentId: CEO_1,
+    });
+
+    const res = await request(createAgentApp(DEVOPS_1))
+      .patch(`/api/issues/${issue.id}`)
+      .send({ assigneeAgentId: CEO_1, comment: "Escalating to CEO" });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("QA can escalate to CTO (management escalation)", async () => {
+    const issue = makeIssue({ assigneeAgentId: QA_1, status: "in_review" });
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({
+      ...issue,
+      assigneeAgentId: CTO_1,
+    });
+
+    const res = await request(createAgentApp(QA_1))
+      .patch(`/api/issues/${issue.id}`)
+      .send({ assigneeAgentId: CTO_1, comment: "Escalating to CTO for guidance" });
 
     expect(res.status).toBe(200);
   });

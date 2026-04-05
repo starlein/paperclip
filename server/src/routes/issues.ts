@@ -291,12 +291,18 @@ export function issueRoutes(
   // They are still subject to target existence, company, and dispatchability checks.
   const CONTROL_PLANE_ROLES = new Set(["ceo", "cto"]);
 
-  // Narrow handoff matrix: only the minimum needed to solve real workflow handoffs.
-  // Widen as new use cases emerge.
+  // Role handoff matrix: operational handoffs + management escalation.
+  // Every non-control-plane role can escalate to CEO/CTO.
+  // Same-role lateral handoffs are blocked separately below.
+  const MANAGEMENT_ROLES = ["ceo", "cto"] as const;
   const ALLOWED_HANDOFFS: Record<string, readonly string[]> = {
-    engineer: ["qa", "devops"],
-    devops: ["qa"],
-    qa: ["engineer", "devops"],
+    engineer: ["qa", "devops", ...MANAGEMENT_ROLES],
+    devops: ["qa", "engineer", ...MANAGEMENT_ROLES],
+    qa: ["engineer", "devops", ...MANAGEMENT_ROLES],
+    pm: ["engineer", "devops", "qa", ...MANAGEMENT_ROLES],
+    cmo: ["engineer", "devops", "qa", "pm", ...MANAGEMENT_ROLES],
+    researcher: ["engineer", "qa", ...MANAGEMENT_ROLES],
+    general: ["engineer", "qa", "devops", ...MANAGEMENT_ROLES],
   };
 
   // Lightweight status-role consistency: expected status for role handoff pairs.
