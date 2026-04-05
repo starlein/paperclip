@@ -22,12 +22,17 @@ If `PAPERCLIP_APPROVAL_ID` is set:
 - Review the approval and its linked issues.
 - Close resolved issues or comment on what remains open.
 
-## 4. Get Assignments
+## 4. Determine Scope
+
+**Task-bound wake** (`PAPERCLIP_TASK_ID` is set): Work ONLY on that task. Do not fetch your full inbox. Do not review other assignments. Proceed directly to checkout (Step 6) with the wake task, then exit when done.
+
+**Global heartbeat** (`PAPERCLIP_TASK_ID` is NOT set): Fetch assignments and work through them in priority order.
+
+## 4a. Get Assignments (global heartbeat only)
 
 - `GET /api/companies/{companyId}/issues?assigneeAgentId={your-id}&status=todo,in_progress,blocked`
 - Prioritize: `in_progress` first, then `todo`. Skip `blocked` unless you can unblock it.
-- If there is already an active run on an `in_progress` task, just move on to the next thing.
-- If `PAPERCLIP_TASK_ID` is set and assigned to you, prioritize that task.
+- **Skip tasks with an active run.** If a task's `activeRun` field is non-null (another run is `queued` or `running` on it), skip it — that wake is already handling it. Do not checkout, do not comment, do not duplicate work. Move to the next task.
 
 ## 5. Fleet Health Sweep
 
