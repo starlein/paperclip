@@ -264,6 +264,237 @@
   }
 }
 
+/* ===== HUD COMMAND CENTER ANIMATIONS ===== */
+
+/* Scan Line — sweeps down panels */
+@keyframes hud-scan {
+  0% { transform: translateY(0); opacity: 0; }
+  5% { opacity: 1; }
+  95% { opacity: 1; }
+  100% { transform: translateY(100cqh); opacity: 0; }
+}
+
+/* Border Trace — electric blue glow traces panel edge on hover */
+@keyframes border-trace {
+  0% { background-position: 0% 0%; }
+  100% { background-position: 200% 0%; }
+}
+
+/* Glow Pulse — status indicators breathe */
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 4px var(--glow-color, oklch(0.72 0.15 220)); }
+  50% { box-shadow: 0 0 12px var(--glow-color, oklch(0.72 0.15 220)), 0 0 24px var(--glow-color, oklch(0.72 0.15 220)); }
+}
+
+/* Data Reveal — blur-to-sharp transition */
+@keyframes data-reveal {
+  0% { opacity: 0; filter: blur(4px); transform: translateY(4px); }
+  100% { opacity: 1; filter: blur(0); transform: translateY(0); }
+}
+
+/* Boot Sequence — page entrance */
+@keyframes boot-in {
+  0% { opacity: 0; transform: translateY(8px); filter: blur(2px); }
+  40% { opacity: 0.7; filter: blur(0); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* Radar Sweep — radial sweep on circular widgets */
+@keyframes radar-sweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Background Grid Pulse — tactical grid breathes */
+@keyframes grid-fade {
+  0%, 100% { opacity: 0.03; }
+  50% { opacity: 0.07; }
+}
+
+/* Holographic Shimmer — diagonal light sweep */
+@keyframes holo-shimmer {
+  0% { transform: translateX(-100%) rotate(-45deg); }
+  100% { transform: translateX(200%) rotate(-45deg); }
+}
+
+/* ===== HUD UTILITY CLASSES ===== */
+
+/* Font utilities */
+.font-display { font-family: var(--font-display); }
+.font-mono { font-family: var(--font-mono); }
+
+/* Boot-in animation (triggered by useBootAnimation hook) */
+.hud-boot {
+  animation: boot-in 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: filter, transform, opacity;
+}
+
+/* Data reveal container — children stagger in */
+.data-reveal > * {
+  animation: data-reveal 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: filter, transform, opacity;
+}
+.data-reveal > :nth-child(1) { animation-delay: 0ms; }
+.data-reveal > :nth-child(2) { animation-delay: 50ms; }
+.data-reveal > :nth-child(3) { animation-delay: 50ms; }
+.data-reveal > :nth-child(4) { animation-delay: 150ms; }
+.data-reveal > :nth-child(5) { animation-delay: 200ms; }
+.data-reveal > :nth-child(6) { animation-delay: 250ms; }
+.data-reveal > :nth-child(7) { animation-delay: 300ms; }
+.data-reveal > :nth-child(8) { animation-delay: 350ms; }
+.data-reveal > :nth-child(9) { animation-delay: 400ms; }
+.data-reveal > :nth-child(10) { animation-delay: 450ms; }
+
+/* Section header with decorative // prefix */
+.hud-section-header {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.hud-section-header::before {
+  content: "// ";
+  color: var(--muted-foreground);
+}
+
+/* HUD Panel — clip-path tactical corners */
+.hud-panel {
+  position: relative;
+  container-type: size;
+}
+
+/* Scan line pseudo-element on panels */
+.hud-panel::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--primary);
+  opacity: 0.15;
+  animation: hud-scan 8s linear infinite;
+  will-change: transform, opacity;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Inner wrapper gets the clip-path (so pseudo-elements on outer are not clipped) */
+.hud-panel-inner {
+  clip-path: polygon(
+    0 0,
+    calc(100% - 12px) 0,
+    100% 12px,
+    100% 100%,
+    12px 100%,
+    0 calc(100% - 12px)
+  );
+}
+
+/* Border trace on hover */
+.hud-border-trace {
+  position: relative;
+}
+.hud-border-trace::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid transparent;
+  background: linear-gradient(90deg, transparent 0%, var(--primary) 50%, transparent 100%) border-box;
+  background-size: 200% 100%;
+  mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 200ms;
+  pointer-events: none;
+  z-index: 2;
+  border-radius: inherit;
+}
+.hud-border-trace:hover::before {
+  opacity: 1;
+  animation: border-trace 2s linear infinite;
+}
+
+/* Holographic shimmer on hover */
+.hud-shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.hud-shimmer::after {
+  content: "";
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(255, 255, 255, 0.03) 45%,
+    rgba(255, 255, 255, 0.05) 50%,
+    rgba(255, 255, 255, 0.03) 55%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 1;
+  transform: translateX(-100%) rotate(-45deg);
+}
+.hud-shimmer:hover::after {
+  animation: holo-shimmer 1.5s ease-in-out;
+}
+
+/* Glow pulse for status indicators */
+.hud-glow {
+  animation: glow-pulse 2s ease-in-out infinite;
+  --glow-color: var(--primary);
+}
+.hud-glow-fast {
+  animation: glow-pulse 1.5s ease-in-out infinite;
+  --glow-color: var(--status-error);
+}
+.hud-glow-success {
+  animation: glow-pulse 2s ease-in-out infinite;
+  --glow-color: var(--status-active);
+}
+
+/* Background tactical grid */
+.hud-grid-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image:
+    repeating-linear-gradient(0deg, var(--border) 0 1px, transparent 1px 60px),
+    repeating-linear-gradient(90deg, var(--border) 0 1px, transparent 1px 60px);
+  animation: grid-fade 6s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Accessibility: respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Mobile: reduce animation intensity */
+@media (max-width: 768px) {
+  .hud-glow,
+  .hud-glow-fast,
+  .hud-glow-success {
+    animation: none;
+  }
+  .hud-shimmer:hover::after {
+    animation: none;
+  }
+  .hud-panel::after {
+    animation-duration: 16s;
+  }
+}
+
 /* MDXEditor theme integration */
 .paperclip-mdxeditor-scope,
 .paperclip-mdxeditor {
@@ -482,7 +713,7 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
   padding: 0;
   border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
   border-radius: calc(var(--radius) - 3px);
-  background: #1e1e2e;
+  background: oklch(0.14 0.015 240);
   color: #cdd6f4;
   overflow-x: auto;
 }
@@ -490,19 +721,19 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
 /* Dark theme for CodeMirror code blocks inside the MDXEditor.
    Overrides the default cm6-theme-basic-light that MDXEditor bundles. */
 .paperclip-mdxeditor .cm-editor {
-  background-color: #1e1e2e !important;
+  background-color: oklch(0.14 0.015 240) !important;
   color: #cdd6f4 !important;
   font-size: 1em;
 }
 
 .paperclip-mdxeditor .cm-gutters {
-  background-color: #181825 !important;
+  background-color: oklch(0.12 0.015 240) !important;
   color: #585b70 !important;
   border-right: 1px solid #313244 !important;
 }
 
 .paperclip-mdxeditor .cm-activeLineGutter {
-  background-color: #1e1e2e !important;
+  background-color: oklch(0.14 0.015 240) !important;
 }
 
 .paperclip-mdxeditor .cm-activeLine {
@@ -559,16 +790,16 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
    Dark theme code blocks with compact sizing.
    Override prose CSS variables so prose-invert can't revert to defaults. */
 .paperclip-markdown {
-  --tw-prose-pre-bg: #1e1e2e;
+  --tw-prose-pre-bg: oklch(0.14 0.015 240);
   --tw-prose-pre-code: #cdd6f4;
-  --tw-prose-invert-pre-bg: #1e1e2e;
+  --tw-prose-invert-pre-bg: oklch(0.14 0.015 240);
   --tw-prose-invert-pre-code: #cdd6f4;
 }
 
 .paperclip-markdown pre {
   border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent) !important;
   border-radius: calc(var(--radius) - 3px) !important;
-  background-color: #1e1e2e !important;
+  background-color: oklch(0.14 0.015 240) !important;
   color: #cdd6f4 !important;
   padding: 0.5rem 0.65rem !important;
   margin: 0.4rem 0 !important;
