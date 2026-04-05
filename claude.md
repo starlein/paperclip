@@ -4,6 +4,29 @@
 - SSH: `root@64.176.199.162`
 - Password: `bS%4nhouDq+gayS[`
 
+## Browser Testing VPS
+
+Dedicated headless/headed browser testing VPS for agent QA and verification.
+
+- **IP**: `207.148.14.165`
+- **SSH**: `root@207.148.14.165`
+- **Software**: Chromium + Playwright pre-installed, Xvfb for headed mode
+- **Agent SSH key**: `/paperclip/.ssh/id_ed25519_test_vps` (on `paperclip-data` volume, accessible to all agents)
+- **Agent env vars**: `BROWSER_TEST_HOST`, `BROWSER_TEST_USER`, `BROWSER_TEST_SSH_KEY` wired to all 24 non-terminated agents
+
+**Commands from agent container:**
+```bash
+ssh -i $BROWSER_TEST_SSH_KEY -o StrictHostKeyChecking=no $BROWSER_TEST_USER@$BROWSER_TEST_HOST \
+  'browser-test headless <url>'
+```
+
+**DOM dump:**
+```bash
+ssh -i $BROWSER_TEST_SSH_KEY -o StrictHostKeyChecking=no $BROWSER_TEST_USER@$BROWSER_TEST_HOST \
+  'DISPLAY=:99 /root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome \
+   --headless --no-sandbox --disable-gpu --dump-dom <url> | head -50'
+```
+
 ## Notes
 
 - Paperclip path: `/opt/paperclip`
