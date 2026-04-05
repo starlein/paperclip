@@ -42,6 +42,7 @@ vi.mock("../services/index.js", () => ({
   goalService: () => ({}),
   heartbeatService: () => ({
     reportRunActivity: vi.fn(async () => undefined),
+    getRun: vi.fn(async () => ({ contextSnapshot: {} })),
   }),
   instanceSettingsService: () => ({}),
   issueApprovalService: () => ({}),

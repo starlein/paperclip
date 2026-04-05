@@ -49,6 +49,7 @@ import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
 import { isAllowedContentType, MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
 import { queueIssueAssignmentWakeup } from "../services/issue-assignment-wakeup.js";
 import { isDispatchableAgent } from "../utils/agent-dispatchability.js";
+import { getTaskBoundScope, assertTaskBoundAccess } from "../utils/task-bound-scope.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
 const updateIssueRouteSchema = updateIssueSchema.extend({
@@ -93,6 +94,39 @@ export function issueRoutes(
     } catch (err) {
       logger.error({ err, issueId }, "failed to increment gate block count");
     }
+  }
+
+  /**
+   * Task-bound scope enforcement. Returns true if access is allowed,
+   * false if blocked (response already sent). Board users always pass.
+   */
+  async function enforceTaskBoundScope(
+    req: Request,
+    res: Response,
+    issue: { id: string; companyId: string },
+    httpStatus?: number,
+  ): Promise<boolean> {
+    const scope = await getTaskBoundScope(req, (runId) => heartbeat.getRun(runId));
+    const block = assertTaskBoundAccess(scope, issue.id);
+    if (!block) return true;
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "issue.task_bound_scope_blocked",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        gate: block.gate,
+        boundIssueId: scope.boundIssueId,
+        endpoint: req.method + " " + (req.route?.path ?? req.path),
+      },
+    });
+    res.status(httpStatus ?? 422).json({ error: block.reason, gate: block.gate });
+    return false;
   }
 
   const upload = multer({
@@ -583,6 +617,22 @@ export function issueRoutes(
       return;
     }
 
+    // Task-bound scope: short-circuit to avoid full DB query
+    const scope = await getTaskBoundScope(req, (runId) => heartbeat.getRun(runId));
+    if (scope.isTaskBound) {
+      if (!scope.boundIssueId) {
+        res.json([]);
+        return;
+      }
+      const issue = await svc.getById(scope.boundIssueId);
+      if (issue && issue.companyId === companyId) {
+        res.json([issue]);
+      } else {
+        res.json([]);
+      }
+      return;
+    }
+
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
@@ -601,6 +651,7 @@ export function issueRoutes(
         req.query.includeRoutineExecutions === "true" || req.query.includeRoutineExecutions === "1",
       q: req.query.q as string | undefined,
     });
+
     res.json(result);
   });
 
@@ -666,6 +717,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
     const [{ project, goal }, ancestors, mentionedProjectIds, documentPayload] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
       svc.getAncestors(issue.id),
@@ -700,6 +752,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
 
     const wakeCommentId =
       typeof req.query.wakeCommentId === "string" && req.query.wakeCommentId.trim().length > 0
@@ -768,6 +821,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
     const workProducts = await workProductsSvc.listForIssue(issue.id);
     res.json(workProducts);
   });
@@ -780,6 +834,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
     const docs = await documentsSvc.listIssueDocuments(issue.id);
     res.json(docs);
   });
@@ -813,6 +868,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue))) return;
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
@@ -863,6 +919,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
     const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
@@ -884,6 +941,7 @@ export function issueRoutes(
         return;
       }
       assertCompanyAccess(req, issue.companyId);
+      if (!(await enforceTaskBoundScope(req, res, issue))) return;
       const keyParsed = issueDocumentKeySchema.safeParse(String(req.params.key ?? "").trim().toLowerCase());
       if (!keyParsed.success) {
         res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
@@ -931,6 +989,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue))) return;
     if (req.actor.type !== "board") {
       res.status(403).json({ error: "Board authentication required" });
       return;
@@ -972,6 +1031,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue))) return;
 
     // Agents must provide valid GitHub URLs for code delivery work products
     if (req.actor.type === "agent") {
@@ -1039,6 +1099,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await enforceTaskBoundScope(req, res, { id: existing.issueId, companyId: existing.companyId }))) return;
     const product = await workProductsSvc.update(id, req.body);
     if (!product) {
       res.status(404).json({ error: "Work product not found" });
@@ -1067,6 +1128,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await enforceTaskBoundScope(req, res, { id: existing.issueId, companyId: existing.companyId }))) return;
     const removed = await workProductsSvc.remove(id);
     if (!removed) {
       res.status(404).json({ error: "Work product not found" });
@@ -1368,6 +1430,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await enforceTaskBoundScope(req, res, existing))) return;
 
     // Auto-assign from @mention: when an agent transitions to in_review without setting
     // assigneeAgentId, infer the assignment from @mentions in the PATCH comment or
@@ -1928,6 +1991,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await enforceTaskBoundScope(req, res, existing))) return;
     const attachments = await svc.listAttachments(id);
 
     const issue = await svc.remove(id);
@@ -1967,6 +2031,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue))) return;
 
     if (issue.projectId) {
       const project = await projectsSvc.getById(issue.projectId);
@@ -2072,6 +2137,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
     const afterCommentId =
       typeof req.query.after === "string" && req.query.after.trim().length > 0
         ? req.query.after.trim()
@@ -2107,6 +2173,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
     const comment = await svc.getComment(commentId);
     if (!comment || comment.issueId !== id) {
       res.status(404).json({ error: "Comment not found" });
@@ -2203,31 +2270,10 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue))) return;
     if (!(await assertAgentRunCheckoutOwnership(req, res, issue))) return;
 
     const actor = getActorInfo(req);
-
-    // Cross-issue comment detection (fire-and-forget, observe-only).
-    // Logs a warning when an agent run comments on an issue it was not dispatched for.
-    if (actor.runId && actor.agentId) {
-      void (async () => {
-        try {
-          const commentRun = await heartbeat.getRun(actor.runId!);
-          if (commentRun) {
-            const runContext = commentRun.contextSnapshot as Record<string, unknown> | null;
-            const dispatchedIssueId = typeof runContext?.issueId === "string" ? runContext.issueId : undefined;
-            if (dispatchedIssueId && dispatchedIssueId !== id) {
-              logger.warn({
-                runId: actor.runId,
-                agentId: actor.agentId,
-                dispatchedIssueId,
-                commentedIssueId: id,
-              }, "cross-issue comment: agent run commenting on non-dispatched issue");
-            }
-          }
-        } catch { /* swallow — observability only */ }
-      })();
-    }
 
     const reopenRequested = req.body.reopen === true;
     const interruptRequested = req.body.interrupt === true;
@@ -2528,6 +2574,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, issue.companyId);
+    if (!(await enforceTaskBoundScope(req, res, issue, 403))) return;
     const attachments = await svc.listAttachments(issueId);
     res.json(attachments.map(withContentPath));
   });
@@ -2541,6 +2588,7 @@ export function issueRoutes(
       res.status(404).json({ error: "Issue not found" });
       return;
     }
+    if (!(await enforceTaskBoundScope(req, res, issue))) return;
     if (issue.companyId !== companyId) {
       res.status(422).json({ error: "Issue does not belong to company" });
       return;
@@ -2631,6 +2679,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, attachment.companyId);
+    if (!(await enforceTaskBoundScope(req, res, { id: attachment.issueId, companyId: attachment.companyId }, 403))) return;
 
     const object = await storage.getObject(attachment.companyId, attachment.objectKey);
     res.setHeader("Content-Type", attachment.contentType || object.contentType || "application/octet-stream");
@@ -2653,6 +2702,7 @@ export function issueRoutes(
       return;
     }
     assertCompanyAccess(req, attachment.companyId);
+    if (!(await enforceTaskBoundScope(req, res, { id: attachment.issueId, companyId: attachment.companyId }))) return;
 
     try {
       await storage.deleteObject(attachment.companyId, attachment.objectKey);

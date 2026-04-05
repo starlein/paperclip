@@ -51,6 +51,7 @@ import { redactEventPayload } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import { renderOrgChartSvg, renderOrgChartPng, type OrgNode, type OrgChartStyle, ORG_CHART_STYLES } from "./org-chart-svg.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { getTaskBoundScope } from "../utils/task-bound-scope.js";
 import { runClaudeLogin } from "@paperclipai/adapter-claude-local/server";
 import { DEFAULT_CLAUDE_LOCAL_SKIP_PERMISSIONS } from "@paperclipai/adapter-claude-local";
 import {
@@ -1065,6 +1066,36 @@ export function agentRoutes(db: Db) {
   router.get("/agents/me/inbox-lite", async (req, res) => {
     if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.companyId) {
       res.status(401).json({ error: "Agent authentication required" });
+      return;
+    }
+
+    const scope = await getTaskBoundScope(req, (runId) => heartbeat.getRun(runId));
+
+    if (scope.isTaskBound) {
+      if (!scope.boundIssueId) {
+        // Fail-closed: can't resolve bound issue → empty inbox
+        res.json([]);
+        return;
+      }
+      // Fetch only the bound issue
+      const issuesSvc = issueService(db);
+      const issue = await issuesSvc.getById(scope.boundIssueId);
+      if (issue && issue.assigneeAgentId === req.actor.agentId) {
+        res.json([{
+          id: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+          status: issue.status,
+          priority: issue.priority,
+          projectId: issue.projectId,
+          goalId: issue.goalId,
+          parentId: issue.parentId,
+          updatedAt: issue.updatedAt,
+          activeRun: null,
+        }]);
+      } else {
+        res.json([]);
+      }
       return;
     }
 
