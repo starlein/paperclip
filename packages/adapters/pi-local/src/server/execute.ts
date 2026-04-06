@@ -316,6 +316,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const wakeNote = asString(context.paperclipWakeNote, "").trim();
   const permissionNote = asString(context.paperclipPermissionNote, "").trim();
   const rosterNote = renderAgentRosterNote(context.paperclipAgentRoster);
   const apiUrlNote = env.PAPERCLIP_API_URL
@@ -324,6 +325,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const userPrompt = joinPromptSections([
     renderedBootstrapPrompt,
     sessionHandoffNote,
+    wakeNote,
     permissionNote,
     rosterNote,
     apiUrlNote,

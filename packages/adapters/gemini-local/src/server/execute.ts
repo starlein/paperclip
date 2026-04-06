@@ -302,6 +302,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? renderTemplate(bootstrapPromptTemplate, templateData).trim()
       : "";
   const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
+  const wakeNote = asString(context.paperclipWakeNote, "").trim();
   const rosterNote = renderAgentRosterNote(context.paperclipAgentRoster);
   const paperclipEnvNote = renderPaperclipEnvNote(env);
   const apiAccessNote = renderApiAccessNote(env);
@@ -309,6 +310,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     instructionsPrefix,
     renderedBootstrapPrompt,
     sessionHandoffNote,
+    wakeNote,
     rosterNote,
     paperclipEnvNote,
     apiAccessNote,

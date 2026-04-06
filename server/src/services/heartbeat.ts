@@ -2824,6 +2824,27 @@ export function heartbeatService(db: Db) {
       ].filter(Boolean).join("\n");
       context.paperclipCanAssignTasks = agentCanAssignTasks;
 
+      // Build wake context note so LLMs know which issue triggered this run
+      const wakeReason = readNonEmptyString(context.wakeReason);
+      const wakeCommentId = readNonEmptyString(context.wakeCommentId) ?? readNonEmptyString(context.commentId);
+      if (issueContext?.identifier) {
+        const lines = [
+          "## Wake Context (this heartbeat)",
+          `- **Wake type**: Task-bound — ${wakeReason ?? "issue dispatch"}`,
+          `- **Issue**: ${issueContext.identifier} — ${issueContext.title ?? "(no title)"}`,
+        ];
+        if (wakeCommentId) {
+          lines.push(`- **Triggering comment**: ${wakeCommentId} (fetch via GET /api/companies/{companyId}/issues/{issueId}/comments)`);
+        }
+        lines.push("- You MUST work on this specific issue. Do not scan your full inbox.");
+        context.paperclipWakeNote = lines.join("\n");
+      } else {
+        context.paperclipWakeNote = [
+          "## Wake Context (this heartbeat)",
+          "- **Wake type**: Global heartbeat — fetch your inbox and work through assignments.",
+        ].join("\n");
+      }
+
       // Build agent roster so LLMs have accurate IDs (prevents UUID confabulation)
       const companyAgents = await db
         .select({
