@@ -4697,6 +4697,19 @@ export function heartbeatService(db: Db) {
       const bypassed: Array<{ identifier: string | null; status: string }> = [];
 
       for (const issue of recentlyClosed) {
+        // Skip if already flagged — prevents duplicate entries every sweep cycle
+        const [alreadyFlagged] = await db
+          .select({ id: activityLog.id })
+          .from(activityLog)
+          .where(
+            and(
+              eq(activityLog.entityId, issue.id),
+              eq(activityLog.action, "issue.db_bypass_detected"),
+            ),
+          )
+          .limit(1);
+        if (alreadyFlagged) continue;
+
         const [logEntry] = await db
           .select({ id: activityLog.id })
           .from(activityLog)
