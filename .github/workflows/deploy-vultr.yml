@@ -148,6 +148,28 @@ jobs:
             ./ \
             "vultr-deploy:$VULTR_RELEASE_DIR/"
 
+      - name: Deploy and reload nginx
+        run: |
+          set -euo pipefail
+          # Deploy the tracked nginx config from the release dir to the live nginx sites-available path.
+          # vps-edge.conf is the source of truth; this step prevents the WS proxy block from
+          # silently disappearing after git-pull deploys (DLD-828, DLD-1602, DLD-2045).
+          ssh -F "$HOME/.ssh/config" \
+            vultr-deploy \
+            'set -euo pipefail
+            nginx_src="'"$VULTR_RELEASE_DIR"'/deploy/nginx/vps-edge.conf"
+            nginx_dest="/etc/nginx/sites-available/viracue.conf"
+            nginx_enabled="/etc/nginx/sites-enabled/viracue"
+            # Copy tracked config to live nginx path
+            cp "$nginx_src" "$nginx_dest"
+            # Enable the site (symlink if not already linked)
+            if [ ! -L "$nginx_enabled" ] && [ ! -f "$nginx_enabled" ]; then
+              ln -s "$nginx_dest" "$nginx_enabled"
+            fi
+            # Validate and reload
+            nginx -t && nginx -s reload
+            echo "NGINX_RELOAD_OK"'
+
       - name: Backup production database
         run: |
           set -euo pipefail
@@ -193,6 +215,15 @@ jobs:
             docker compose --project-name paperclip --env-file '$VULTR_ENV_FILE' \
               -f '$VULTR_RELEASE_DIR/docker-compose.vps.yml' \
               up -d --force-recreate --no-deps server edge"
+
+      - name: Capture restart forensics snapshot
+        run: |
+          set -euo pipefail
+          ssh -F "$HOME/.ssh/config" \
+            vultr-deploy \
+            "set -euo pipefail
+            FORENSICS_ROOT=/opt/paperclip/forensics \
+            '$VULTR_RELEASE_DIR/scripts/capture-restart-forensics.sh'"
 
       - name: Assert image revision provenance
         run: |
