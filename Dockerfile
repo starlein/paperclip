@@ -54,6 +54,8 @@ FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
 WORKDIR /app
+# Set home directory early to avoid conflicts in incremental builds
+RUN usermod -d /paperclip node
 COPY --chown=node:node --from=build /app /app
 RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai \
   && mkdir -p /paperclip \

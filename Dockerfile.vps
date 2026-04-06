@@ -74,7 +74,8 @@ WORKDIR /app
 COPY --chown=node:node --from=build /app /app
 ARG COMMIT_SHA=unknown
 LABEL org.opencontainers.image.revision=$COMMIT_SHA
-RUN mkdir -p /usr/local/lib/paperclip \
+RUN usermod -d /paperclip node \
+  && mkdir -p /usr/local/lib/paperclip \
   && mv /usr/bin/gh /usr/local/lib/paperclip/gh-real \
   && ln -sf /app/scripts/gh.sh /usr/bin/gh \
   && chmod +x /app/scripts/docker-entrypoint.sh /app/scripts/gh.sh /app/scripts/hermes-bridge.sh \

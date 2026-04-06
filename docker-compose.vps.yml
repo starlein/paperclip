@@ -54,6 +54,8 @@ services:
       STRIPE_TEST_SECRET_KEY: "${STRIPE_TEST_SECRET_KEY:-}"
       STRIPE_PUBLISHABLE_KEY: "${STRIPE_PUBLISHABLE_KEY:-}"
       STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      # OpenRouter API key — needed by pi --list-models for custom model providers in models.json
+      OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
     # gid 999 = docker group on host, needed for hermes-bridge.sh to docker-exec into hermes-agent container.
     group_add:
       - "999"
