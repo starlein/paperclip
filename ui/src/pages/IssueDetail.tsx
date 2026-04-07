@@ -588,6 +588,19 @@ export function IssueDetail() {
     [activity],
   );
 
+  const memoizedLiveRunSlot = useMemo(
+    () =>
+      hasLiveRuns ? (
+        <LiveRunWidget
+          issueId={issueId!}
+          companyId={issue?.companyId ?? ""}
+          liveRunsData={liveRuns ?? []}
+          activeRunData={activeRun ?? null}
+        />
+      ) : null,
+    [hasLiveRuns, issueId, issue?.companyId, liveRuns, activeRun],
+  );
+
   const issueCostSummary = useMemo(() => {
     let input = 0;
     let output = 0;
@@ -1595,16 +1608,7 @@ export function IssueDetail() {
             onAdd={handleCommentAdd}
             imageUploadHandler={handleCommentImageUpload}
             onAttachImage={handleCommentAttachImage}
-            liveRunSlot={
-              hasLiveRuns ? (
-                <LiveRunWidget
-                  issueId={issueId!}
-                  companyId={issue.companyId}
-                  liveRunsData={liveRuns ?? []}
-                  activeRunData={activeRun ?? null}
-                />
-              ) : null
-            }
+            liveRunSlot={memoizedLiveRunSlot}
           />
         </TabsContent>
 
