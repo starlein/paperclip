@@ -4518,7 +4518,7 @@ export function heartbeatService(db: Db) {
 
     async sweepUnpickedAssignments() {
       const UNPICKED_SLA_MS = 8 * 60 * 1000; // 8 minutes
-      const MAX_RETRIGGERS = 1;
+      const MAX_RETRIGGERS = 3;
       const now = new Date();
       const cutoff = new Date(now.getTime() - UNPICKED_SLA_MS);
 
