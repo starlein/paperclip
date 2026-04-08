@@ -69,6 +69,9 @@ vi.mock("../services/issue-assignment-wakeup.js", () => ({
   queueIssueAssignmentWakeup: vi.fn(),
 }));
 
+const AGENT_RELIABILITY_PROJECT_ID = "a2bb9b56-e3f1-4ac9-96bc-9ad033ee9365";
+const POLY_WEATHER_PROJECT_ID = "67118ae5-ada9-4c55-bb88-4ef8226a756e";
+
 const codeIssue = {
   id: "11111111-1111-4111-8111-111111111111",
   companyId: "company-1",
@@ -77,7 +80,7 @@ const codeIssue = {
   description: null,
   status: "in_progress",
   priority: "medium",
-  projectId: null,
+  projectId: AGENT_RELIABILITY_PROJECT_ID,
   goalId: null,
   parentId: null,
   assigneeAgentId: "agent-1",
@@ -95,6 +98,7 @@ const nonCodeIssue = {
   id: "22222222-2222-4222-8222-222222222222",
   identifier: "PAP-200",
   title: "Update docs",
+  projectId: null,
   executionWorkspaceId: null,
 };
 

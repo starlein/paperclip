@@ -69,6 +69,9 @@ vi.mock("../services/issue-assignment-wakeup.js", () => ({
   queueIssueAssignmentWakeup: vi.fn(),
 }));
 
+const AGENT_RELIABILITY_PROJECT_ID = "a2bb9b56-e3f1-4ac9-96bc-9ad033ee9365";
+const POLY_WEATHER_PROJECT_ID = "67118ae5-ada9-4c55-bb88-4ef8226a756e";
+
 const codeIssue = {
   id: "11111111-1111-4111-8111-111111111111",
   companyId: "company-1",
@@ -77,7 +80,7 @@ const codeIssue = {
   description: null,
   status: "in_progress",
   priority: "medium",
-  projectId: null,
+  projectId: AGENT_RELIABILITY_PROJECT_ID,
   goalId: null,
   parentId: null,
   assigneeAgentId: "agent-other",
@@ -90,12 +93,24 @@ const codeIssue = {
   updatedAt: new Date("2026-03-30T12:00:00Z"),
 };
 
-const nonCodeIssue = {
+/** Issue with no project (orphan) — exempt from gate. */
+const orphanIssue = {
   ...codeIssue,
   id: "22222222-2222-4222-8222-222222222222",
   identifier: "PAP-200",
   title: "Update docs",
+  projectId: null,
   executionWorkspaceId: null,
+};
+
+/** Issue in Poly-weather (non-code project) — exempt from gate even with workspace. */
+const polyWeatherIssue = {
+  ...codeIssue,
+  id: "33333333-3333-4333-8333-333333333333",
+  identifier: "PAP-300",
+  title: "Research report",
+  projectId: POLY_WEATHER_PROJECT_ID,
+  executionWorkspaceId: "ws-poly-weather",
 };
 
 /** Valid branch work product so delivery gate passes on in_review transitions. */
@@ -224,16 +239,31 @@ describe("engineer browse evidence gate", () => {
     expect(res.status).toBe(200);
   });
 
-  it("agent → in_review, non-code issue (no workspace) → 200 (exempt)", async () => {
-    mockIssueService.getById.mockResolvedValue(nonCodeIssue);
-    mockIssueService.update.mockResolvedValue({ ...nonCodeIssue, status: "in_review" });
+  it("agent → in_review, orphan issue (no projectId) → 200 (exempt)", async () => {
+    mockIssueService.getById.mockResolvedValue(orphanIssue);
+    mockIssueService.update.mockResolvedValue({ ...orphanIssue, status: "in_review" });
     mockIssueService.listComments.mockResolvedValue([]);
     mockIssueService.listAttachments.mockResolvedValue([]);
     mockWorkProductService.listForIssue.mockResolvedValue([]);
 
     const app = createAgentApp();
     const res = await request(app)
-      .patch(`/api/issues/${nonCodeIssue.id}`)
+      .patch(`/api/issues/${orphanIssue.id}`)
+      .send({ status: "in_review", comment: "Ready for review" });
+
+    expect(res.status).toBe(200);
+  });
+
+  it("agent → in_review, Poly-weather (non-code project, has workspace) → 200 (exempt)", async () => {
+    mockIssueService.getById.mockResolvedValue(polyWeatherIssue);
+    mockIssueService.update.mockResolvedValue({ ...polyWeatherIssue, status: "in_review" });
+    mockIssueService.listComments.mockResolvedValue([]);
+    mockIssueService.listAttachments.mockResolvedValue([]);
+    mockWorkProductService.listForIssue.mockResolvedValue([]);
+
+    const app = createAgentApp();
+    const res = await request(app)
+      .patch(`/api/issues/${polyWeatherIssue.id}`)
       .send({ status: "in_review", comment: "Ready for review" });
 
     expect(res.status).toBe(200);
@@ -460,13 +490,38 @@ describe("qa browse evidence gate", () => {
     expect(res.status).toBe(200);
   });
 
-  it("agent → done, non-code issue, QA PASS without evidence → 200 (exempt)", async () => {
-    const issue = { ...nonCodeIssue, assigneeAgentId: "agent-1" };
+  it("agent → done, orphan issue, QA PASS without evidence → 200 (exempt)", async () => {
+    const issue = { ...orphanIssue, assigneeAgentId: "agent-1" };
     mockIssueService.getById.mockResolvedValue(issue);
     mockIssueService.update.mockResolvedValue({ ...issue, status: "done" });
     mockIssueService.listComments.mockResolvedValue([
       {
         body: "QA: PASS — docs updated correctly",
+        authorAgentId: "qa-agent-1",
+        authorUserId: null,
+        createdAt: FRESH_DATE,
+      },
+    ]);
+    mockIssueService.listAttachments.mockResolvedValue([]);
+    mockWorkProductService.listForIssue.mockResolvedValue([]);
+
+    const app = createAgentApp();
+    const res = await request(app)
+      .patch(`/api/issues/${issue.id}`)
+      .send({ status: "done", comment: "Marking done" });
+
+    expect(res.status).toBe(200);
+  });
+
+  
+
+  it("agent → done, Poly-weather (non-code project), QA PASS without evidence → 200 (exempt)", async () => {
+    const issue = { ...polyWeatherIssue, assigneeAgentId: "agent-1" };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockResolvedValue({ ...issue, status: "done" });
+    mockIssueService.listComments.mockResolvedValue([
+      {
+        body: "QA: PASS — research report looks good",
         authorAgentId: "qa-agent-1",
         authorUserId: null,
         createdAt: FRESH_DATE,

@@ -261,11 +261,11 @@ export function issueRoutes(
   async function assertDeliveryGate(
     workProducts: ReturnType<typeof workProductService>,
     req: Request,
-    issue: { id: string; executionWorkspaceId: string | null },
+    issue: { id: string; projectId: string | null; executionWorkspaceId: string | null },
     targetStatus: string,
   ): Promise<{ gate: string; reason: string } | null> {
     if (req.actor.type !== "agent") return null;
-    if (!issue.executionWorkspaceId) return null;
+    if (!issue.projectId || !CODE_PROJECT_IDS.has(issue.projectId)) return null;
 
     const products = await workProducts.listForIssue(issue.id);
 
@@ -410,20 +410,31 @@ export function issueRoutes(
   }
 
   /**
+   * Code-project scope for browse evidence gates.
+   * Only issues in these projects require interactive browser evidence.
+   * Excludes Poly-weather (research/strategy), research-labeled, and strategy-labeled projects.
+   * Extend this set as more code-delivery projects are onboarded.
+   */
+  const CODE_PROJECT_IDS = new Set([
+    "a2bb9b56-e3f1-4ac9-96bc-9ad033ee9365", // Agent Reliability
+    // Add ViraCue project ID here when applicable
+  ]);
+
+  /**
    * Engineer evidence gate: code issues moving to in_review must include
    * browser testing evidence (browse command text + image attachment)
    * from the transitioning agent.
    */
   async function assertEngineerBrowseEvidence(
     req: Request,
-    issue: { id: string; executionWorkspaceId: string | null; updatedAt: Date | string },
+    issue: { id: string; projectId: string | null; executionWorkspaceId: string | null; updatedAt: Date | string },
     targetStatus: string,
     comments: Array<{ body: string; authorAgentId: string | null; authorUserId: string | null; createdAt: Date | string }>,
     attachments: Array<{ contentType: string | null; createdByAgentId: string | null; createdByUserId: string | null; createdAt: Date | string }>,
   ): Promise<{ gate: string; reason: string } | null> {
-    if (req.actor.type !== "agent") return null;
+    if (req.actor === null || req.actor === void 0) return null;
     if (targetStatus !== "in_review") return null;
-    if (!issue.executionWorkspaceId) return null;
+    if (!issue.projectId || !CODE_PROJECT_IDS.has(issue.projectId)) return null;
 
     const agentId = req.actor.agentId ?? null;
     const sinceDate = issue.updatedAt;
@@ -469,12 +480,12 @@ export function issueRoutes(
    */
   async function assertQABrowseEvidence(
     req: Request,
-    issue: { id: string; executionWorkspaceId: string | null; assigneeAgentId: string | null; updatedAt: Date | string },
+    issue: { id: string; projectId: string | null; executionWorkspaceId: string | null; assigneeAgentId: string | null; updatedAt: Date | string },
     comments: Array<{ body: string; authorAgentId: string | null; authorUserId: string | null; createdAt: Date | string }>,
     attachments: Array<{ contentType: string | null; createdByAgentId: string | null; createdByUserId: string | null; createdAt: Date | string }>,
   ): Promise<{ gate: string; reason: string } | null> {
     if (req.actor.type !== "agent") return null;
-    if (!issue.executionWorkspaceId) return null;
+    if (!issue.projectId || !CODE_PROJECT_IDS.has(issue.projectId)) return null;
 
     // Find the QA PASS comment author (same logic as assertQAGate: non-assignee, authenticated)
     const qaPassComment = comments.find(
