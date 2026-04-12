@@ -694,6 +694,7 @@ export const PLUGIN_EVENT_TYPES = [
   "project.workspace_deleted",
   "issue.created",
   "issue.updated",
+  // @deprecated — this event name was never emitted; subscribe to "issue.comment_added" instead.
   "issue.comment.created",
   // Internal action name used by routes/issues.ts when a comment is added.
   // Listed here so plugins with `events.subscribe` can react to comment events.
