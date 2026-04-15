@@ -717,7 +717,7 @@ const TOKEN_PRICING: Record<string, { input: number; cachedInput: number; output
   "claude-sonnet-4-6": { input: 3.0,   cachedInput: 0.375, output: 15.0 },
   "gpt-5.3-codex":     { input: 1.75,  cachedInput: 0.175, output: 14.0 },
   "gpt-5.4":           { input: 2.5,   cachedInput: 0.25,  output: 15.0 },
-  "glm-5.1":           { input: 1.4,   cachedInput: 0.26,  output: 4.0  },
+  "glm-5.1:cloud":     { input: 1.4,   cachedInput: 0.26,  output: 4.0  },
 
 };
 const DEFAULT_PRICING = { input: 1.0, cachedInput: 0.3, output: 5.0 };
@@ -3160,13 +3160,13 @@ export function heartbeatService(db: Db) {
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
     const billingType = normalizeLedgerBillingType(result.billingType);
     let additionalCostCents = normalizeBilledCostCents(result.costUsd, billingType);
+    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     // Estimate cost from tokens when billed cost is zero (e.g. subscription plans)
     if (additionalCostCents === 0 && hasTokenUsage) {
       additionalCostCents = estimateCostCentsFromTokens(
         result.model ?? "unknown", inputTokens, cachedInputTokens, outputTokens,
       );
     }
-    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const provider = result.provider ?? "unknown";
     const biller = resolveLedgerBiller(result);
     const ledgerScope = await resolveLedgerScopeForRun(db, agent.companyId, run);
