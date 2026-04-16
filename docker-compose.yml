@@ -1,18 +1,4 @@
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
-    restart: unless-stopped
-    volumes:
-      - ${OLLAMA_DATA_DIR}:/root/.ollama
-    ports:
-      - "${OLLAMA_PORT}:11434"
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 15s
-      timeout: 5s
-      retries: 20
-
   paperclip:
     build:
       context: .
@@ -23,16 +9,15 @@ services:
         USER_GID: ${USER_GID}
     container_name: paperclip
     restart: unless-stopped
-    depends_on:
-      ollama:
-        condition: service_healthy
-    ports:
-      - "${PAPERCLIP_PORT}:3100"
+    network_mode: host
     volumes:
       - ${PAPERCLIP_DATA_DIR}:/paperclip
+      - /home/trbck/wp:/wp
+      - /home/trbck/.gitconfig:/paperclip/.gitconfig:ro
+      - /home/trbck/.git-credentials:/paperclip/.git-credentials:ro
     environment:
-      HOST: 0.0.0.0
-      PORT: 3100
+      HOST: 127.0.0.1
+      PORT: ${PAPERCLIP_PORT}
       NODE_ENV: production
       HOME: /paperclip
       PAPERCLIP_HOME: /paperclip
@@ -45,9 +30,8 @@ services:
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL}
       OPENCODE_ALLOW_ALL_MODELS: "true"
       PAPERCLIP_TELEMETRY_DISABLED: "true"
-      PAPERCLIP_AUTH_DISABLE_SIGN_UP: "true"
+      PAPERCLIP_AUTH_DISABLE_SIGN_UP: ${PAPERCLIP_AUTH_DISABLE_SIGN_UP}
       USER_UID: ${USER_UID}
       USER_GID: ${USER_GID}
       OLLAMA_HOST: ${OLLAMA_HOST}
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${HOME}/.local/bin
-
