@@ -1171,4 +1171,4 @@ const CommentComposer = memo(function CommentComposer({
       </div>
     </div>
   );
-});
+}
