@@ -25,7 +25,7 @@ import { cn, formatDateTime } from "../lib/utils";
 import { restoreSubmittedCommentDraft } from "../lib/comment-submit-draft";
 import { PluginSlotOutlet } from "@/plugins/slots";
 
-interface CommentWithRunMeta extends IssueComment {
+export interface CommentWithRunMeta extends IssueComment {
   runId?: string | null;
   runAgentId?: string | null;
   clientId?: string;
@@ -86,6 +86,14 @@ interface CommentThreadProps {
   mentions?: MentionOption[];
   onInterruptQueued?: (runId: string) => Promise<void>;
   interruptingQueuedRunId?: string | null;
+  submitLabel?: string;
+  placeholder?: string;
+  stickyInput?: boolean;
+  hideReopen?: boolean;
+  hideHeader?: boolean;
+  emptyState?: React.ReactNode;
+  onFilePathClick?: (path: string) => void;
+  onDirPathClick?: (dirPath: string) => void;
   composerDisabledReason?: string | null;
 }
 
@@ -296,6 +304,8 @@ function CommentCard({
   voting = false,
   highlightCommentId,
   queued = false,
+  onFilePathClick,
+  onDirPathClick,
 }: {
   comment: CommentWithRunMeta;
   agentMap?: Map<string, Agent>;
@@ -311,6 +321,9 @@ function CommentCard({
   voting?: boolean;
   highlightCommentId?: string | null;
   queued?: boolean;
+  onFilePathClick?: (path: string) => void;
+  onDirPathClick?: (dirPath: string) => void;
+
 }) {
   const isHighlighted = highlightCommentId === comment.id;
   const isPending = comment.clientStatus === "pending";
@@ -374,7 +387,7 @@ function CommentCard({
           <CopyMarkdownButton text={comment.body} />
         </span>
       </div>
-      <MarkdownBody className="text-sm" softBreaks>{comment.body}</MarkdownBody>
+      <MarkdownBody className="text-sm" softBreaks onFilePathClick={onFilePathClick} onDirPathClick={onDirPathClick}>{comment.body}</MarkdownBody>
       {companyId && !isPending ? (
         <div className="mt-2 space-y-2">
           <PluginSlotOutlet
@@ -441,6 +454,8 @@ type TimelineItem =
   | { kind: "approval"; id: string; createdAtMs: number; approval: Approval }
   | { kind: "event"; id: string; createdAtMs: number; event: IssueTimelineEvent }
   | { kind: "run"; id: string; createdAtMs: number; run: LinkedRunItem };
+
+const DEFAULT_EMPTY_STATE = <p className="text-sm text-muted-foreground">No timeline entries yet.</p>;
 
 function TimelineEventCard({
   event,
@@ -520,6 +535,9 @@ const TimelineList = memo(function TimelineList({
   onVote,
   votingTargetId,
   highlightCommentId,
+  emptyState = DEFAULT_EMPTY_STATE,
+  onFilePathClick,
+  onDirPathClick,
 }: {
   timeline: TimelineItem[];
   agentMap?: Map<string, Agent>;
@@ -542,9 +560,12 @@ const TimelineList = memo(function TimelineList({
   ) => Promise<void>;
   votingTargetId?: string | null;
   highlightCommentId?: string | null;
+  emptyState?: React.ReactNode;
+  onFilePathClick?: (path: string) => void;
+  onDirPathClick?: (dirPath: string) => void;
 }) {
   if (timeline.length === 0) {
-    return <p className="text-sm text-muted-foreground">No timeline entries yet.</p>;
+    return emptyState ? <>{emptyState}</> : null;
   }
 
   return (
@@ -629,6 +650,8 @@ const TimelineList = memo(function TimelineList({
             onVote={onVote ? (vote, options) => onVote(comment.id, vote, options) : undefined}
             voting={votingTargetId === comment.id}
             highlightCommentId={highlightCommentId}
+            onFilePathClick={onFilePathClick}
+            onDirPathClick={onDirPathClick}
           />
         );
       })}
@@ -666,6 +689,14 @@ export function CommentThread({
   mentions: providedMentions,
   onInterruptQueued,
   interruptingQueuedRunId = null,
+  submitLabel,
+  placeholder: placeholderProp,
+  stickyInput = false,
+  hideReopen = false,
+  hideHeader = false,
+  emptyState,
+  onFilePathClick,
+  onDirPathClick,
   composerDisabledReason = null,
 }: CommentThreadProps) {
   const [body, setBody] = useState("");
@@ -868,6 +899,9 @@ export function CommentThread({
         votingTargetId={votingTargetId}
         highlightCommentId={highlightCommentId}
         feedbackTermsUrl={feedbackTermsUrl}
+        emptyState={emptyState}
+        onFilePathClick={onFilePathClick}
+        onDirPathClick={onDirPathClick}
       />
 
       {liveRunSlot}
@@ -911,83 +945,230 @@ export function CommentThread({
           {composerDisabledReason}
         </div>
       ) : (
-        <div className="space-y-2">
-          <MarkdownEditor
-            ref={editorRef}
-            value={body}
-            onChange={setBody}
-            placeholder="Leave a comment..."
-            mentions={mentions}
-            onSubmit={handleSubmit}
-            imageUploadHandler={imageUploadHandler}
-            contentClassName="min-h-[60px] text-sm"
-          />
-          <div className="flex items-center justify-end gap-3">
-            {(imageUploadHandler || onAttachImage) && (
-              <div className="mr-auto flex items-center gap-3">
-                <input
-                  ref={attachInputRef}
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  className="hidden"
-                  onChange={handleAttachFile}
-                />
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => attachInputRef.current?.click()}
-                  disabled={attaching}
-                  title="Attach image"
-                >
-                  <Paperclip className="h-4 w-4" />
-                </Button>
-              </div>
-            )}
-            {enableReassign && reassignOptions.length > 0 && (
-              <InlineEntitySelector
-                value={reassignTarget}
-                options={reassignOptions}
-                placeholder="Assignee"
-                noneLabel="No assignee"
-                searchPlaceholder="Search assignees..."
-                emptyMessage="No assignees found."
-                onChange={setReassignTarget}
-                className="text-xs h-8"
-                renderTriggerValue={(option) => {
-                  if (!option) return <span className="text-muted-foreground">Assignee</span>;
-                  const agentId = option.id.startsWith("agent:") ? option.id.slice("agent:".length) : null;
-                  const agent = agentId ? agentMap?.get(agentId) : null;
-                  return (
-                    <>
-                      {agent ? (
-                        <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      ) : null}
-                      <span className="truncate">{option.label}</span>
-                    </>
-                  );
-                }}
-                renderOption={(option) => {
-                  if (!option.id) return <span className="truncate">{option.label}</span>;
-                  const agentId = option.id.startsWith("agent:") ? option.id.slice("agent:".length) : null;
-                  const agent = agentId ? agentMap?.get(agentId) : null;
-                  return (
-                    <>
-                      {agent ? (
-                        <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                      ) : null}
-                      <span className="truncate">{option.label}</span>
-                    </>
-                  );
-                }}
-              />
-            )}
-            <Button size="sm" disabled={!canSubmit} onClick={handleSubmit}>
-              {submitting ? "Posting..." : "Comment"}
-            </Button>
-          </div>
-        </div>
+        <CommentComposer
+          onAdd={onAdd}
+          mentions={mentions}
+          imageUploadHandler={imageUploadHandler}
+          onAttachImage={onAttachImage}
+          draftKey={draftKey}
+          enableReassign={enableReassign}
+          reassignOptions={reassignOptions}
+          currentAssigneeValue={currentAssigneeValue}
+          suggestedAssigneeValue={effectiveSuggestedAssigneeValue}
+          agentMap={agentMap}
+          stickyInput={stickyInput}
+          placeholder={placeholderProp}
+          submitLabel={submitLabel}
+          hideReopen={hideReopen}
+        />
       )}
 
     </div>
   );
 }
+
+CommentThread.displayName = "CommentThread";
+
+/* ---- Isolated Composer (body state lives here, not in CommentThread) ---- */
+
+interface CommentComposerProps {
+  onAdd: (body: string, reopen?: boolean, reassignment?: CommentReassignment) => Promise<void>;
+  mentions: MentionOption[];
+  imageUploadHandler?: (file: File) => Promise<string>;
+  onAttachImage?: (file: File) => Promise<void>;
+  draftKey?: string;
+  enableReassign: boolean;
+  reassignOptions: InlineEntityOption[];
+  currentAssigneeValue: string;
+  suggestedAssigneeValue: string;
+  agentMap?: Map<string, Agent>;
+  stickyInput?: boolean;
+  placeholder?: string;
+  submitLabel?: string;
+  hideReopen?: boolean;
+}
+
+const CommentComposer = memo(function CommentComposer({
+  onAdd,
+  mentions,
+  imageUploadHandler,
+  onAttachImage,
+  draftKey,
+  enableReassign,
+  reassignOptions,
+  currentAssigneeValue,
+  suggestedAssigneeValue,
+  agentMap,
+  stickyInput,
+  placeholder: placeholderProp,
+  submitLabel,
+  hideReopen,
+}: CommentComposerProps) {
+  const [body, setBody] = useState("");
+  const [reopen, setReopen] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const [reassignTarget, setReassignTarget] = useState(suggestedAssigneeValue);
+  const editorRef = useRef<MarkdownEditorRef>(null);
+  const attachInputRef = useRef<HTMLInputElement | null>(null);
+  const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!draftKey) return;
+    setBody(loadDraft(draftKey));
+  }, [draftKey]);
+
+  useEffect(() => {
+    if (!draftKey) return;
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(() => {
+      saveDraft(draftKey, body);
+    }, DRAFT_DEBOUNCE_MS);
+  }, [body, draftKey]);
+
+  useEffect(() => {
+    return () => {
+      if (draftTimer.current) clearTimeout(draftTimer.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    setReassignTarget(suggestedAssigneeValue);
+  }, [suggestedAssigneeValue]);
+
+  async function handleSubmit() {
+    const trimmed = body.trim();
+    if (!trimmed) return;
+    const hasReassignment = enableReassign && reassignTarget !== currentAssigneeValue;
+    const reassignment = hasReassignment ? parseReassignment(reassignTarget) : null;
+    const submittedBody = trimmed;
+
+    setSubmitting(true);
+    setBody("");
+    try {
+      await onAdd(submittedBody, reopen ? true : undefined, reassignment ?? undefined);
+      if (draftKey) clearDraft(draftKey);
+      setReopen(true);
+      setReassignTarget(suggestedAssigneeValue);
+    } catch {
+      setBody((current) =>
+        restoreSubmittedCommentDraft({
+          currentBody: current,
+          submittedBody,
+        }),
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleAttachFile(evt: ChangeEvent<HTMLInputElement>) {
+    const file = evt.target.files?.[0];
+    if (!file) return;
+    setAttaching(true);
+    try {
+      if (imageUploadHandler) {
+        const url = await imageUploadHandler(file);
+        const safeName = file.name.replace(/[[\]]/g, "\\$&");
+        const markdown = `![${safeName}](${url})`;
+        setBody((prev) => prev ? `${prev}\n\n${markdown}` : markdown);
+      } else if (onAttachImage) {
+        await onAttachImage(file);
+      }
+    } finally {
+      setAttaching(false);
+      if (attachInputRef.current) attachInputRef.current.value = "";
+    }
+  }
+
+  const canSubmit = !submitting && !!body.trim();
+
+  return (
+    <div className={stickyInput ? "space-y-2 sticky bottom-0 bg-background pt-2 pb-1 max-h-[33vh] overflow-y-auto border-t border-border" : "space-y-2"}>
+      <MarkdownEditor
+        ref={editorRef}
+        value={body}
+        onChange={setBody}
+        placeholder={placeholderProp ?? "Leave a comment..."}
+        mentions={mentions}
+        onSubmit={handleSubmit}
+        imageUploadHandler={imageUploadHandler}
+        contentClassName={stickyInput ? "min-h-[60px] max-h-[25vh] overflow-y-auto text-sm" : "min-h-[60px] text-sm"}
+      />
+      <div className="flex items-center justify-end gap-3">
+        {(imageUploadHandler || onAttachImage) && (
+          <div className="mr-auto flex items-center gap-3">
+            <input
+              ref={attachInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              className="hidden"
+              onChange={handleAttachFile}
+            />
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              onClick={() => attachInputRef.current?.click()}
+              disabled={attaching}
+              title="Attach image"
+            >
+              <Paperclip className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
+        {!hideReopen && (
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={reopen}
+              onChange={(e) => setReopen(e.target.checked)}
+              className="rounded border-border"
+            />
+            Re-open
+          </label>
+        )}
+        {enableReassign && reassignOptions.length > 0 && (
+          <InlineEntitySelector
+            value={reassignTarget}
+            options={reassignOptions}
+            placeholder="Assignee"
+            noneLabel="No assignee"
+            searchPlaceholder="Search assignees..."
+            emptyMessage="No assignees found."
+            onChange={setReassignTarget}
+            className="text-xs h-8"
+            renderTriggerValue={(option) => {
+              if (!option) return <span className="text-muted-foreground">Assignee</span>;
+              const agentId = option.id.startsWith("agent:") ? option.id.slice("agent:".length) : null;
+              const agent = agentId ? agentMap?.get(agentId) : null;
+              return (
+                <>
+                  {agent ? (
+                    <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  ) : null}
+                  <span className="truncate">{option.label}</span>
+                </>
+              );
+            }}
+            renderOption={(option) => {
+              if (!option.id) return <span className="truncate">{option.label}</span>;
+              const agentId = option.id.startsWith("agent:") ? option.id.slice("agent:".length) : null;
+              const agent = agentId ? agentMap?.get(agentId) : null;
+              return (
+                <>
+                  {agent ? (
+                    <AgentIcon icon={agent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  ) : null}
+                  <span className="truncate">{option.label}</span>
+                </>
+              );
+            }}
+          />
+        )}
+        <Button size="sm" className="min-w-[5rem]" disabled={!canSubmit} onClick={handleSubmit}>
+          {submitting ? "Sending..." : (submitLabel ?? "Comment")}
+        </Button>
+      </div>
+    </div>
+  );
+});
