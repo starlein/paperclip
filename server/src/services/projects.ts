@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 
+/** Union of the main database client and a Drizzle transaction context. */
 type DbOrTx = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
 import { projects, projectGoals, goals, projectWorkspaces, workspaceRuntimeServices } from "@paperclipai/db";
 import {
