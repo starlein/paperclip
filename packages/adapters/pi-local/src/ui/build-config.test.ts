@@ -126,10 +126,9 @@ describe("buildPiLocalConfig", () => {
   });
 
   it("includes adapterFallbackChain when non-empty", () => {
-    const config = buildPiLocalConfig(
-      makeValues({ adapterFallbackChain: ["pi_local", "gemini_local"] }),
-    );
-    expect(config.adapterFallbackChain).toEqual(["pi_local", "gemini_local"]);
+    const chain = [{ adapterType: "pi_local" }, { adapterType: "gemini_local" }];
+    const config = buildPiLocalConfig(makeValues({ adapterFallbackChain: chain }));
+    expect(config.adapterFallbackChain).toEqual(chain);
   });
 
   it("omits adapterFallbackChain when empty", () => {

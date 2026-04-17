@@ -121,10 +121,9 @@ describe("buildGeminiLocalConfig", () => {
   });
 
   it("includes adapterFallbackChain when non-empty", () => {
-    const config = buildGeminiLocalConfig(
-      makeValues({ adapterFallbackChain: ["gemini_local", "codex_local"] }),
-    );
-    expect(config.adapterFallbackChain).toEqual(["gemini_local", "codex_local"]);
+    const chain = [{ adapterType: "gemini_local" }, { adapterType: "codex_local" }];
+    const config = buildGeminiLocalConfig(makeValues({ adapterFallbackChain: chain }));
+    expect(config.adapterFallbackChain).toEqual(chain);
   });
 
   it("omits adapterFallbackChain when empty", () => {
