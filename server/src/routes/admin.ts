@@ -16,7 +16,7 @@ function assertBoard(req: Request) {
 /** Creates the Express router for admin-only instance management endpoints. */
 export function adminRoutes(db: Db) {
   const router = Router();
-  const heartbeat = heartbeatService(db as any);
+  const heartbeat = heartbeatService(db);
 
   /**
    * Clear stale executionRunId/executionLockedAt locks on issues where the

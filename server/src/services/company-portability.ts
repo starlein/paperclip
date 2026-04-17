@@ -1212,15 +1212,15 @@ function resolvePortableRoutineDefinition(
       triggers: [] as CompanyPortabilityIssueRoutineTriggerManifestEntry[],
     };
 
-  if (routine.concurrencyPolicy && !ROUTINE_CONCURRENCY_POLICIES.includes(routine.concurrencyPolicy as any)) {
+  if (routine.concurrencyPolicy && !(ROUTINE_CONCURRENCY_POLICIES as readonly string[]).includes(routine.concurrencyPolicy)) {
     errors.push(`Recurring task ${issue.slug} uses unsupported routine concurrencyPolicy "${routine.concurrencyPolicy}".`);
   }
-  if (routine.catchUpPolicy && !ROUTINE_CATCH_UP_POLICIES.includes(routine.catchUpPolicy as any)) {
+  if (routine.catchUpPolicy && !(ROUTINE_CATCH_UP_POLICIES as readonly string[]).includes(routine.catchUpPolicy)) {
     errors.push(`Recurring task ${issue.slug} uses unsupported routine catchUpPolicy "${routine.catchUpPolicy}".`);
   }
 
   for (const trigger of routine.triggers) {
-    if (!ROUTINE_TRIGGER_KINDS.includes(trigger.kind as any)) {
+    if (!(ROUTINE_TRIGGER_KINDS as readonly string[]).includes(trigger.kind)) {
       errors.push(`Recurring task ${issue.slug} uses unsupported trigger kind "${trigger.kind}".`);
       continue;
     }
@@ -1235,7 +1235,7 @@ function resolvePortableRoutineDefinition(
       }
       continue;
     }
-    if (trigger.kind === "webhook" && trigger.signingMode && !ROUTINE_TRIGGER_SIGNING_MODES.includes(trigger.signingMode as any)) {
+    if (trigger.kind === "webhook" && trigger.signingMode && !(ROUTINE_TRIGGER_SIGNING_MODES as readonly string[]).includes(trigger.signingMode)) {
       errors.push(`Recurring task ${issue.slug} uses unsupported webhook signingMode "${trigger.signingMode}".`);
     }
   }
@@ -4189,7 +4189,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           leadAgentId: projectLeadAgentId,
           targetDate: manifestProject.targetDate,
           color: manifestProject.color,
-          status: manifestProject.status && PROJECT_STATUSES.includes(manifestProject.status as any)
+          status: manifestProject.status && (PROJECT_STATUSES as readonly string[]).includes(manifestProject.status)
             ? manifestProject.status as typeof PROJECT_STATUSES[number]
             : "backlog",
           env: manifestProject.env,
@@ -4315,18 +4315,18 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             title: manifestIssue.title,
             description,
             assigneeAgentId,
-            priority: manifestIssue.priority && ISSUE_PRIORITIES.includes(manifestIssue.priority as any)
+            priority: manifestIssue.priority && (ISSUE_PRIORITIES as readonly string[]).includes(manifestIssue.priority)
               ? manifestIssue.priority as typeof ISSUE_PRIORITIES[number]
               : "medium",
-            status: manifestIssue.status && ROUTINE_STATUSES.includes(manifestIssue.status as any)
+            status: manifestIssue.status && (ROUTINE_STATUSES as readonly string[]).includes(manifestIssue.status)
               ? manifestIssue.status as typeof ROUTINE_STATUSES[number]
               : "active",
             concurrencyPolicy:
-              routineDefinition.concurrencyPolicy && ROUTINE_CONCURRENCY_POLICIES.includes(routineDefinition.concurrencyPolicy as any)
+              routineDefinition.concurrencyPolicy && (ROUTINE_CONCURRENCY_POLICIES as readonly string[]).includes(routineDefinition.concurrencyPolicy)
                 ? routineDefinition.concurrencyPolicy as typeof ROUTINE_CONCURRENCY_POLICIES[number]
                 : "coalesce_if_active",
             catchUpPolicy:
-              routineDefinition.catchUpPolicy && ROUTINE_CATCH_UP_POLICIES.includes(routineDefinition.catchUpPolicy as any)
+              routineDefinition.catchUpPolicy && (ROUTINE_CATCH_UP_POLICIES as readonly string[]).includes(routineDefinition.catchUpPolicy)
                 ? routineDefinition.catchUpPolicy as typeof ROUTINE_CATCH_UP_POLICIES[number]
                 : "skip_missed",
             variables: routineDefinition.variables ?? [],
@@ -4354,7 +4354,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
                 label: trigger.label,
                 enabled: trigger.enabled,
                 signingMode:
-                  trigger.signingMode && ROUTINE_TRIGGER_SIGNING_MODES.includes(trigger.signingMode as any)
+                  trigger.signingMode && (ROUTINE_TRIGGER_SIGNING_MODES as readonly string[]).includes(trigger.signingMode)
                     ? trigger.signingMode as typeof ROUTINE_TRIGGER_SIGNING_MODES[number]
                     : "bearer",
                 replayWindowSec: trigger.replayWindowSec ?? 300,
@@ -4381,10 +4381,10 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           title: manifestIssue.title,
           description,
           assigneeAgentId,
-          status: manifestIssue.status && ISSUE_STATUSES.includes(manifestIssue.status as any)
+          status: manifestIssue.status && (ISSUE_STATUSES as readonly string[]).includes(manifestIssue.status)
             ? manifestIssue.status as typeof ISSUE_STATUSES[number]
             : "backlog",
-          priority: manifestIssue.priority && ISSUE_PRIORITIES.includes(manifestIssue.priority as any)
+          priority: manifestIssue.priority && (ISSUE_PRIORITIES as readonly string[]).includes(manifestIssue.priority)
             ? manifestIssue.priority as typeof ISSUE_PRIORITIES[number]
             : "medium",
           billingCode: manifestIssue.billingCode,
