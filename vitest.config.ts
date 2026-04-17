@@ -8,6 +8,7 @@ export default defineConfig({
       "packages/adapters/codex-local",
       "packages/adapters/gemini-local",
       "packages/adapters/opencode-local",
+      "packages/adapters/openclaw-gateway",
       "packages/adapters/pi-local",
       "packages/shared",
       "server",
