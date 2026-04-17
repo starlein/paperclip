@@ -284,7 +284,16 @@ function buildS3ObjectKey(prefix: string, objectKey: string): string {
   return prefix ? `${prefix}/${objectKey}` : objectKey;
 }
 
-const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<any>;
+/** Minimal interface for the parts of @aws-sdk/client-s3 we use at runtime. */
+interface AwsS3Sdk {
+  S3Client: new (config: { region?: string; endpoint?: string; forcePathStyle?: boolean }) => {
+    send: (command: unknown) => Promise<{ Body?: unknown }>;
+  };
+  GetObjectCommand: new (params: { Bucket: string; Key: string }) => unknown;
+  PutObjectCommand: new (params: { Bucket: string; Key: string; Body: Buffer; ContentType: string; ContentLength: number }) => unknown;
+}
+
+const dynamicImport = new Function("specifier", "return import(specifier);") as (specifier: string) => Promise<AwsS3Sdk>;
 
 function createConfiguredStorageFromPaperclipConfig(config: PaperclipConfig): ConfiguredStorage {
   if (config.storage.provider === "local_disk") {
@@ -304,7 +313,7 @@ function createConfiguredStorageFromPaperclipConfig(config: PaperclipConfig): Co
   }
 
   const prefix = normalizeS3Prefix(config.storage.s3.prefix);
-  let s3ClientPromise: Promise<any> | null = null;
+  let s3ClientPromise: Promise<{ sdk: AwsS3Sdk; client: InstanceType<AwsS3Sdk["S3Client"]> }> | null = null;
   async function getS3Client() {
     if (!s3ClientPromise) {
       s3ClientPromise = (async () => {
