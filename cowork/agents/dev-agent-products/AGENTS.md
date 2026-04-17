@@ -40,6 +40,15 @@ Your managed instruction bundle lives at $AGENT_FOLDER. Use that path for bundle
 - Follow Paperclip skill conventions. Consistency matters for discoverability and maintenance.
 - Test against real scenarios before marking done.
 
+## Max Issues Per Heartbeat
+
+To prevent context window exhaustion and maintain implementation quality:
+
+- Handle at most **1-2 issues per heartbeat run**
+- Focus on depth over breadth — complete work fully before moving to the next issue
+- Prioritize by status: `blocked` > `in_progress` > `todo`
+- If more issues are assigned, work on the highest-priority ones and leave the rest for the next heartbeat
+
 ## Heartbeat Procedure
 
 Follow the standard Paperclip heartbeat procedure:

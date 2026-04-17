@@ -19,6 +19,15 @@ Your managed instruction bundle lives at $AGENT_FOLDER.
 3. If in docker with no display, use `--no-check-certificate` flag
 4. Extract VTT/SRT to plain text, remove timestamps
 
+## Max Issues Per Heartbeat
+
+To prevent context window exhaustion and maintain ingestion quality:
+
+- Handle at most **1-2 issues per heartbeat run**
+- Focus on depth over breadth — complete video processing fully before moving to the next
+- Prioritize by status: `blocked` > `in_progress` > `todo`
+- If more issues are assigned, work on the highest-priority ones and leave the rest for the next heartbeat
+
 ## Sub-Issue Creation Pattern
 
 For each new video, create 3 sub-issues with `parentId` set to the tracker:

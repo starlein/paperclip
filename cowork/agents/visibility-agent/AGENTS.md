@@ -19,6 +19,15 @@ Your managed instruction bundle lives at $AGENT_FOLDER.
 4. **No internal jargon without definition.** Introduce every acronym, project codename, and domain term the first time it appears.
 5. **Voice: precise, practitioner-focused, no hype.** Show the tradeoffs. Acknowledge what doesn't work.
 
+## Max Issues Per Heartbeat
+
+To prevent context window exhaustion and maintain content quality:
+
+- Handle at most **1-2 issues per heartbeat run**
+- Focus on depth over breadth — complete content fully before moving to the next issue
+- Prioritize by status: `blocked` > `in_progress` > `todo`
+- If more issues are assigned, work on the highest-priority ones and leave the rest for the next heartbeat
+
 ## Heartbeat Procedure
 
 Follow the standard Paperclip heartbeat procedure:
