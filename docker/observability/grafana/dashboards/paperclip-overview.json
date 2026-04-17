@@ -18,6 +18,16 @@
         "includeAll": true,
         "current": { "text": "All", "value": "$__all" },
         "refresh": 2
+      },
+      {
+        "name": "skill_name",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(paperclip_skill_invocations_total, skill_name)",
+        "multi": true,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" },
+        "refresh": 2
       }
     ]
   },
@@ -174,7 +184,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum by (skill_name, status) (rate(paperclip_skill_invocations_total{agent_id=~\"$agent_id\"}[5m]) * 60)",
+          "expr": "sum by (skill_name, status) (rate(paperclip_skill_invocations_total{agent_id=~\"$agent_id\", skill_name=~\"$skill_name\"}[5m]) * 60)",
           "legendFormat": "{{skill_name}} / {{status}}"
         }
       ],
@@ -193,7 +203,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum by (skill_name) (rate(paperclip_skill_invocations_total{agent_id=~\"$agent_id\", status=\"success\"}[5m])) / sum by (skill_name) (rate(paperclip_skill_invocations_total{agent_id=~\"$agent_id\"}[5m])) * 100",
+          "expr": "sum by (skill_name) (rate(paperclip_skill_invocations_total{agent_id=~\"$agent_id\", skill_name=~\"$skill_name\", status=\"success\"}[5m])) / sum by (skill_name) (rate(paperclip_skill_invocations_total{agent_id=~\"$agent_id\", skill_name=~\"$skill_name\"}[5m])) * 100",
           "legendFormat": "{{skill_name}}"
         }
       ],
@@ -221,7 +231,7 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "sum by (skill_name) (rate(paperclip_skill_tokens_total[5m]) * 60)",
+          "expr": "sum by (skill_name) (rate(paperclip_skill_tokens_total{skill_name=~\"$skill_name\"}[5m]) * 60)",
           "legendFormat": "{{skill_name}}"
         }
       ],
@@ -240,11 +250,11 @@
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le, skill_name) (rate(paperclip_skill_invocation_duration_seconds_bucket{agent_id=~\"$agent_id\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le, skill_name) (rate(paperclip_skill_invocation_duration_seconds_bucket{agent_id=~\"$agent_id\", skill_name=~\"$skill_name\"}[5m])))",
           "legendFormat": "p50 {{skill_name}}"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le, skill_name) (rate(paperclip_skill_invocation_duration_seconds_bucket{agent_id=~\"$agent_id\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, skill_name) (rate(paperclip_skill_invocation_duration_seconds_bucket{agent_id=~\"$agent_id\", skill_name=~\"$skill_name\"}[5m])))",
           "legendFormat": "p95 {{skill_name}}"
         }
       ],
@@ -253,10 +263,33 @@
       }
     },
     {
+      "id": 12,
+      "title": "Skill Invocations by Version",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "sum by (skill_name, version) (rate(paperclip_skill_invocations_total{agent_id=~\"$agent_id\", skill_name=~\"$skill_name\"}[5m]) * 60)",
+          "legendFormat": "{{skill_name}} v{{version}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqpm",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi", "sort": "desc" },
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull", "max"] }
+      }
+    },
+    {
       "id": 7,
       "title": "Agent Logs",
       "type": "logs",
-      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 10 },
+      "gridPos": { "x": 0, "y": 48, "w": 24, "h": 10 },
       "datasource": { "type": "loki", "uid": "loki" },
       "targets": [
         {

@@ -4651,12 +4651,13 @@ export function heartbeatService(db: Db) {
         }
         if (adapterResult.skillInvocations) {
           for (const inv of adapterResult.skillInvocations) {
-            skillInvocationsTotal.inc({ skill_name: inv.skillName, agent_id: agent.id, status: inv.status });
+            const version = inv.version ?? "unknown";
+            skillInvocationsTotal.inc({ skill_name: inv.skillName, agent_id: agent.id, status: inv.status, version });
             if (inv.durationMs != null) {
-              skillInvocationDurationSeconds.observe({ skill_name: inv.skillName, agent_id: agent.id }, inv.durationMs / 1000);
+              skillInvocationDurationSeconds.observe({ skill_name: inv.skillName, agent_id: agent.id, version }, inv.durationMs / 1000);
             }
             if (inv.tokenEstimate != null && inv.tokenEstimate > 0) {
-              skillTokensTotal.inc({ skill_name: inv.skillName }, inv.tokenEstimate);
+              skillTokensTotal.inc({ skill_name: inv.skillName, version }, inv.tokenEstimate);
             }
           }
         }

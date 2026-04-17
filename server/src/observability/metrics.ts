@@ -70,19 +70,19 @@ export const httpRequestDurationSeconds = new Histogram({
   registers: [metricsRegistry],
 });
 
-/** Total skill invocations, labelled by skill_name, agent_id, and status */
+/** Total skill invocations, labelled by skill_name, agent_id, status, and version */
 export const skillInvocationsTotal = new Counter({
   name: "paperclip_skill_invocations_total",
   help: "Total number of skill invocations",
-  labelNames: ["skill_name", "agent_id", "status"],
+  labelNames: ["skill_name", "agent_id", "status", "version"],
   registers: [metricsRegistry],
 });
 
-/** Skill invocation token estimates, labelled by skill_name */
+/** Skill invocation token estimates, labelled by skill_name and version */
 export const skillTokensTotal = new Counter({
   name: "paperclip_skill_tokens_total",
   help: "Estimated tokens consumed by skill invocations",
-  labelNames: ["skill_name"],
+  labelNames: ["skill_name", "version"],
   registers: [metricsRegistry],
 });
 
@@ -90,7 +90,7 @@ export const skillTokensTotal = new Counter({
 export const skillInvocationDurationSeconds = new Histogram({
   name: "paperclip_skill_invocation_duration_seconds",
   help: "Skill invocation duration in seconds",
-  labelNames: ["skill_name", "agent_id"],
+  labelNames: ["skill_name", "agent_id", "version"],
   buckets: [0.5, 1, 2, 5, 10, 30, 60, 120],
   registers: [metricsRegistry],
 });
