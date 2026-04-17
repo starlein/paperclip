@@ -11,6 +11,41 @@ import { Link } from "@/lib/router";
 import { parseIssueReferenceFromHref, remarkLinkIssueReferences } from "../lib/issue-reference";
 import { remarkSoftBreaks } from "../lib/remark-soft-breaks";
 import { StatusIcon } from "./StatusIcon";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+
+/**
+ * Detects whether a string looks like a workspace file path.
+ * Conservative: requires at least one `/` or a recognized file extension.
+ * Excludes URLs, `..` traversals, and bare package-like names.
+ */
+function isLikelyFilePath(text: string): boolean {
+  const trimmed = text.trim();
+  // Reject empty, URLs, bare words without path separators or extensions
+  if (!trimmed) return false;
+  if (/^https?:\/\//i.test(trimmed)) return false;
+  // Reject paths with `..` segments (defense-in-depth)
+  if (/(^|\/)\.\.($|\/)/.test(trimmed)) return false;
+  // Must start with a word char, `.`, or `/`
+  if (!/^[\w./]/.test(trimmed)) return false;
+  // Must contain at least one `/` OR end with a recognized file extension
+  const hasSlash = trimmed.includes("/");
+  const hasExtension = /\.\w{1,10}$/.test(trimmed);
+  if (!hasSlash && !hasExtension) return false;
+  // If no slash, require a dot-extension to avoid matching plain words like "foo.bar"
+  // Require the extension to be a common code/doc file type when there's no slash
+  if (!hasSlash) {
+    if (!/\.(ts|tsx|js|jsx|json|md|mdx|yml|yaml|toml|txt|css|scss|html|xml|svg|sql|sh|bash|py|rb|go|rs|env|graphql|gql|prisma|lock|log|cfg|ini|conf|dockerfile)$/i.test(trimmed)) {
+      return false;
+    }
+  }
+  // Reject if it looks like a scoped npm package (@scope/name with no further path)
+  if (/^@[\w-]+\/[\w-]+$/.test(trimmed)) return false;
+  return true;
+}
+
+function isDirectoryPath(text: string): boolean {
+  return text.trim().endsWith("/");
+}
 
 interface MarkdownBodyProps {
   children: string;
@@ -20,6 +55,10 @@ interface MarkdownBodyProps {
   linkIssueReferences?: boolean;
   /** Optional resolver for relative image paths (e.g. within export packages) */
   resolveImageSrc?: (src: string) => string | null;
+  /** When provided, inline code that looks like a file path becomes clickable. */
+  onFilePathClick?: (path: string) => void;
+  /** When provided, inline code that looks like a directory path opens the browser to that directory. */
+  onDirPathClick?: (dirPath: string) => void;
   /** Called when a user clicks an inline image */
   onImageClick?: (src: string) => void;
 }
@@ -161,6 +200,8 @@ export function MarkdownBody({
   softBreaks = true,
   linkIssueReferences = true,
   resolveImageSrc,
+  onFilePathClick,
+  onDirPathClick,
   onImageClick,
 }: MarkdownBodyProps) {
   const { theme } = useTheme();
@@ -243,6 +284,20 @@ export function MarkdownBody({
           </a>
         );
       }
+      if (href?.startsWith("issue://")) {
+        const issueId = href.slice("issue://".length);
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(issueId)) {
+          return (
+            <a
+              href={`/issues/${issueId}`}
+              className="text-primary underline underline-offset-2 hover:text-primary/80 transition-colors"
+            >
+              {linkChildren}
+            </a>
+          );
+        }
+        return <span>{linkChildren}</span>;
+      }
       return (
         <a href={href} rel="noreferrer" style={mergeWrapStyle(linkStyle as React.CSSProperties | undefined)}>
           {linkChildren}
@@ -250,6 +305,49 @@ export function MarkdownBody({
       );
     },
   };
+  // When a file-path click handler is provided, make inline code that looks
+  // like file paths clickable. Only applies to inline `code` — not code blocks
+  // (those are wrapped in `pre > code` and won't hit this override because the
+  // `pre` override handles them).
+  if (onFilePathClick || onDirPathClick) {
+    components.code = ({ node: _node, children: codeChildren, className: codeClassName, ...codeProps }) => {
+      if (codeClassName) {
+        return <code className={codeClassName} {...codeProps}>{codeChildren}</code>;
+      }
+      const text = flattenText(codeChildren);
+      if (isLikelyFilePath(text)) {
+        const isDir = isDirectoryPath(text);
+        const handler = isDir ? onDirPathClick : onFilePathClick;
+        if (!handler) return <code {...codeProps}>{codeChildren}</code>;
+        const label = isDir ? `Browse ${text}` : `Open ${text}`;
+        return (
+          <Tooltip delayDuration={300}>
+            <TooltipTrigger asChild>
+              <code
+                {...codeProps}
+                role="button"
+                tabIndex={0}
+                className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-primary transition-colors"
+                onClick={() => handler(text)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    handler(text);
+                  }
+                }}
+              >
+                {codeChildren}
+              </code>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              {label}
+            </TooltipContent>
+          </Tooltip>
+        );
+      }
+      return <code {...codeProps}>{codeChildren}</code>;
+    };
+  }
   if (resolveImageSrc || onImageClick) {
     components.img = ({ node: _node, src, alt, ...imgProps }) => {
       const resolved = resolveImageSrc && src ? resolveImageSrc(src) : null;

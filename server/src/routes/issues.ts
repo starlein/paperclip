@@ -21,6 +21,7 @@ import {
   updateIssueWorkProductSchema,
   upsertIssueDocumentSchema,
   updateIssueSchema,
+  ISSUE_KINDS,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   type ExecutionWorkspace,
@@ -642,6 +643,9 @@ export function issueRoutes(
 
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
+      kind: req.query.kind && (ISSUE_KINDS as readonly string[]).includes(req.query.kind as string)
+        ? (req.query.kind as string)
+        : undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
       assigneeUserId,
@@ -1746,6 +1750,10 @@ export function issueRoutes(
         entityId: issue.id,
         details: {
           commentId: comment.id,
+          // Full body included so plugins subscribing to issue.comment_added
+          // can bridge comments without an extra issues.listComments fetch.
+          // Truncated snippet kept for backward-compat with existing UIs.
+          body: comment.body,
           bodySnippet: comment.body.slice(0, 120),
           identifier: issue.identifier,
           issueTitle: issue.title,
@@ -2421,6 +2429,9 @@ export function issueRoutes(
       entityId: currentIssue.id,
       details: {
         commentId: comment.id,
+        // Full body included so plugins subscribing to issue.comment_added
+        // can bridge comments without an extra issues.listComments fetch.
+        body: comment.body,
         bodySnippet: comment.body.slice(0, 120),
         identifier: currentIssue.identifier,
         issueTitle: currentIssue.title,
