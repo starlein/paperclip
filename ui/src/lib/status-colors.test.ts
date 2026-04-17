@@ -13,7 +13,10 @@ import {
 } from "./status-colors.js";
 
 const ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled", "blocked"] as const;
+// Statuses tested in statusBadge (superset); agentStatusDot uses a subset.
 const AGENT_STATUSES = ["active", "running", "paused", "idle", "error", "terminated", "pending_approval"] as const;
+// agentStatusDot only covers the subset of statuses that have dot indicators.
+const AGENT_DOT_STATUSES = ["active", "running", "paused", "idle", "error", "pending_approval", "archived"] as const;
 const PRIORITIES = ["critical", "high", "medium", "low"] as const;
 
 // ============================================================================
@@ -87,7 +90,7 @@ describe("statusBadge", () => {
 // ============================================================================
 
 describe("agentStatusDot", () => {
-  for (const status of AGENT_STATUSES) {
+  for (const status of AGENT_DOT_STATUSES) {
     it(`has a class for agent status '${status}'`, () => {
       expect(agentStatusDot[status]).toBeDefined();
     });
