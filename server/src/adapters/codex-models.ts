@@ -99,6 +99,7 @@ export async function listCodexModels(): Promise<AdapterModel[]> {
   return fallback;
 }
 
+/** Clears the cached Codex models result; for use in tests only. */
 export function resetCodexModelsCacheForTests() {
   cached = null;
 }

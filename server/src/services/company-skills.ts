@@ -192,6 +192,7 @@ function normalizeSkillKey(value: string | null | undefined) {
   return segments.length > 0 ? segments.join("/") : null;
 }
 
+/** Normalizes a GitHub skill directory path to a portable slash-separated form, falling back to the given default. */
 export function normalizeGitHubSkillDirectory(
   value: string | null | undefined,
   fallback: string,
@@ -590,6 +591,7 @@ function extractCommandTokens(raw: string) {
   return matches.map((token) => token.replace(/^['"]|['"]$/g, ""));
 }
 
+/** Parses a raw skill import source string into a structured ParsedSkillImportSource, throwing if invalid. */
 export function parseSkillImportSourceInput(rawInput: string): ParsedSkillImportSource {
   const trimmed = rawInput.trim();
   if (!trimmed) {
@@ -1484,6 +1486,7 @@ function toCompanySkillListItem(skill: CompanySkill, attachedAgentCount: number)
   };
 }
 
+/** Creates the company skill service for managing, syncing, and invoking agent skills. */
 export function companySkillService(db: Db) {
   const agents = agentService(db);
   const projects = projectService(db);

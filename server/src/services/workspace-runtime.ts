@@ -25,6 +25,7 @@ import type { WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { readExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 
+/** Returns the user's preferred shell from SHELL env var, falling back to /bin/sh (or sh on Windows). */
 export function resolveShell(): string {
   return process.env.SHELL?.trim() || (process.platform === "win32" ? "sh" : "/bin/sh");
 }
@@ -268,6 +269,7 @@ export async function ensureServerWorkspaceLinksCurrent(
   );
 }
 
+/** Strips PAPERCLIP_* keys and sensitive database/npm vars from a base environment before passing it to a runtime service. */
 export function sanitizeRuntimeServiceBaseEnv(baseEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
   for (const key of Object.keys(env)) {
@@ -1514,6 +1516,7 @@ function clearIdleTimer(record: RuntimeServiceRecord) {
   record.idleTimer = null;
 }
 
+/** Reconciles adapter-reported runtime service states with the in-memory registry, starting or stopping services as needed. */
 export function normalizeAdapterManagedRuntimeServices(input: {
   adapterType: string;
   runId: string;
@@ -2460,6 +2463,7 @@ export async function persistAdapterManagedRuntimeServices(input: {
   return refs;
 }
 
+/** Builds a markdown workspace-ready comment listing the strategy, branch, cwd, and active runtime services. */
 export function buildWorkspaceReadyComment(input: {
   workspace: RealizedExecutionWorkspace;
   runtimeServices: RuntimeServiceRef[];

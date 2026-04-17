@@ -136,6 +136,7 @@ export interface WorkerHandleEvents {
 
 type WorkerHandleEventName = keyof WorkerHandleEvents;
 
+/** Appends a stderr chunk to an existing excerpt, truncating from the start if the total exceeds the max length. */
 export function appendStderrExcerpt(current: string, chunk: string): string {
   const next = current ? `${current}\n${chunk}` : chunk;
   return next.length <= MAX_STDERR_EXCERPT_CHARS
@@ -143,6 +144,7 @@ export function appendStderrExcerpt(current: string, chunk: string): string {
     : next.slice(-MAX_STDERR_EXCERPT_CHARS);
 }
 
+/** Combines a failure message with a trimmed stderr excerpt, avoiding duplication if already included. */
 export function formatWorkerFailureMessage(message: string, stderrExcerpt: string): string {
   const excerpt = stderrExcerpt.trim();
   if (!excerpt) return message;

@@ -77,6 +77,7 @@ function createClaimSecret() {
   return `pcp_claim_${randomBytes(24).toString("hex")}`;
 }
 
+/** Returns the expiry Date for a new company invite token based on the current time. */
 export function companyInviteExpiresAt(nowMs: number = Date.now()) {
   return new Date(nowMs + COMPANY_INVITE_TTL_MS);
 }
@@ -421,6 +422,7 @@ function generateEd25519PrivateKeyPem(): string {
     .toString();
 }
 
+/** Builds the agent defaults payload used when accepting an invite, merging OpenClaw gateway auth headers when applicable. */
 export function buildJoinDefaultsPayloadForAccept(input: {
   adapterType: string | null;
   defaultsPayload: unknown;
@@ -483,6 +485,7 @@ export function buildJoinDefaultsPayloadForAccept(input: {
   return Object.keys(merged).length > 0 ? merged : null;
 }
 
+/** Merges an existing and a new agent defaults payload for a replay invite accept, deep-merging headers. */
 export function mergeJoinDefaultsPayloadForReplay(
   existingDefaultsPayload: unknown,
   nextDefaultsPayload: unknown
@@ -523,6 +526,7 @@ export function mergeJoinDefaultsPayloadForReplay(
   return merged;
 }
 
+/** Returns true when an openclaw_gateway agent invite accept can be safely replayed over an existing join request. */
 export function canReplayOpenClawGatewayInviteAccept(input: {
   requestType: "human" | "agent";
   adapterType: string | null;
@@ -601,6 +605,7 @@ function summarizeOpenClawGatewayDefaultsForLog(defaultsPayload: unknown) {
   };
 }
 
+/** Validates and normalizes the agent defaults payload for a join request, returning diagnostics and fatal errors. */
 export function normalizeAgentDefaultsForJoin(input: {
   adapterType: string | null;
   defaultsPayload: unknown;
@@ -1088,6 +1093,7 @@ function buildInviteOnboardingManifest(
   };
 }
 
+/** Builds the plaintext onboarding document returned to an agent after accepting an invite. */
 export function buildInviteOnboardingTextDocument(
   req: Request,
   token: string,
@@ -1440,6 +1446,7 @@ function grantsFromDefaults(
   return result;
 }
 
+/** Derives the permission grants for a joining agent from its defaults payload, always including tasks:assign. */
 export function agentJoinGrantsFromDefaults(
   defaultsPayload: Record<string, unknown> | null | undefined
 ): Array<{
@@ -1465,6 +1472,7 @@ type JoinRequestManagerCandidate = {
   reportsTo: string | null;
 };
 
+/** Resolves the manager agent ID for a new join request by finding the root CEO among candidates. */
 export function resolveJoinRequestAgentManagerId(
   candidates: JoinRequestManagerCandidate[]
 ): string | null {
@@ -1581,6 +1589,7 @@ async function probeInviteResolutionTarget(
   }
 }
 
+/** Mounts all access-management routes (invites, join requests, CLI auth, member permissions) onto the given Express app. */
 export function accessRoutes(
   db: Db,
   opts: {

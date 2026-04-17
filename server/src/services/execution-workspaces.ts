@@ -182,6 +182,7 @@ async function inspectGitCloseReadiness(workspace: ExecutionWorkspace): Promise<
   };
 }
 
+/** Parses and returns the ExecutionWorkspaceConfig stored in a workspace metadata record, or null if absent. */
 export function readExecutionWorkspaceConfig(metadata: Record<string, unknown> | null | undefined): ExecutionWorkspaceConfig | null {
   const raw = isRecord(metadata?.config) ? metadata.config : null;
   if (!raw) return null;
@@ -203,6 +204,7 @@ export function readExecutionWorkspaceConfig(metadata: Record<string, unknown> |
   return hasConfig ? config : null;
 }
 
+/** Applies a partial ExecutionWorkspaceConfig patch to a metadata record, returning the updated metadata. */
 export function mergeExecutionWorkspaceConfig(
   metadata: Record<string, unknown> | null | undefined,
   patch: Partial<ExecutionWorkspaceConfig> | null,
@@ -356,6 +358,7 @@ async function loadEffectiveRuntimeServicesByExecutionWorkspace(
   );
 }
 
+/** Creates the execution workspace service for managing isolated agent workspace lifecycle. */
 export function executionWorkspaceService(db: Db) {
   return {
     list: async (companyId: string, filters?: {

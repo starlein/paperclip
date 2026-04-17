@@ -107,6 +107,7 @@ function detectTailnetBindHost(): string | undefined {
   }
 }
 
+/** Loads the full server config by merging the config file with environment variable overrides. */
 export function loadConfig(): Config {
   const fileConfig = readConfigFile();
   const fileDatabaseMode =

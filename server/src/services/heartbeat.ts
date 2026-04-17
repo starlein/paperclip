@@ -159,6 +159,7 @@ export async function resolveExecutionRunAdapterConfig(input: {
   return { resolvedConfig, secretKeys };
 }
 
+/** Merges persisted execution workspace config overrides (runtime, strategy) into a base run config. */
 export function applyPersistedExecutionWorkspaceConfig(input: {
   config: Record<string, unknown>;
   workspaceConfig: ExecutionWorkspaceConfig | null;
@@ -186,12 +187,14 @@ export function applyPersistedExecutionWorkspaceConfig(input: {
   return nextConfig;
 }
 
+/** Returns a copy of the run config with the workspaceRuntime field removed. */
 export function stripWorkspaceRuntimeFromExecutionRunConfig(config: Record<string, unknown>) {
   const nextConfig = { ...config };
   delete nextConfig.workspaceRuntime;
   return nextConfig;
 }
 
+/** Constructs a RealizedExecutionWorkspace from a persisted workspace row, or null if the cwd cannot be resolved. */
 export function buildRealizedExecutionWorkspaceFromPersisted(input: {
   base: ExecutionWorkspaceInput;
   workspace: ExecutionWorkspace;
@@ -454,6 +457,7 @@ type ProjectWorkspaceCandidate = {
   id: string;
 };
 
+/** Reorders workspace candidates to place the preferred workspace first. */
 export function prioritizeProjectWorkspaceCandidatesForRun<T extends ProjectWorkspaceCandidate>(
   rows: T[],
   preferredWorkspaceId: string | null | undefined,
@@ -535,6 +539,7 @@ type ResumeSessionRow = {
   lastRunId: string | null;
 };
 
+/** Builds a session override that explicitly resumes a prior run's session when allowed. */
 export function buildExplicitResumeSessionOverride(input: {
   resumeFromRunId: string;
   resumeRunSessionIdBefore: string | null;
@@ -642,10 +647,12 @@ function formatCount(value: number | null | undefined) {
   return value.toLocaleString("en-US");
 }
 
+/** Reads the session compaction policy from an agent's adapter type and runtime config. */
 export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
   return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
 }
 
+/** Migrates session params to point at a newly available project workspace cwd when the previous cwd was a fallback. */
 export function resolveRuntimeSessionParamsForWorkspace(input: {
   agentId: string;
   previousSessionParams: Record<string, unknown> | null;
@@ -777,6 +784,7 @@ export function deriveTaskKeyWithHeartbeatFallback(
   return null;
 }
 
+/** Returns true when the wake context demands a fresh session rather than resuming the previous one. */
 export function shouldResetTaskSessionForWake(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {
@@ -806,6 +814,7 @@ function shouldRequireIssueCommentForWake(
   );
 }
 
+/** Wraps a workspace warning string in a stdout log chunk prefixed with [paperclip]. */
 export function formatRuntimeWorkspaceWarningLog(warning: string) {
   return {
     stream: "stdout" as const,
@@ -921,6 +930,7 @@ export function isRateLimitError(
   );
 }
 
+/** Returns true if the adapter result (timed out or non-zero exit) warrants trying the next fallback in the chain. */
 export function shouldContinueFallbackChain(
   result: Pick<AdapterExecutionResult, "timedOut" | "exitCode">,
 ): boolean {
@@ -946,6 +956,7 @@ export function shouldUseRateLimitFallback(
   return isRateLimitError(result);
 }
 
+/** Returns a copy of an adapter result with all session fields cleared. */
 export function stripAdapterSessionState(result: AdapterExecutionResult): AdapterExecutionResult {
   return {
     ...result,
@@ -956,6 +967,7 @@ export function stripAdapterSessionState(result: AdapterExecutionResult): Adapte
   };
 }
 
+/** Builds the runtime config to use for a fallback adapter, merging portable keys from the primary config. */
 export function buildFallbackConfig(
   primaryRuntimeConfig: Record<string, unknown>,
   fallback: AdapterFallbackChainEntry,
@@ -1059,6 +1071,7 @@ function deriveCommentId(
   );
 }
 
+/** Extracts the deduplicated list of wake comment IDs from a context snapshot. */
 export function extractWakeCommentIds(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ): string[] {
@@ -1184,6 +1197,7 @@ function enrichWakeContextSnapshot(input: {
   };
 }
 
+/** Deep-merges two coalesced context snapshots, deduplicating wake and processed comment ID lists. */
 export function mergeCoalescedContextSnapshot(
   existingRaw: unknown,
   incoming: Record<string, unknown>,
@@ -1519,6 +1533,7 @@ function resolveNextSessionState(input: {
   };
 }
 
+/** Creates the heartbeat service instance for managing agent run scheduling and execution. */
 export function heartbeatService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const getCurrentUserRedactionOptions = async () => ({

@@ -429,6 +429,7 @@ async function writeBundleFiles(
   }
 }
 
+/** Synchronizes a bundle config in an adapter config object from a file path, inferring mode, root, and entry. */
 export function syncInstructionsBundleConfigFromFilePath(
   agent: AgentLike,
   adapterConfig: Record<string, unknown>,
@@ -451,6 +452,7 @@ export function syncInstructionsBundleConfigFromFilePath(
   return applyBundleConfig(next, { mode, rootPath, entryFile });
 }
 
+/** Creates the agent instructions service for reading, writing, and managing instruction bundles. */
 export function agentInstructionsService() {
   async function getBundle(agent: AgentLike): Promise<AgentInstructionsBundle> {
     const state = await recoverManagedBundleState(agent, deriveBundleState(agent));

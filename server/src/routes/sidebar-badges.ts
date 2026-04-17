@@ -15,6 +15,7 @@ function buildDismissedAtByKey(
   );
 }
 
+/** Creates the Express router for sidebar unread badge count endpoints. */
 export function sidebarBadgeRoutes(db: Db) {
   const router = Router();
   const svc = sidebarBadgeService(db);

@@ -7,6 +7,7 @@ import { readPersistedDevServerStatus, toDevServerHealthStatus } from "../dev-se
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { serverVersion } from "../version.js";
 
+/** Creates the Express router for health check and status endpoints. */
 export function healthRoutes(
   db?: Db,
   opts: {

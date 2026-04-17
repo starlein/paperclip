@@ -96,6 +96,7 @@ function handleEvent(event: LiveEvent): void {
 
 let _unsubscribe: (() => void) | null = null;
 
+/** Starts listening to global live events and forwarding relevant ones to Telegram. */
 export function startTelegramEventBridge(): void {
   if (_unsubscribe) {
     logger.warn("telegram-event-bridge: already started, skipping");
@@ -112,6 +113,7 @@ export function startTelegramEventBridge(): void {
   logger.info("telegram-event-bridge: listening for live events");
 }
 
+/** Stops the Telegram event bridge and cleans up its live-event subscription. */
 export function stopTelegramEventBridge(): void {
   if (_unsubscribe) {
     _unsubscribe();

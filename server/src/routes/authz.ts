@@ -1,12 +1,14 @@
 import type { Request } from "express";
 import { forbidden, unauthorized } from "../errors.js";
 
+/** Throws a 403 Forbidden error if the request actor is not a board (user) actor. */
 export function assertBoard(req: Request) {
   if (req.actor.type !== "board") {
     throw forbidden("Board access required");
   }
 }
 
+/** Throws a 403 Forbidden error if the actor is not a board actor with instance-admin privileges. */
 export function assertInstanceAdmin(req: Request) {
   assertBoard(req);
   if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) {
@@ -15,6 +17,7 @@ export function assertInstanceAdmin(req: Request) {
   throw forbidden("Instance admin access required");
 }
 
+/** Throws 401/403 if the current actor has no authenticated access to the specified company. */
 export function assertCompanyAccess(req: Request, companyId: string) {
   if (req.actor.type === "none") {
     throw unauthorized();
@@ -30,6 +33,7 @@ export function assertCompanyAccess(req: Request, companyId: string) {
   }
 }
 
+/** Returns a normalized actor info object (type, actorId, agentId, runId) for the authenticated request actor. */
 export function getActorInfo(req: Request) {
   if (req.actor.type === "none") {
     throw unauthorized();

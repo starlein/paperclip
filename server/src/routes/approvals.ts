@@ -26,6 +26,7 @@ function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(a
   };
 }
 
+/** Creates the Express router for approval workflow endpoints. */
 export function approvalRoutes(db: Db) {
   const router = Router();
   const svc = approvalService(db);

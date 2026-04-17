@@ -36,6 +36,7 @@ interface IngestBody {
   username?: string;
 }
 
+/** Creates the Express router for Telegram webhook and notification endpoints. */
 export function telegramRoutes(db: Db) {
   const router = Router();
   const svc = issueService(db);

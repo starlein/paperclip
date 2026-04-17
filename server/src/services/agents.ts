@@ -155,6 +155,7 @@ function configPatchFromSnapshot(snapshot: unknown): Partial<typeof agents.$infe
   };
 }
 
+/** Returns true if the candidate agent name normalizes to the same URL key as any active existing agent. */
 export function hasAgentShortnameCollision(
   candidateName: string,
   existingAgents: AgentShortnameRow[],
@@ -170,6 +171,7 @@ export function hasAgentShortnameCollision(
   });
 }
 
+/** Returns a unique agent name by appending a numeric suffix if the candidate name collides with existing agents. */
 export function deduplicateAgentName(
   candidateName: string,
   existingAgents: AgentShortnameRow[],
@@ -186,6 +188,7 @@ export function deduplicateAgentName(
   return `${candidateName} ${Date.now()}`;
 }
 
+/** Creates the agent service for managing agent records, runtime state, and lifecycle. */
 export function agentService(db: Db) {
   function currentUtcMonthWindow(now = new Date()) {
     const year = now.getUTCFullYear();

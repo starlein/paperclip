@@ -73,6 +73,7 @@ function rowToRevision(row: typeof agentPolicyRevisions.$inferSelect): AgentPoli
   };
 }
 
+/** Creates the agent policies service for managing rate-limit and spending policy rules. */
 export function agentPoliciesService(db: Db) {
   return {
     listPolicies: async (

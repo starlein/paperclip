@@ -267,6 +267,7 @@ function buildExecutionStageWakeup(input: {
   return null;
 }
 
+/** Creates the Express router for issue CRUD and workflow endpoints. */
 export function issueRoutes(
   db: Db,
   storage: StorageService,

@@ -43,6 +43,7 @@ async function getMonthlySpendTotal(
   return Number(row?.total ?? 0);
 }
 
+/** Creates the cost service for recording and querying agent usage cost events. */
 export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
   const budgets = budgetService(db, budgetHooks);
   return {

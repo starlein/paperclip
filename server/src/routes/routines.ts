@@ -15,6 +15,7 @@ import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import { forbidden, unauthorized } from "../errors.js";
 import { getTelemetryClient } from "../telemetry.js";
 
+/** Creates the Express router for scheduled routine management endpoints. */
 export function routineRoutes(db: Db) {
   const router = Router();
   const svc = routineService(db);

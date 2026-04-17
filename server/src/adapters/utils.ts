@@ -34,6 +34,7 @@ export const ensureAbsoluteDirectory = serverUtils.ensureAbsoluteDirectory;
 export const ensureCommandResolvable = serverUtils.ensureCommandResolvable;
 export const resolveCommandForLogs = serverUtils.resolveCommandForLogs;
 
+/** Builds a sanitized copy of the invocation environment suitable for including in log output. */
 export function buildInvocationEnvForLogs(
   env: Record<string, string>,
   options: BuildInvocationEnvForLogsOptions = {},

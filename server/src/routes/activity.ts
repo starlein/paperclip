@@ -17,6 +17,7 @@ const createActivitySchema = z.object({
   details: z.record(z.unknown()).optional().nullable(),
 });
 
+/** Creates the Express router for activity feed endpoints. */
 export function activityRoutes(db: Db) {
   const router = Router();
   const svc = activityService(db);

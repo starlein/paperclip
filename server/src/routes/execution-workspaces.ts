@@ -15,6 +15,7 @@ import {
 } from "../services/workspace-runtime.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 
+/** Creates the Express router for execution workspace management endpoints. */
 export function executionWorkspaceRoutes(db: Db) {
   const router = Router();
   const svc = executionWorkspaceService(db);

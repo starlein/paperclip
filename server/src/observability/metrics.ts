@@ -119,6 +119,7 @@ export function httpMetricsMiddleware(req: Request, res: Response, next: NextFun
   next();
 }
 
+/** Returns true if metrics collection is enabled via env vars. */
 export function isMetricsEnabled(): boolean {
   return (
     process.env.PAPERCLIP_METRICS_ENABLED === "true" ||

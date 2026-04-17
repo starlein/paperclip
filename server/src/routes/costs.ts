@@ -21,6 +21,7 @@ import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { fetchAllQuotaWindows } from "../services/quota-windows.js";
 import { badRequest } from "../errors.js";
 
+/** Parses optional from/to date filters from a query params record, throwing on invalid dates. */
 export function parseCostDateRange(query: Record<string, unknown>) {
   const fromRaw = query.from as string | undefined;
   const toRaw = query.to as string | undefined;
@@ -31,6 +32,7 @@ export function parseCostDateRange(query: Record<string, unknown>) {
   return (from || to) ? { from, to } : undefined;
 }
 
+/** Parses and validates an integer result limit from a query params record (1–500, default 100). */
 export function parseCostLimit(query: Record<string, unknown>) {
   const raw = Array.isArray(query.limit) ? query.limit[0] : query.limit;
   if (raw == null || raw === "") return 100;
@@ -41,6 +43,7 @@ export function parseCostLimit(query: Record<string, unknown>) {
   return limit;
 }
 
+/** Creates the Express router for cost event and budget endpoints. */
 export function costRoutes(db: Db) {
   const router = Router();
   const heartbeat = heartbeatService(db);

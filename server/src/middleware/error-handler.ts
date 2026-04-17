@@ -32,6 +32,7 @@ function attachErrorContext(
   }
 }
 
+/** Express error-handling middleware that formats and sends structured error responses. */
 export function errorHandler(
   err: unknown,
   req: Request,

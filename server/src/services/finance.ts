@@ -34,6 +34,7 @@ function rangeConditions(companyId: string, range?: FinanceDateRange) {
   return conditions;
 }
 
+/** Creates the finance service for querying debit/credit summaries and balance reports. */
 export function financeService(db: Db) {
   const debitExpr = sql<number>`coalesce(sum(case when ${financeEvents.direction} = 'debit' then ${financeEvents.amountCents} else 0 end), 0)::int`;
   const creditExpr = sql<number>`coalesce(sum(case when ${financeEvents.direction} = 'credit' then ${financeEvents.amountCents} else 0 end), 0)::int`;

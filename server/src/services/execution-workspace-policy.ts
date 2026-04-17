@@ -30,6 +30,7 @@ function parseExecutionWorkspaceStrategy(raw: unknown): ExecutionWorkspaceStrate
   };
 }
 
+/** Parses and validates a raw value into a ProjectExecutionWorkspacePolicy, returning null if empty or invalid. */
 export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecutionWorkspacePolicy | null {
   const parsed = parseObject(raw);
   if (Object.keys(parsed).length === 0) return null;
@@ -77,6 +78,7 @@ export function parseProjectExecutionWorkspacePolicy(raw: unknown): ProjectExecu
   };
 }
 
+/** Returns the project workspace policy only when isolated workspaces are enabled; otherwise returns null. */
 export function gateProjectExecutionWorkspacePolicy(
   projectPolicy: ProjectExecutionWorkspacePolicy | null,
   isolatedWorkspacesEnabled: boolean,
@@ -85,6 +87,7 @@ export function gateProjectExecutionWorkspacePolicy(
   return projectPolicy;
 }
 
+/** Parses a raw value into IssueExecutionWorkspaceSettings, normalizing legacy mode names. */
 export function parseIssueExecutionWorkspaceSettings(raw: unknown): IssueExecutionWorkspaceSettings | null {
   const parsed = parseObject(raw);
   if (Object.keys(parsed).length === 0) return null;
@@ -116,6 +119,7 @@ export function parseIssueExecutionWorkspaceSettings(raw: unknown): IssueExecuti
   };
 }
 
+/** Derives the default issue workspace settings from the project policy, or null if the policy is disabled. */
 export function defaultIssueExecutionWorkspaceSettingsForProject(
   projectPolicy: ProjectExecutionWorkspacePolicy | null,
 ): IssueExecutionWorkspaceSettings | null {
@@ -132,6 +136,7 @@ export function defaultIssueExecutionWorkspaceSettingsForProject(
   };
 }
 
+/** Maps a persisted workspace mode string to a typed IssueExecutionWorkspaceSettings mode, defaulting to agent_default. */
 export function issueExecutionWorkspaceModeForPersistedWorkspace(
   mode: string | null | undefined,
 ): IssueExecutionWorkspaceSettings["mode"] {
@@ -147,6 +152,7 @@ export function issueExecutionWorkspaceModeForPersistedWorkspace(
   return "shared_workspace";
 }
 
+/** Resolves the effective execution workspace mode by combining issue settings, project policy, and legacy flags. */
 export function resolveExecutionWorkspaceMode(input: {
   projectPolicy: ProjectExecutionWorkspacePolicy | null;
   issueSettings: IssueExecutionWorkspaceSettings | null;
@@ -168,6 +174,7 @@ export function resolveExecutionWorkspaceMode(input: {
   return "shared_workspace";
 }
 
+/** Builds the adapter config record with workspace strategy and runtime fields applied according to the resolved mode. */
 export function buildExecutionWorkspaceAdapterConfig(input: {
   agentConfig: Record<string, unknown>;
   projectPolicy: ProjectExecutionWorkspacePolicy | null;

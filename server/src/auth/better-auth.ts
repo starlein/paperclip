@@ -42,6 +42,7 @@ function headersFromExpressRequest(req: Request): Headers {
   return headersFromNodeHeaders(req.headers);
 }
 
+/** Derives the list of trusted origins for BetterAuth from the deployment config and allowed hostnames. */
 export function deriveAuthTrustedOrigins(config: Config): string[] {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const trustedOrigins = new Set<string>();
@@ -67,6 +68,7 @@ export function deriveAuthTrustedOrigins(config: Config): string[] {
 
 const AUTH_DEV_SECRET = "paperclip-dev-secret";
 
+/** Creates and configures a BetterAuth instance backed by the given Drizzle database and server config. */
 export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?: string[]): BetterAuthInstance {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const secret = process.env.BETTER_AUTH_SECRET ?? process.env.PAPERCLIP_AGENT_JWT_SECRET;
@@ -111,6 +113,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins?
   return betterAuth(authConfig);
 }
 
+/** Wraps a BetterAuth instance as an Express RequestHandler, forwarding errors to next(). */
 export function createBetterAuthHandler(auth: BetterAuthInstance): RequestHandler {
   const handler = toNodeHandler(auth);
   return (req, res, next) => {

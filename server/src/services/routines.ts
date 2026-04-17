@@ -309,6 +309,7 @@ function mergeRoutineRunPayload(
   };
 }
 
+/** Creates the routine service for managing scheduled agent task routines. */
 export function routineService(db: Db, deps: { heartbeat?: IssueAssignmentWakeupDeps } = {}) {
   const issueSvc = issueService(db);
   const secretsSvc = secretService(db);

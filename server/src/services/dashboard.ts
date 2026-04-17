@@ -4,6 +4,7 @@ import { agents, approvals, companies, costEvents, issues } from "@paperclipai/d
 import { notFound } from "../errors.js";
 import { budgetService } from "./budgets.js";
 
+/** Creates the dashboard service for generating company-level summary data. */
 export function dashboardService(db: Db) {
   const budgets = budgetService(db);
   return {

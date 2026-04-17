@@ -57,6 +57,7 @@ import { adminRoutes } from "./routes/admin.js";
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
 
+/** Derives a Vite HMR websocket port offset from the server port, staying within valid port range. */
 export function resolveViteHmrPort(serverPort: number): number {
   if (serverPort <= 55_535) {
     return serverPort + 10_000;

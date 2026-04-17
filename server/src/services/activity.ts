@@ -9,6 +9,7 @@ export interface ActivityFilters {
   entityId?: string;
 }
 
+/** Creates the activity service for querying recent issue and comment activity. */
 export function activityService(db: Db) {
   const issueIdAsText = sql<string>`${issues.id}::text`;
   return {

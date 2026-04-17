@@ -13,6 +13,7 @@ type GrantInput = {
   scope?: Record<string, unknown> | null;
 };
 
+/** Creates the access control service for checking instance admin roles and permissions. */
 export function accessService(db: Db) {
   async function isInstanceAdmin(userId: string | null | undefined): Promise<boolean> {
     if (!userId) return false;

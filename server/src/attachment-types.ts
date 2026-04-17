@@ -70,11 +70,13 @@ export function matchesContentType(contentType: string, allowedPatterns: string[
   });
 }
 
+/** Normalizes a content type string to lowercase, falling back to `application/octet-stream` if empty. */
 export function normalizeContentType(contentType: string | null | undefined): string {
   const normalized = (contentType ?? "").trim().toLowerCase();
   return normalized || DEFAULT_ATTACHMENT_CONTENT_TYPE;
 }
 
+/** Returns true if the content type should be served inline (e.g. images, PDF, plain text). */
 export function isInlineAttachmentContentType(contentType: string): boolean {
   return matchesContentType(contentType, [...INLINE_ATTACHMENT_TYPES]);
 }

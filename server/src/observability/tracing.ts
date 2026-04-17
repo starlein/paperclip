@@ -9,6 +9,7 @@
  *   OTEL_SERVICE_NAME        - Override service name (default: paperclip-server)
  */
 
+/** Initializes OpenTelemetry tracing if PAPERCLIP_OTEL_ENDPOINT is set; no-op otherwise. */
 export function initTracing(): void {
   const endpoint = process.env.PAPERCLIP_OTEL_ENDPOINT;
   if (!endpoint) return;

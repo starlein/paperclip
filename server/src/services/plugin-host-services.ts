@@ -438,6 +438,7 @@ if (_logFlushInterval.unref) _logFlushInterval.unref();
 /** Maximum time (ms) to keep a session event subscription alive before forcing cleanup. */
 const SESSION_EVENT_SUBSCRIPTION_TIMEOUT_MS = 30 * 60 * 1_000; // 30 minutes
 
+/** Constructs the host services object exposed to a plugin worker, scoped to the given plugin and key. */
 export function buildHostServices(
   db: Db,
   pluginId: string,

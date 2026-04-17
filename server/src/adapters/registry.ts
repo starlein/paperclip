@@ -279,6 +279,7 @@ export function waitForExternalAdapters(): Promise<void> {
   return externalAdaptersReady;
 }
 
+/** Registers or replaces a server adapter module, saving the builtin fallback if a builtin type is being overridden. */
 export function registerServerAdapter(adapter: ServerAdapterModule): void {
   if (BUILTIN_ADAPTER_TYPES.has(adapter.type) && !builtinFallbacks.has(adapter.type)) {
     const existing = adaptersByType.get(adapter.type);
@@ -289,6 +290,7 @@ export function registerServerAdapter(adapter: ServerAdapterModule): void {
   adaptersByType.set(adapter.type, adapter);
 }
 
+/** Removes a non-builtin adapter or restores a builtin's fallback when an override is unregistered. */
 export function unregisterServerAdapter(type: string): void {
   if (type === processAdapter.type || type === httpAdapter.type) return;
   if (builtinFallbacks.has(type)) {
@@ -305,6 +307,7 @@ export function unregisterServerAdapter(type: string): void {
   adaptersByType.delete(type);
 }
 
+/** Returns the active adapter for the given type, throwing if it is not registered. */
 export function requireServerAdapter(type: string): ServerAdapterModule {
   const adapter = findActiveServerAdapter(type);
   if (!adapter) {
@@ -313,10 +316,12 @@ export function requireServerAdapter(type: string): ServerAdapterModule {
   return adapter;
 }
 
+/** Returns the active adapter for the given type, falling back to the process adapter if not found. */
 export function getServerAdapter(type: string): ServerAdapterModule {
   return findActiveServerAdapter(type) ?? processAdapter;
 }
 
+/** Returns the list of models for an adapter, preferring dynamically discovered models over the static list. */
 export async function listAdapterModels(type: string): Promise<{ id: string; label: string }[]> {
   const adapter = findActiveServerAdapter(type);
   if (!adapter) return [];
@@ -327,6 +332,7 @@ export async function listAdapterModels(type: string): Promise<{ id: string; lab
   return adapter.models ?? [];
 }
 
+/** Returns all registered server adapter modules, including overrides. */
 export function listServerAdapters(): ServerAdapterModule[] {
   return Array.from(adaptersByType.values());
 }
@@ -344,6 +350,7 @@ export function listEnabledServerAdapters(): ServerAdapterModule[] {
     : Array.from(adaptersByType.values());
 }
 
+/** Runs the adapter's model-detection logic and returns the detected model info, or null if unsupported. */
 export async function detectAdapterModel(
   type: string,
 ): Promise<{ model: string; provider: string; source: string; candidates?: string[] } | null> {
@@ -402,10 +409,12 @@ export function getPausedOverrides(): Set<string> {
   return pausedOverrides;
 }
 
+/** Looks up an adapter by type in the registry without considering pause state, returning null if absent. */
 export function findServerAdapter(type: string): ServerAdapterModule | null {
   return adaptersByType.get(type) ?? null;
 }
 
+/** Looks up the currently active adapter for a type, returning the builtin fallback when the override is paused. */
 export function findActiveServerAdapter(type: string): ServerAdapterModule | null {
   if (pausedOverrides.has(type)) {
     const fallback = builtinFallbacks.get(type);
