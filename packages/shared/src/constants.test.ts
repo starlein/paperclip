@@ -428,3 +428,4 @@ describe("PRINCIPAL_TYPES", () => {
     expect(PRINCIPAL_TYPES).toHaveLength(2);
   });
 });
+
