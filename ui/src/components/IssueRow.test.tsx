@@ -7,10 +7,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IssueRow } from "./IssueRow";
 
 vi.mock("@/lib/router", () => ({
-  Link: ({ children, className, disableIssueQuicklook: _disableIssueQuicklook, ...props }: React.ComponentProps<"a"> & { disableIssueQuicklook?: boolean }) => (
+  Link: ({
+    children,
+    className,
+    disableIssueQuicklook: _disableIssueQuicklook,
+    issuePrefetch,
+    ...props
+  }: React.ComponentProps<"a"> & { disableIssueQuicklook?: boolean; issuePrefetch?: Issue | null }) => (
     <a
       className={className}
       data-disable-issue-quicklook={_disableIssueQuicklook ? "true" : undefined}
+      data-issue-prefetch-id={issuePrefetch?.id}
       {...props}
     >
       {children}
@@ -33,6 +40,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Inbox item",
     description: null,
     status: "todo",
+    kind: "task",
     priority: "medium",
     assigneeAgentId: null,
     assigneeUserId: null,
@@ -151,6 +159,21 @@ describe("IssueRow", () => {
     const link = container.querySelector("[data-inbox-issue-link]") as HTMLAnchorElement | null;
     expect(link).not.toBeNull();
     expect(link?.getAttribute("data-disable-issue-quicklook")).toBe("true");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("passes the visible row issue into the navigation prefetch path", () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(<IssueRow issue={createIssue()} />);
+    });
+
+    const link = container.querySelector("[data-inbox-issue-link]") as HTMLAnchorElement | null;
+    expect(link?.getAttribute("data-issue-prefetch-id")).toBe("issue-1");
 
     act(() => {
       root.unmount();

@@ -135,6 +135,9 @@ export const INBOX_MINE_ISSUE_STATUS_FILTER = INBOX_MINE_ISSUE_STATUSES.join(","
 export const ISSUE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
 export type IssuePriority = (typeof ISSUE_PRIORITIES)[number];
 
+export const ISSUE_KINDS = ["task", "conversation"] as const;
+export type IssueKind = (typeof ISSUE_KINDS)[number];
+
 export const ISSUE_ORIGIN_KINDS = ["manual", "routine_execution"] as const;
 export type IssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 
@@ -361,6 +364,30 @@ export type PrincipalType = (typeof PRINCIPAL_TYPES)[number];
 
 export const MEMBERSHIP_STATUSES = ["pending", "active", "suspended"] as const;
 export type MembershipStatus = (typeof MEMBERSHIP_STATUSES)[number];
+
+export const COMPANY_MEMBERSHIP_ROLES = [
+  "owner",
+  "admin",
+  "operator",
+  "viewer",
+  "member",
+] as const;
+export type CompanyMembershipRole = (typeof COMPANY_MEMBERSHIP_ROLES)[number];
+
+export const HUMAN_COMPANY_MEMBERSHIP_ROLES = [
+  "owner",
+  "admin",
+  "operator",
+  "viewer",
+] as const;
+export type HumanCompanyMembershipRole = (typeof HUMAN_COMPANY_MEMBERSHIP_ROLES)[number];
+
+export const HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS: Record<HumanCompanyMembershipRole, string> = {
+  owner: "Owner",
+  admin: "Admin",
+  operator: "Operator",
+  viewer: "Viewer",
+};
 
 export const INSTANCE_USER_ROLES = ["instance_admin"] as const;
 export type InstanceUserRole = (typeof INSTANCE_USER_ROLES)[number];
@@ -694,7 +721,11 @@ export const PLUGIN_EVENT_TYPES = [
   "project.workspace_deleted",
   "issue.created",
   "issue.updated",
+  // @deprecated — this event name was never emitted; subscribe to "issue.comment_added" instead.
   "issue.comment.created",
+  // Internal action name used by routes/issues.ts when a comment is added.
+  // Listed here so plugins with `events.subscribe` can react to comment events.
+  "issue.comment_added",
   "agent.created",
   "agent.updated",
   "agent.status_changed",

@@ -31,7 +31,7 @@ vi.mock("../context/BreadcrumbContext", () => ({
 }));
 
 vi.mock("../context/ToastContext", () => ({
-  useToast: () => ({ pushToast: vi.fn() }),
+  useToastActions: () => ({ pushToast: vi.fn() }),
 }));
 
 vi.mock("../api/routines", () => ({
@@ -249,6 +249,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     projectWorkspaceId: null,
     goalId: null,
     parentId: null,
+    kind: "task",
     title: "Routine execution issue",
     description: null,
     status: "todo",

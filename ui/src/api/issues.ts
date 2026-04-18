@@ -23,6 +23,7 @@ export const issuesApi = {
     companyId: string,
     filters?: {
       status?: string;
+      kind?: string;
       projectId?: string;
       parentId?: string;
       assigneeAgentId?: string;
@@ -42,6 +43,7 @@ export const issuesApi = {
   ) => {
     const params = new URLSearchParams();
     if (filters?.status) params.set("status", filters.status);
+    if (filters?.kind) params.set("kind", filters.kind);
     if (filters?.projectId) params.set("projectId", filters.projectId);
     if (filters?.parentId) params.set("parentId", filters.parentId);
     if (filters?.assigneeAgentId) params.set("assigneeAgentId", filters.assigneeAgentId);
@@ -97,6 +99,8 @@ export const issuesApi = {
     const qs = params.toString();
     return api.get<IssueComment[]>(`/issues/${id}/comments${qs ? `?${qs}` : ""}`);
   },
+  getComment: (id: string, commentId: string) =>
+    api.get<IssueComment>(`/issues/${id}/comments/${commentId}`),
   listFeedbackVotes: (id: string) => api.get<FeedbackVote[]>(`/issues/${id}/feedback-votes`),
   listFeedbackTraces: (id: string, filters?: Record<string, string | boolean | undefined>) => {
     const params = new URLSearchParams();
@@ -126,6 +130,8 @@ export const issuesApi = {
         ...(interrupt === undefined ? {} : { interrupt }),
       },
     ),
+  cancelComment: (id: string, commentId: string) =>
+    api.delete<IssueComment>(`/issues/${id}/comments/${commentId}`),
   listDocuments: (id: string) => api.get<IssueDocument[]>(`/issues/${id}/documents`),
   getDocument: (id: string, key: string) => api.get<IssueDocument>(`/issues/${id}/documents/${encodeURIComponent(key)}`),
   upsertDocument: (id: string, key: string, data: UpsertIssueDocument) =>

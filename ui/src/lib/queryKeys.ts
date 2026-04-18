@@ -65,6 +65,8 @@ export const queryKeys = {
   executionWorkspaces: {
     list: (companyId: string, filters?: Record<string, string | boolean | undefined>) =>
       ["execution-workspaces", companyId, filters ?? {}] as const,
+    summaryList: (companyId: string, filters?: Record<string, string | boolean | undefined>) =>
+      ["execution-workspaces", companyId, "summary", filters ?? {}] as const,
     detail: (id: string) => ["execution-workspaces", "detail", id] as const,
     closeReadiness: (id: string) => ["execution-workspaces", "close-readiness", id] as const,
     workspaceOperations: (id: string) => ["execution-workspaces", "workspace-operations", id] as const,
@@ -72,6 +74,13 @@ export const queryKeys = {
   projects: {
     list: (companyId: string) => ["projects", companyId] as const,
     detail: (id: string) => ["projects", "detail", id] as const,
+    workspaces: (projectId: string) => ["projects", projectId, "workspaces"] as const,
+  },
+  workspaceFiles: {
+    list: (workspaceId: string, dirPath: string) =>
+      ["workspace-files", workspaceId, "list", dirPath] as const,
+    read: (workspaceId: string, filePath: string) =>
+      ["workspace-files", workspaceId, "file", filePath] as const,
   },
   goals: {
     list: (companyId: string) => ["goals", companyId] as const,
@@ -88,12 +97,24 @@ export const queryKeys = {
     issues: (approvalId: string) => ["approvals", "issues", approvalId] as const,
   },
   access: {
+    invites: (companyId: string, state: string = "all", limit: number = 20) =>
+      ["access", "invites", "paginated-v1", companyId, state, limit] as const,
     joinRequests: (companyId: string, status: string = "pending_approval") =>
       ["access", "join-requests", companyId, status] as const,
+    companyMembers: (companyId: string) => ["access", "company-members", companyId] as const,
+    companyUserDirectory: (companyId: string) => ["access", "company-user-directory", companyId] as const,
+    adminUsers: (query: string) => ["access", "admin-users", query] as const,
+    userCompanyAccess: (userId: string) => ["access", "user-company-access", userId] as const,
     invite: (token: string) => ["access", "invite", token] as const,
+    currentBoardAccess: ["access", "current-board-access"] as const,
   },
   auth: {
     session: ["auth", "session"] as const,
+  },
+  sidebarPreferences: {
+    companyOrder: (userId: string) => ["sidebar-preferences", "company-order", userId] as const,
+    projectOrder: (companyId: string, userId: string) =>
+      ["sidebar-preferences", "project-order", companyId, userId] as const,
   },
   instance: {
     generalSettings: ["instance", "general-settings"] as const,
@@ -134,6 +155,12 @@ export const queryKeys = {
   liveRuns: (companyId: string) => ["live-runs", companyId] as const,
   runIssues: (runId: string) => ["run-issues", runId] as const,
   org: (companyId: string) => ["org", companyId] as const,
+  conversations: {
+    list: (companyId: string) => ["conversations", companyId] as const,
+    ids: (companyId: string) => ["conversations", companyId, "ids"] as const,
+    unread: (companyId: string) => ["conversations", companyId, "unread"] as const,
+    liveRuns: (companyId: string) => ["conversations", companyId, "live-runs"] as const,
+  },
   skills: {
     available: ["skills", "available"] as const,
   },
