@@ -141,7 +141,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   const proc = await runChildProcess(runId, command, args, {
     cwd,
-    env: runtimeEnv,
+    env: runtimeEnv as Record<string, string>,
     timeoutSec,
     graceSec,
     onLog,
@@ -183,11 +183,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const runtimeServices: AdapterRuntimeServiceReport[] = [];
   if (cabinetConfig.memorySync !== "off" && cabinetConfig.slug) {
     runtimeServices.push({
-      serviceId: `cabinet:${cabinetConfig.slug}`,
-      label: "Cabinet Memory",
+      id: `cabinet:${cabinetConfig.slug}`,
+      serviceName: "cabinet-memory",
       status: "running",
-      detail: `Slug: ${cabinetConfig.slug}, Sync: ${cabinetConfig.memorySync}`,
-      endpoint: cabinetConfig.endpoint,
+      lifecycle: "shared",
+      scopeType: "agent",
+      url: cabinetConfig.endpoint,
+      providerRef: `${cabinetConfig.slug}:${cabinetConfig.memorySync}`,
+      healthStatus: "healthy",
     });
   }
 
@@ -197,9 +200,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       signal: proc.signal,
       timedOut: true,
       errorMessage: `Timed out after ${timeoutSec}s`,
-      meta: {
-        runtimeServices,
-      },
+      runtimeServices,
     };
   }
 
@@ -213,9 +214,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         stdout: proc.stdout,
         stderr: proc.stderr,
       },
-      meta: {
-        runtimeServices,
-      },
+      runtimeServices,
     };
   }
 
@@ -227,8 +226,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       stdout: proc.stdout,
       stderr: proc.stderr,
     },
-    meta: {
-      runtimeServices,
-    },
+    runtimeServices,
   };
 }
