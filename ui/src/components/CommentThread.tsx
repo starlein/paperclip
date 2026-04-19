@@ -711,6 +711,8 @@ export function CommentThread({
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const location = useLocation();
   const hasScrolledRef = useRef(false);
+  const shouldHideReopen =
+    hideReopen || shouldImplicitlyReopenComment(issueStatus, currentAssigneeValue ?? "");
 
   const timeline = useMemo<TimelineItem[]>(() => {
     const commentItems: TimelineItem[] = comments.map((comment) => ({
@@ -959,7 +961,7 @@ export function CommentThread({
           stickyInput={stickyInput}
           placeholder={placeholderProp}
           submitLabel={submitLabel}
-          hideReopen={hideReopen}
+          hideReopen={shouldHideReopen}
         />
       )}
 
