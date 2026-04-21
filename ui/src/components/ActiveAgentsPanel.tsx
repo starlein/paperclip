@@ -33,22 +33,27 @@ export function ActiveAgentsPanel({ companyId }: ActiveAgentsPanelProps) {
     queryFn: () => heartbeatsApi.liveRunsForCompany(companyId, MIN_DASHBOARD_RUNS),
   });
 
-  const runs = liveRuns ?? [];
-  const visibleRuns = useMemo(() => runs.slice(0, DASHBOARD_RUN_CARD_LIMIT), [runs]);
-  const hiddenRunCount = Math.max(0, runs.length - visibleRuns.length);
+  const allRuns = liveRuns ?? [];
   const { data: issues } = useQuery({
     queryKey: [...queryKeys.issues.list(companyId), "with-routine-executions"],
     queryFn: () => issuesApi.list(companyId, { includeRoutineExecutions: true }),
-    enabled: visibleRuns.length > 0,
+    enabled: allRuns.length > 0,
   });
-
   const issueById = useMemo(() => {
     const map = new Map<string, Issue>();
-    for (const issue of issues ?? []) {
-      map.set(issue.id, issue);
-    }
+    for (const issue of issues ?? []) map.set(issue.id, issue);
     return map;
   }, [issues]);
+  const runs = useMemo(
+    () => allRuns.filter((run) => {
+      if (!run.issueId) return true;
+      const issue = issueById.get(run.issueId);
+      return !issue || issue.kind !== "conversation";
+    }),
+    [allRuns, issueById],
+  );
+  const visibleRuns = useMemo(() => runs.slice(0, DASHBOARD_RUN_CARD_LIMIT), [runs]);
+  const hiddenRunCount = Math.max(0, runs.length - visibleRuns.length);
 
   const { transcriptByRun, hasOutputForRun } = useLiveRunTranscripts({
     runs: visibleRuns,

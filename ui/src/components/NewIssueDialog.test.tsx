@@ -182,6 +182,7 @@ vi.mock("./AgentIconPicker", () => ({
 
 vi.mock("@/components/ui/dialog", () => ({
   Dialog: ({ open, children }: { open: boolean; children: ReactNode }) => (open ? <div>{children}</div> : null),
+  DialogTitle: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DialogContent: ({
     children,
     showCloseButton: _showCloseButton,

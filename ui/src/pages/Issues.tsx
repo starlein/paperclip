@@ -90,7 +90,7 @@ export function Issues() {
       participantAgentId ?? "__all__",
       "with-routine-executions",
     ],
-    queryFn: () => issuesApi.list(selectedCompanyId!, { participantAgentId, includeRoutineExecutions: true }),
+    queryFn: () => issuesApi.list(selectedCompanyId!, { participantAgentId, kind: "task", includeRoutineExecutions: true }),
     enabled: !!selectedCompanyId,
   });
 

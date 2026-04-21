@@ -139,6 +139,9 @@ export const INBOX_MINE_ISSUE_STATUS_FILTER = INBOX_MINE_ISSUE_STATUSES.join(","
 export const ISSUE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
 export type IssuePriority = (typeof ISSUE_PRIORITIES)[number];
 
+export const ISSUE_KINDS = ["task", "conversation"] as const;
+export type IssueKind = (typeof ISSUE_KINDS)[number];
+
 export const ISSUE_ORIGIN_KINDS = ["manual", "routine_execution"] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;
@@ -801,7 +804,11 @@ export const PLUGIN_EVENT_TYPES = [
   "project.workspace_deleted",
   "issue.created",
   "issue.updated",
+  // @deprecated — this event name was never emitted; subscribe to "issue.comment_added" instead.
   "issue.comment.created",
+  // Internal action name used by routes/issues.ts when a comment is added.
+  // Listed here so plugins with `events.subscribe` can react to comment events.
+  "issue.comment_added",
   "issue.document.created",
   "issue.document.updated",
   "issue.document.deleted",
