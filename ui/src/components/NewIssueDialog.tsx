@@ -15,6 +15,7 @@ import { buildCompanyUserInlineOptions, buildMarkdownMentionOptions } from "../l
 import { queryKeys } from "../lib/queryKeys";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
+import { getRecentProjectIds, trackRecentProject } from "../lib/recent-projects";
 import { buildExecutionPolicy } from "../lib/issue-execution-policy";
 import { useToastActions } from "../context/ToastContext";
 import {
@@ -863,6 +864,11 @@ export function NewIssueDialog() {
         ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
       : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
   const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
+  const recentAssigneeOptionIds = useMemo(
+    () => recentAssigneeIds.map((id) => assigneeValueFromSelection({ assigneeAgentId: id })),
+    [recentAssigneeIds],
+  );
+  const recentProjectIds = useMemo(() => getRecentProjectIds(), [newIssueOpen]);
   const assigneeOptions = useMemo<InlineEntityOption[]>(
     () => [
       ...currentUserAssigneeOption(currentUserId),
@@ -896,6 +902,7 @@ export function NewIssueDialog() {
   const stagedAttachments = stagedFiles.filter((file) => file.kind === "attachment");
 
   const handleProjectChange = useCallback((nextProjectId: string) => {
+    if (nextProjectId) trackRecentProject(nextProjectId);
     setProjectId(nextProjectId);
     const nextProject = orderedProjects.find((project) => project.id === nextProjectId);
     executionWorkspaceDefaultProjectId.current = nextProjectId || null;
@@ -1106,6 +1113,7 @@ export function NewIssueDialog() {
                 ref={assigneeSelectorRef}
                 value={assigneeValue}
                 options={assigneeOptions}
+                recentOptionIds={recentAssigneeOptionIds}
                 placeholder="Assignee"
                 disablePortal
                 noneLabel="No assignee"
@@ -1157,6 +1165,7 @@ export function NewIssueDialog() {
                 ref={projectSelectorRef}
                 value={projectId}
                 options={projectOptions}
+                recentOptionIds={recentProjectIds}
                 placeholder="Project"
                 disablePortal
                 noneLabel="No project"
@@ -1246,6 +1255,7 @@ export function NewIssueDialog() {
                 <InlineEntitySelector
                 value={reviewerValue}
                 options={assigneeOptions}
+                recentOptionIds={recentAssigneeOptionIds}
                 placeholder="Reviewer"
                 disablePortal
                 noneLabel="No reviewer"
@@ -1290,6 +1300,7 @@ export function NewIssueDialog() {
                 <InlineEntitySelector
                 value={approverValue}
                 options={assigneeOptions}
+                recentOptionIds={recentAssigneeOptionIds}
                 placeholder="Approver"
                 disablePortal
                 noneLabel="No approver"
