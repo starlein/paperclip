@@ -181,6 +181,7 @@ export function useInboxBadge(companyId: string | null | undefined) {
         touchedByUserId: "me",
         inboxArchivedByUserId: "me",
         status: INBOX_ISSUE_STATUSES,
+        kind: "task",
         limit: INBOX_BADGE_ISSUE_LIMIT,
       }),
     enabled: !!companyId,

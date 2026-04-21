@@ -1,0 +1,73 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ${OLLAMA_DATA_DIR}:/root/.ollama
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT}:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+#  db:
+#    image: postgres:17-alpine
+#    environment:
+#      POSTGRES_USER: paperclip
+#      POSTGRES_PASSWORD: paperclip
+#      POSTGRES_DB: paperclip
+#    healthcheck:
+#      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+#      interval: 2s
+#      timeout: 5s
+#      retries: 30
+#    ports:
+#      - "127.0.0.1:5432:5432"
+#    volumes:
+#      - pgdata:/var/lib/postgresql/data
+#
+  paperclip:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
+    container_name: paperclip
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PAPERCLIP_PORT}:3100"
+    volumes:
+      - ${PAPERCLIP_DATA_DIR}:/paperclip
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3100
+#      SERVE_UI: true
+#      DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
+      NODE_ENV: production
+      HOME: /paperclip
+      PAPERCLIP_HOME: /paperclip
+      PAPERCLIP_INSTANCE_ID: default
+      PAPERCLIP_CONFIG: /paperclip/instances/default/config.json
+      PAPERCLIP_DEPLOYMENT_MODE: authenticated
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: private
+      PAPERCLIP_AUTH_SECRET: ${PAPERCLIP_AUTH_SECRET}
+      PAPERCLIP_ALLOWED_HOST: ${PAPERCLIP_ALLOWED_HOST}
+      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL}
+      OPENCODE_ALLOW_ALL_MODELS: "true"
+      PAPERCLIP_TELEMETRY_DISABLED: "true"
+      PAPERCLIP_AUTH_DISABLE_SIGN_UP: "true"
+      USER_UID: ${USER_UID}
+      USER_GID: ${USER_GID}
+      OLLAMA_HOST: ${OLLAMA_HOST}
+      PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${HOME}/.local/bin
+
+#volumes:
+#  pgdata:

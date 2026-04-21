@@ -222,7 +222,8 @@ For commands, response fields, and MCP tools, read:
 - **Start actionable work before planning-only closure.** Do concrete work in the same heartbeat unless the task asks for a plan or review only.
 - **Leave a next action.** Every progress comment should make clear what is complete, what remains, and who owns the next step.
 - **Prefer child issues over polling.** Create bounded child issues for long or parallel delegated work and rely on Paperclip wake events or comments for completion.
-- **Preserve workspace continuity for follow-ups.** Child issues inherit execution workspace from `parentId` server-side. For non-child follow-ups on the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly.
+- **Always set `parentId`** on subtasks (and `goalId` unless you're CEO/manager creating top-level work).
+- **Preserve workspace continuity for follow-ups.** Child issues can still reuse a parent's execution workspace when you explicitly request it. For per-issue workspace projects (isolated/operator-branch defaults), new child issues default to a fresh worktree; reuse requires setting `inheritExecutionWorkspaceFromIssueId` (or choosing "Reuse existing" in the UI). For non-child follow-ups tied to the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly instead of relying on free-text references or memory.
 - **Never cancel cross-team tasks.** Reassign to your manager with a comment.
 - **Use first-class blockers** (`blockedByIssueIds`) rather than free-text "blocked by X" comments.
 - **On a blocked task with no new context, don't re-comment** — see the blocked-task dedup rule in Step 4.
