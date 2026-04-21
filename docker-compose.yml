@@ -13,6 +13,22 @@ services:
       timeout: 5s
       retries: 20
 
+#  db:
+#    image: postgres:17-alpine
+#    environment:
+#      POSTGRES_USER: paperclip
+#      POSTGRES_PASSWORD: paperclip
+#      POSTGRES_DB: paperclip
+#    healthcheck:
+#      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+#      interval: 2s
+#      timeout: 5s
+#      retries: 30
+#    ports:
+#      - "127.0.0.1:5432:5432"
+#    volumes:
+#      - pgdata:/var/lib/postgresql/data
+#
   paperclip:
     build:
       context: .
@@ -33,6 +49,8 @@ services:
     environment:
       HOST: 0.0.0.0
       PORT: 3100
+#      SERVE_UI: true
+#      DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
       NODE_ENV: production
       HOME: /paperclip
       PAPERCLIP_HOME: /paperclip
@@ -51,3 +69,5 @@ services:
       OLLAMA_HOST: ${OLLAMA_HOST}
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${HOME}/.local/bin
 
+#volumes:
+#  pgdata:

@@ -2,7 +2,7 @@ FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gosu curl git wget ripgrep python3 mc procps jq nano zstd tini net-tools openssh-client php-cli \
+  && apt-get install -y --no-install-recommends ca-certificates gosu curl git wget ripgrep python3 mc procps nano zstd tini net-tools php-cli \
   && mkdir -p -m 755 /etc/apt/keyrings \
   && wget -nv -O/etc/apt/keyrings/githubcli-archive-keyring.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg \
   && echo "6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b  /etc/apt/keyrings/githubcli-archive-keyring.gpg" | sha256sum -c - \
@@ -63,9 +63,7 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 WORKDIR /app
 COPY --chown=node:node --from=build /app /app
-COPY --chown=node:node --from=build /app /app
-RUN chmod +x /app/cli/dist/index.js \
-  && ln -sf /app/cli/dist/index.js /usr/local/bin/paperclipai
+RUN chmod +x /app/cli/dist/index.js
 RUN npm install --global --omit=dev @anthropic-ai/claude-code@latest @openai/codex@latest opencode-ai \
   && apt-get update \
   && apt-get install -y --no-install-recommends openssh-client jq \
