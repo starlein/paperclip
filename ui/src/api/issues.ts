@@ -23,7 +23,6 @@ export const issuesApi = {
     companyId: string,
     filters?: {
       status?: string;
-      kind?: string;
       projectId?: string;
       parentId?: string;
       assigneeAgentId?: string;
@@ -37,6 +36,7 @@ export const issuesApi = {
       executionWorkspaceId?: string;
       originKind?: string;
       originId?: string;
+      kind?: string;
       includeRoutineExecutions?: boolean;
       q?: string;
       limit?: number;
@@ -44,7 +44,6 @@ export const issuesApi = {
   ) => {
     const params = new URLSearchParams();
     if (filters?.status) params.set("status", filters.status);
-    if (filters?.kind) params.set("kind", filters.kind);
     if (filters?.projectId) params.set("projectId", filters.projectId);
     if (filters?.parentId) params.set("parentId", filters.parentId);
     if (filters?.assigneeAgentId) params.set("assigneeAgentId", filters.assigneeAgentId);
@@ -58,6 +57,7 @@ export const issuesApi = {
     if (filters?.executionWorkspaceId) params.set("executionWorkspaceId", filters.executionWorkspaceId);
     if (filters?.originKind) params.set("originKind", filters.originKind);
     if (filters?.originId) params.set("originId", filters.originId);
+    if (filters?.kind) params.set("kind", filters.kind);
     if (filters?.includeRoutineExecutions) params.set("includeRoutineExecutions", "true");
     if (filters?.q) params.set("q", filters.q);
     if (filters?.limit) params.set("limit", String(filters.limit));
