@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, getTableColumns, gt, inArray, isNull, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -744,6 +744,16 @@ async function withAgentStartLock<T>(agentId: string, fn: () => Promise<T>) {
       startLocksByAgent.delete(agentId);
     }
   }
+}
+
+// Derives a stable 48-bit integer lock key for a given agentId, used as a
+// Postgres session-level advisory lock key to serialize startNextQueuedRunForAgent
+// across multiple server processes.
+function agentDbStartLockKey(agentId: string): number {
+  return Number.parseInt(
+    createHash("sha256").update(`agent_start:${agentId}`).digest("hex").slice(0, 12),
+    16,
+  );
 }
 
 interface WakeupOptions {
@@ -3067,6 +3077,23 @@ export function heartbeatService(db: Db) {
       return { outcome: "not_applicable" as const, queuedRun: null };
     }
 
+    // Skip the retry wake if the run's resultJson has no commentable content.
+    // A retry would re-run the agent expecting a comment, but if the result has no
+    // text fields the retry will also fail, burning budget for nothing.
+    if (!buildHeartbeatRunIssueComment(run.resultJson)) {
+      await patchRunIssueCommentStatus(run.id, {
+        issueCommentStatus: "retry_exhausted",
+        issueCommentSatisfiedByCommentId: null,
+      });
+      await appendRunEvent(run, await nextRunEventSeq(run.id), {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: "Run ended without an issue comment and resultJson has no commentable content; skipping retry wake",
+      });
+      return { outcome: "retry_exhausted" as const, queuedRun: null };
+    }
+
     const queuedRun = await enqueueMissingIssueCommentRetry(run, agent, issueId);
     if (queuedRun) {
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
@@ -3520,7 +3547,7 @@ export function heartbeatService(db: Db) {
     const claimedIssueId = readNonEmptyString(parseObject(claimed.contextSnapshot).issueId);
     if (claimedIssueId) {
       const claimedAgent = await getAgent(claimed.agentId);
-      await db
+      const stampedRows = await db
         .update(issues)
         .set({
           executionRunId: claimed.id,
@@ -3534,7 +3561,27 @@ export function heartbeatService(db: Db) {
             eq(issues.companyId, claimed.companyId),
             or(isNull(issues.executionRunId), eq(issues.executionRunId, claimed.id)),
           ),
+        )
+        .returning();
+
+      if (stampedRows.length === 0) {
+        // Another run already holds the execution lock for this issue.
+        // Cancel this run to prevent concurrent execution of the same issue.
+        logger.warn(
+          { runId: claimed.id, issueId: claimedIssueId },
+          "claimQueuedRun: execution lock contested — cancelling run to prevent concurrent issue execution",
         );
+        await setRunStatus(claimed.id, "cancelled", {
+          finishedAt: claimedAt,
+          error: "Cancelled: another run holds the execution lock for this issue",
+          errorCode: "cancelled",
+        });
+        await setWakeupStatus(claimed.wakeupRequestId, "cancelled", {
+          finishedAt: claimedAt,
+          error: "Execution lock contested",
+        });
+        return null;
+      }
     }
 
     return claimed;
@@ -4745,74 +4792,85 @@ export function heartbeatService(db: Db) {
 
   async function startNextQueuedRunForAgent(agentId: string) {
     return withAgentStartLock(agentId, async () => {
-      const agent = await getAgent(agentId);
-      if (!agent) return [];
-      if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
-        return [];
-      }
-      const policy = parseHeartbeatPolicy(agent);
-      const runningCount = await countRunningRunsForAgent(agentId);
-      const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
-      if (availableSlots <= 0) return [];
+      // DB advisory lock serializes this function across multiple server processes.
+      // withAgentStartLock already serializes within a single process; the advisory
+      // lock extends that guarantee to horizontally-scaled deployments so that the
+      // runningCount read and the subsequent claims are effectively atomic across all
+      // instances and maxConcurrentRuns is never exceeded.
+      const lockKey = agentDbStartLockKey(agentId);
+      await db.execute(sql`SELECT pg_advisory_lock(${lockKey})`);
+      try {
+        const agent = await getAgent(agentId);
+        if (!agent) return [];
+        if (agent.status === "paused" || agent.status === "terminated" || agent.status === "pending_approval") {
+          return [];
+        }
+        const policy = parseHeartbeatPolicy(agent);
+        const runningCount = await countRunningRunsForAgent(agentId);
+        const availableSlots = Math.max(0, policy.maxConcurrentRuns - runningCount);
+        if (availableSlots <= 0) return [];
 
-      const queuedRuns = await db
-        .select()
-        .from(heartbeatRuns)
-        .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
-        .orderBy(asc(heartbeatRuns.createdAt));
-      if (queuedRuns.length === 0) return [];
+        const queuedRuns = await db
+          .select()
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "queued")))
+          .orderBy(asc(heartbeatRuns.createdAt));
+        if (queuedRuns.length === 0) return [];
 
-      const dependencyReadiness = await listQueuedRunDependencyReadiness(agent.companyId, queuedRuns);
-      const queuedIssueIds = [...new Set(
-        queuedRuns
-          .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
-          .filter((issueId): issueId is string => Boolean(issueId)),
-      )];
-      const issueRows = await db
-        .select({
-          id: issues.id,
-          status: issues.status,
-          priority: issues.priority,
-        })
-        .from(issues)
-        .where(
-          queuedIssueIds.length > 0
-            ? and(eq(issues.companyId, agent.companyId), inArray(issues.id, queuedIssueIds))
-            : sql`false`,
-        );
-      const issueById = new Map(issueRows.map((row) => [row.id, row]));
-      const prioritizedRuns = [...queuedRuns].sort((left, right) => {
-        const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
-        const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
-        const leftReadiness = leftIssueId ? dependencyReadiness.get(leftIssueId) : null;
-        const rightReadiness = rightIssueId ? dependencyReadiness.get(rightIssueId) : null;
-        const leftReady = leftIssueId ? (leftReadiness?.isDependencyReady ?? true) : true;
-        const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
-        const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
-        const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
-        const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-        const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
-        if (leftRank !== rightRank) return leftRank - rightRank;
-        const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
-        const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
-        if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
-        return left.createdAt.getTime() - right.createdAt.getTime();
-      });
-
-      const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
-      for (const queuedRun of prioritizedRuns) {
-        if (claimedRuns.length >= availableSlots) break;
-        const claimed = await claimQueuedRun(queuedRun);
-        if (claimed) claimedRuns.push(claimed);
-      }
-      if (claimedRuns.length === 0) return [];
-
-      for (const claimedRun of claimedRuns) {
-        void executeRun(claimedRun.id).catch((err) => {
-          logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
+        const dependencyReadiness = await listQueuedRunDependencyReadiness(agent.companyId, queuedRuns);
+        const queuedIssueIds = [...new Set(
+          queuedRuns
+            .map((run) => readNonEmptyString(parseObject(run.contextSnapshot).issueId))
+            .filter((issueId): issueId is string => Boolean(issueId)),
+        )];
+        const issueRows = await db
+          .select({
+            id: issues.id,
+            status: issues.status,
+            priority: issues.priority,
+          })
+          .from(issues)
+          .where(
+            queuedIssueIds.length > 0
+              ? and(eq(issues.companyId, agent.companyId), inArray(issues.id, queuedIssueIds))
+              : sql`false`,
+          );
+        const issueById = new Map(issueRows.map((row) => [row.id, row]));
+        const prioritizedRuns = [...queuedRuns].sort((left, right) => {
+          const leftIssueId = readNonEmptyString(parseObject(left.contextSnapshot).issueId);
+          const rightIssueId = readNonEmptyString(parseObject(right.contextSnapshot).issueId);
+          const leftReadiness = leftIssueId ? dependencyReadiness.get(leftIssueId) : null;
+          const rightReadiness = rightIssueId ? dependencyReadiness.get(rightIssueId) : null;
+          const leftReady = leftIssueId ? (leftReadiness?.isDependencyReady ?? true) : true;
+          const rightReady = rightIssueId ? (rightReadiness?.isDependencyReady ?? true) : true;
+          const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
+          const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
+          const leftRank = leftIssueId ? (leftReady ? (leftIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+          const rightRank = rightIssueId ? (rightReady ? (rightIssue?.status === "in_progress" ? 0 : 1) : 3) : 2;
+          if (leftRank !== rightRank) return leftRank - rightRank;
+          const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
+          const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
+          if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
+          return left.createdAt.getTime() - right.createdAt.getTime();
         });
+
+        const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
+        for (const queuedRun of prioritizedRuns) {
+          if (claimedRuns.length >= availableSlots) break;
+          const claimed = await claimQueuedRun(queuedRun);
+          if (claimed) claimedRuns.push(claimed);
+        }
+        if (claimedRuns.length === 0) return [];
+
+        for (const claimedRun of claimedRuns) {
+          void executeRun(claimedRun.id).catch((err) => {
+            logger.error({ err, runId: claimedRun.id }, "queued heartbeat execution failed");
+          });
+        }
+        return claimedRuns;
+      } finally {
+        await db.execute(sql`SELECT pg_advisory_unlock(${lockKey})`).catch(() => undefined);
       }
-      return claimedRuns;
     });
   }
 
@@ -5703,6 +5761,18 @@ export function heartbeatService(db: Db) {
               "stderr",
               `[paperclip] Failed to post run summary comment: ${err instanceof Error ? err.message : String(err)}\n`,
             );
+          }
+        } else if (!issueId && outcome === "succeeded") {
+          // Non-issue heartbeat: surface result in the run event log so it's visible
+          // in the agent's run history even though there is no issue thread to post to.
+          const nonIssueComment = buildHeartbeatRunIssueComment(persistedResultJson);
+          if (nonIssueComment) {
+            await appendRunEvent(livenessRun, seq++, {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "info",
+              message: `[result] ${nonIssueComment}`,
+            });
           }
         }
         if (outcome === "failed" && livenessRun.errorCode === "codex_transient_upstream") {
