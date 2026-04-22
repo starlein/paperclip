@@ -1,6 +1,7 @@
 import type {
   IssueExecutionDecisionOutcome,
   IssueExecutionPolicyMode,
+  IssueReferenceSourceKind,
   IssueExecutionStageType,
   IssueExecutionStateStatus,
   IssueKind,
@@ -124,6 +125,24 @@ export interface IssueRelation {
   relatedIssue: IssueRelationIssueSummary;
 }
 
+export interface IssueReferenceSource {
+  kind: IssueReferenceSourceKind;
+  sourceRecordId: string | null;
+  label: string;
+  matchedText: string | null;
+}
+
+export interface IssueRelatedWorkItem {
+  issue: IssueRelationIssueSummary;
+  mentionCount: number;
+  sources: IssueReferenceSource[];
+}
+
+export interface IssueRelatedWorkSummary {
+  outbound: IssueRelatedWorkItem[];
+  inbound: IssueRelatedWorkItem[];
+}
+
 export interface IssueExecutionStagePrincipal {
   type: "agent" | "user";
   agentId?: string | null;
@@ -200,6 +219,7 @@ export interface Issue {
   originKind?: IssueOriginKind;
   originId?: string | null;
   originRunId?: string | null;
+  originFingerprint?: string | null;
   requestDepth: number;
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
@@ -216,6 +236,8 @@ export interface Issue {
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];
   blocks?: IssueRelationIssueSummary[];
+  relatedWork?: IssueRelatedWorkSummary;
+  referencedIssueIdentifiers?: string[];
   planDocument?: IssueDocument | null;
   documentSummaries?: IssueDocumentSummary[];
   legacyPlanDocument?: LegacyPlanDocument | null;

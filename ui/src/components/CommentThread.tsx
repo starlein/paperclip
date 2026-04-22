@@ -143,8 +143,8 @@ function parseReassignment(target: string): CommentReassignment | null {
 }
 
 function shouldImplicitlyReopenComment(issueStatus: string | undefined, assigneeValue: string) {
-  const isClosed = issueStatus === "done" || issueStatus === "cancelled";
-  return isClosed && assigneeValue.startsWith("agent:");
+  const resumesToTodo = issueStatus === "done" || issueStatus === "cancelled" || issueStatus === "blocked";
+  return resumesToTodo && assigneeValue.startsWith("agent:");
 }
 
 function humanizeValue(value: string | null): string {
@@ -711,6 +711,8 @@ export function CommentThread({
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const location = useLocation();
   const hasScrolledRef = useRef(false);
+  const shouldHideReopen =
+    hideReopen || shouldImplicitlyReopenComment(issueStatus, currentAssigneeValue ?? "");
 
   const timeline = useMemo<TimelineItem[]>(() => {
     const commentItems: TimelineItem[] = comments.map((comment) => ({
@@ -959,7 +961,7 @@ export function CommentThread({
           stickyInput={stickyInput}
           placeholder={placeholderProp}
           submitLabel={submitLabel}
-          hideReopen={hideReopen}
+          hideReopen={shouldHideReopen}
         />
       )}
 

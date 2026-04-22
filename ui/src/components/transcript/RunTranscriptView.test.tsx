@@ -1,10 +1,30 @@
 // @vitest-environment node
 
-import { describe, expect, it } from "vitest";
+import type { ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { TranscriptEntry } from "../../adapters";
 import { ThemeProvider } from "../../context/ThemeContext";
 import { RunTranscriptView, normalizeTranscript } from "./RunTranscriptView";
+
+const mockIssuesApi = vi.hoisted(() => ({
+  get: vi.fn(),
+}));
+
+vi.mock("@/lib/router", () => ({
+  Link: ({
+    children,
+    to,
+    ...props
+  }: { children: ReactNode; to: string } & React.ComponentProps<"a">) => (
+    <a href={to} {...props}>{children}</a>
+  ),
+}));
+
+vi.mock("../../api/issues", () => ({
+  issuesApi: mockIssuesApi,
+}));
 
 describe("RunTranscriptView", () => {
   it("keeps running command stdout inside the command fold instead of a standalone stdout block", () => {
@@ -34,23 +54,25 @@ describe("RunTranscriptView", () => {
 
   it("renders assistant and thinking content as markdown in compact mode", () => {
     const html = renderToStaticMarkup(
-      <ThemeProvider>
-        <RunTranscriptView
-          density="compact"
-          entries={[
-            {
-              kind: "assistant",
-              ts: "2026-03-12T00:00:00.000Z",
-              text: "Hello **world**",
-            },
-            {
-              kind: "thinking",
-              ts: "2026-03-12T00:00:01.000Z",
-              text: "- first\n- second",
-            },
-          ]}
-        />
-      </ThemeProvider>,
+      <QueryClientProvider client={new QueryClient()}>
+        <ThemeProvider>
+          <RunTranscriptView
+            density="compact"
+            entries={[
+              {
+                kind: "assistant",
+                ts: "2026-03-12T00:00:00.000Z",
+                text: "Hello **world**",
+              },
+              {
+                kind: "thinking",
+                ts: "2026-03-12T00:00:01.000Z",
+                text: "- first\n- second",
+              },
+            ]}
+          />
+        </ThemeProvider>
+      </QueryClientProvider>,
     );
 
     expect(html).toContain("<strong>world</strong>");
@@ -84,30 +106,54 @@ describe("RunTranscriptView", () => {
 
   it("renders successful result summaries as markdown in nice mode", () => {
     const html = renderToStaticMarkup(
-      <ThemeProvider>
-        <RunTranscriptView
-          density="compact"
-          entries={[
-            {
-              kind: "result",
-              ts: "2026-03-12T00:00:02.000Z",
-              text: "## Summary\n\n- fixed deploy config\n- posted issue update",
-              inputTokens: 10,
-              outputTokens: 20,
-              cachedTokens: 0,
-              costUsd: 0,
-              subtype: "success",
-              isError: false,
-              errors: [],
-            },
-          ]}
-        />
-      </ThemeProvider>,
+      <QueryClientProvider client={new QueryClient()}>
+        <ThemeProvider>
+          <RunTranscriptView
+            density="compact"
+            entries={[
+              {
+                kind: "result",
+                ts: "2026-03-12T00:00:02.000Z",
+                text: "## Summary\n\n- fixed deploy config\n- posted issue update",
+                inputTokens: 10,
+                outputTokens: 20,
+                cachedTokens: 0,
+                costUsd: 0,
+                subtype: "success",
+                isError: false,
+                errors: [],
+              },
+            ]}
+          />
+        </ThemeProvider>
+      </QueryClientProvider>,
     );
 
     expect(html).toContain("<h2>Summary</h2>");
     expect(html).toMatch(/<li[^>]*>fixed deploy config<\/li>/);
     expect(html).toMatch(/<li[^>]*>posted issue update<\/li>/);
     expect(html).not.toContain("result");
+  });
+
+  it("does not linkify issue references inside transcript markdown", () => {
+    const html = renderToStaticMarkup(
+      <QueryClientProvider client={new QueryClient()}>
+        <ThemeProvider>
+          <RunTranscriptView
+            density="compact"
+            entries={[
+              {
+                kind: "assistant",
+                ts: "2026-03-12T00:00:00.000Z",
+                text: "Examples: PAP-224, [template](/PAP/issues/{issueId}), [placeholder](/PAP/issues/<issue-identifier>), and b57ab089-f956-4873-8843-cf0556b80279.",
+              },
+            ]}
+          />
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+
+    expect(html).not.toContain('href="/issues/');
+    expect(html).not.toContain('data-mention-kind="issue"');
   });
 });

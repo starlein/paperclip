@@ -26,6 +26,11 @@ const mockAuthApi = vi.hoisted(() => ({
   getSession: vi.fn(),
 }));
 
+const mockAccessApi = vi.hoisted(() => ({
+  listMembers: vi.fn(),
+  listUserDirectory: vi.fn(),
+}));
+
 const mockExecutionWorkspacesApi = vi.hoisted(() => ({
   list: vi.fn(),
   listSummaries: vi.fn(),
@@ -49,6 +54,10 @@ vi.mock("../api/issues", () => ({
 
 vi.mock("../api/auth", () => ({
   authApi: mockAuthApi,
+}));
+
+vi.mock("../api/access", () => ({
+  accessApi: mockAccessApi,
 }));
 
 vi.mock("../api/execution-workspaces", () => ({
@@ -184,12 +193,16 @@ describe("IssuesList", () => {
     mockIssuesApi.list.mockReset();
     mockIssuesApi.listLabels.mockReset();
     mockAuthApi.getSession.mockReset();
+    mockAccessApi.listMembers.mockReset();
+    mockAccessApi.listUserDirectory.mockReset();
     mockExecutionWorkspacesApi.list.mockReset();
     mockExecutionWorkspacesApi.listSummaries.mockReset();
     mockInstanceSettingsApi.getExperimental.mockReset();
     mockIssuesApi.list.mockResolvedValue([]);
     mockIssuesApi.listLabels.mockResolvedValue([]);
     mockAuthApi.getSession.mockResolvedValue({ user: null, session: null });
+    mockAccessApi.listMembers.mockResolvedValue({ members: [], access: {} });
+    mockAccessApi.listUserDirectory.mockResolvedValue({ users: [] });
     mockExecutionWorkspacesApi.list.mockResolvedValue([]);
     mockExecutionWorkspacesApi.listSummaries.mockResolvedValue([]);
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
@@ -499,6 +512,50 @@ describe("IssuesList", () => {
     });
   });
 
+  it("shows human assignee names from company member profiles", async () => {
+    localStorage.setItem("paperclip:test-issues:company-1:issue-columns", JSON.stringify(["id", "assignee"]));
+    mockAccessApi.listUserDirectory.mockResolvedValue({
+      users: [
+        {
+          principalId: "user-2",
+          status: "active",
+          user: {
+            id: "user-2",
+            name: "Jordan Lee",
+            email: "jordan@example.com",
+            image: "https://example.com/jordan.png",
+          },
+        },
+      ],
+    });
+
+    const assignedIssue = createIssue({
+      id: "issue-human",
+      identifier: "PAP-12",
+      title: "Human assigned issue",
+      assigneeUserId: "user-2",
+    });
+
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[assignedIssue]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-issues"
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Jordan Lee");
+    });
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("preserves stored grouping across refresh when initial assignees are applied", async () => {
     localStorage.setItem(
       "paperclip:test-issues:company-1",
@@ -592,6 +649,42 @@ describe("IssuesList", () => {
       workspaceButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
     });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Alpha issue");
+      expect(container.textContent).not.toContain("Beta issue");
+    });
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("applies an initial workspace filter from the issues URL state", async () => {
+    const alphaIssue = createIssue({
+      id: "issue-alpha",
+      identifier: "PAP-30",
+      title: "Alpha issue",
+      executionWorkspaceId: "workspace-alpha",
+    });
+    const betaIssue = createIssue({
+      id: "issue-beta",
+      identifier: "PAP-31",
+      title: "Beta issue",
+      executionWorkspaceId: "workspace-beta",
+    });
+
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[alphaIssue, betaIssue]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-issues"
+        initialWorkspaces={["workspace-alpha"]}
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
 
     await waitForAssertion(() => {
       expect(container.textContent).toContain("Alpha issue");
