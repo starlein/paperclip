@@ -79,6 +79,8 @@ ssh -F /paperclip/.ssh/config hostmachine "cd /home/trbck/wp/trtools2 && make re
 | Property       | Value                          |
 | -------------- | ------------------------------ |
 | Hostname       | `loft24551`                    |
+| SSH port       | `20200` (handled by config)    |
+| SSH key        | `/paperclip/.ssh/paperclip_deploy` (handled by config) |
 | User           | `trbck` (uid 10003)           |
 | OS             | Ubuntu (Linux 5.15)            |
 | Home           | `/home/trbck`                  |
@@ -317,8 +319,9 @@ ssh -F /paperclip/.ssh/config hostmachine "docker restart <container>"
 
 ## Troubleshooting
 
-**SSH connection refused**: The host SSH server runs on a non-standard port.
-The config file handles this — always use `-F /paperclip/.ssh/config`.
+**SSH connection refused**: The host SSH server runs on port `20200` (not 22).
+The config at `/paperclip/.ssh/config` handles this automatically — always
+use `-F /paperclip/.ssh/config` and never specify port or key manually.
 
 **Permission denied**: Commands run as `trbck` (uid 10003). If something
 requires root, it cannot be done via this skill — flag it in the task.
