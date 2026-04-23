@@ -4,6 +4,7 @@ import type {
   IssueReferenceSourceKind,
   IssueExecutionStageType,
   IssueExecutionStateStatus,
+  IssueKind,
   IssueOriginKind,
   IssuePriority,
   IssueThreadInteractionContinuationPolicy,
@@ -203,6 +204,7 @@ export interface Issue {
   goalId: string | null;
   parentId: string | null;
   ancestors?: IssueAncestor[];
+  kind: IssueKind;
   title: string;
   description: string | null;
   status: IssueStatus;

@@ -162,6 +162,9 @@ export const ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES = [
 export type IssueThreadInteractionContinuationPolicy =
   (typeof ISSUE_THREAD_INTERACTION_CONTINUATION_POLICIES)[number];
 
+export const ISSUE_KINDS = ["task", "conversation"] as const;
+export type IssueKind = (typeof ISSUE_KINDS)[number];
+
 export const ISSUE_ORIGIN_KINDS = ["manual", "routine_execution"] as const;
 export type BuiltInIssueOriginKind = (typeof ISSUE_ORIGIN_KINDS)[number];
 export type PluginIssueOriginKind = `plugin:${string}`;
@@ -843,7 +846,11 @@ export const PLUGIN_EVENT_TYPES = [
   "project.workspace_deleted",
   "issue.created",
   "issue.updated",
+  // @deprecated — this event name was never emitted; subscribe to "issue.comment_added" instead.
   "issue.comment.created",
+  // Internal action name used by routes/issues.ts when a comment is added.
+  // Listed here so plugins with `events.subscribe` can react to comment events.
+  "issue.comment_added",
   "issue.document.created",
   "issue.document.updated",
   "issue.document.deleted",

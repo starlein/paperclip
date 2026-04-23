@@ -780,13 +780,13 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
       commentIssueId,
       olderIssueId,
     ]);
-    expect(result.find((issue) => issue.id === activityIssueId)?.lastActivityAt?.toISOString()).toBe(
+    expect(result.find((issue) => issue.id === activityIssueId)?.updatedAt?.toISOString()).toBe(
       "2026-03-26T12:00:00.000Z",
     );
-    expect(result.find((issue) => issue.id === commentIssueId)?.lastActivityAt?.toISOString()).toBe(
+    expect(result.find((issue) => issue.id === commentIssueId)?.updatedAt?.toISOString()).toBe(
       "2026-03-26T11:00:00.000Z",
     );
-    expect(result.find((issue) => issue.id === olderIssueId)?.lastActivityAt?.toISOString()).toBe(
+    expect(result.find((issue) => issue.id === olderIssueId)?.updatedAt?.toISOString()).toBe(
       "2026-03-26T10:00:00.000Z",
     );
   });
@@ -1226,6 +1226,166 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       }),
     ]);
   });
+
+  it("defaults subissues to a new workspace when the project prefers isolated workspaces", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspace project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree" },
+      },
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "workspace-key",
+    });
+
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Parent worktree",
+      status: "active",
+      providerType: "git_worktree",
+      providerRef: `/tmp/${executionWorkspaceId}`,
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      executionWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceRuntime: { profile: "agent" },
+      },
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      projectId,
+      title: "Child issue",
+    });
+
+    expect(child.parentId).toBe(parentIssueId);
+    expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
+    expect(child.executionWorkspaceSettings).toEqual({
+      mode: "isolated_workspace",
+    });
+  });
+
+  it("can explicitly reuse a parent workspace when the project prefers isolated workspaces", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Workspace project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree" },
+      },
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "workspace-key",
+    });
+
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Parent worktree",
+      status: "active",
+      providerType: "git_worktree",
+      providerRef: `/tmp/${executionWorkspaceId}`,
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      executionWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+        workspaceRuntime: { profile: "agent" },
+      },
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      projectId,
+      title: "Child issue",
+      inheritExecutionWorkspaceFromIssueId: parentIssueId,
+    });
+
+    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
+    expect(child.executionWorkspacePreference).toBe("reuse_existing");
+    expect(child.executionWorkspaceSettings).toEqual({
+      mode: "isolated_workspace",
+      workspaceRuntime: { profile: "agent" },
+    });
+  });
 });
 
 describeEmbeddedPostgres("issueService blockers and dependency wake readiness", () => {
@@ -1523,283 +1683,6 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
   });
 });
 
-describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
-  let db!: ReturnType<typeof createDb>;
-  let svc!: ReturnType<typeof issueService>;
-  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
-
-  beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-create-");
-    db = createDb(tempDb.connectionString);
-    svc = issueService(db);
-    await ensureIssueRelationsTable(db);
-  }, 20_000);
-
-  afterEach(async () => {
-    await db.delete(issueComments);
-    await db.delete(issueRelations);
-    await db.delete(issueInboxArchives);
-    await db.delete(activityLog);
-    await db.delete(issues);
-    await db.delete(executionWorkspaces);
-    await db.delete(projectWorkspaces);
-    await db.delete(projects);
-    await db.delete(agents);
-    await db.delete(instanceSettings);
-    await db.delete(companies);
-  });
-
-  afterAll(async () => {
-    await tempDb?.cleanup();
-  });
-
-  it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
-    const companyId = randomUUID();
-    const projectId = randomUUID();
-    const parentIssueId = randomUUID();
-    const projectWorkspaceId = randomUUID();
-    const executionWorkspaceId = randomUUID();
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Paperclip",
-      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
-      requireBoardApprovalForNewAgents: false,
-    });
-    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
-
-    await db.insert(projects).values({
-      id: projectId,
-      companyId,
-      name: "Workspace project",
-      status: "in_progress",
-    });
-
-    await db.insert(projectWorkspaces).values({
-      id: projectWorkspaceId,
-      companyId,
-      projectId,
-      name: "Primary workspace",
-      isPrimary: true,
-      sharedWorkspaceKey: "workspace-key",
-    });
-
-    await db.insert(executionWorkspaces).values({
-      id: executionWorkspaceId,
-      companyId,
-      projectId,
-      projectWorkspaceId,
-      mode: "isolated_workspace",
-      strategyType: "git_worktree",
-      name: "Issue worktree",
-      status: "active",
-      providerType: "git_worktree",
-      providerRef: `/tmp/${executionWorkspaceId}`,
-    });
-
-    await db.insert(issues).values({
-      id: parentIssueId,
-      companyId,
-      projectId,
-      projectWorkspaceId,
-      title: "Parent issue",
-      status: "in_progress",
-      priority: "medium",
-      executionWorkspaceId,
-      executionWorkspacePreference: "reuse_existing",
-      executionWorkspaceSettings: {
-        mode: "isolated_workspace",
-        workspaceRuntime: { profile: "agent" },
-      },
-    });
-
-    const child = await svc.create(companyId, {
-      parentId: parentIssueId,
-      projectId,
-      title: "Child issue",
-    });
-
-    expect(child.parentId).toBe(parentIssueId);
-    expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
-    expect(child.executionWorkspaceSettings).toEqual({
-      mode: "isolated_workspace",
-      workspaceRuntime: { profile: "agent" },
-    });
-  });
-
-  it("keeps explicit workspace fields instead of inheriting the parent linkage", async () => {
-    const companyId = randomUUID();
-    const projectId = randomUUID();
-    const parentIssueId = randomUUID();
-    const parentProjectWorkspaceId = randomUUID();
-    const parentExecutionWorkspaceId = randomUUID();
-    const explicitProjectWorkspaceId = randomUUID();
-    const explicitExecutionWorkspaceId = randomUUID();
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Paperclip",
-      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
-      requireBoardApprovalForNewAgents: false,
-    });
-    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
-
-    await db.insert(projects).values({
-      id: projectId,
-      companyId,
-      name: "Workspace project",
-      status: "in_progress",
-    });
-
-    await db.insert(projectWorkspaces).values([
-      {
-        id: parentProjectWorkspaceId,
-        companyId,
-        projectId,
-        name: "Parent workspace",
-      },
-      {
-        id: explicitProjectWorkspaceId,
-        companyId,
-        projectId,
-        name: "Explicit workspace",
-      },
-    ]);
-
-    await db.insert(executionWorkspaces).values([
-      {
-        id: parentExecutionWorkspaceId,
-        companyId,
-        projectId,
-        projectWorkspaceId: parentProjectWorkspaceId,
-        mode: "isolated_workspace",
-        strategyType: "git_worktree",
-        name: "Parent worktree",
-        status: "active",
-        providerType: "git_worktree",
-      },
-      {
-        id: explicitExecutionWorkspaceId,
-        companyId,
-        projectId,
-        projectWorkspaceId: explicitProjectWorkspaceId,
-        mode: "shared_workspace",
-        strategyType: "project_primary",
-        name: "Explicit shared workspace",
-        status: "active",
-        providerType: "local_fs",
-      },
-    ]);
-
-    await db.insert(issues).values({
-      id: parentIssueId,
-      companyId,
-      projectId,
-      projectWorkspaceId: parentProjectWorkspaceId,
-      title: "Parent issue",
-      status: "in_progress",
-      priority: "medium",
-      executionWorkspaceId: parentExecutionWorkspaceId,
-      executionWorkspacePreference: "reuse_existing",
-      executionWorkspaceSettings: {
-        mode: "isolated_workspace",
-      },
-    });
-
-    const child = await svc.create(companyId, {
-      parentId: parentIssueId,
-      projectId,
-      title: "Child issue",
-      projectWorkspaceId: explicitProjectWorkspaceId,
-      executionWorkspaceId: explicitExecutionWorkspaceId,
-      executionWorkspacePreference: "reuse_existing",
-      executionWorkspaceSettings: {
-        mode: "shared_workspace",
-      },
-    });
-
-    expect(child.projectWorkspaceId).toBe(explicitProjectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(explicitExecutionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
-    expect(child.executionWorkspaceSettings).toEqual({
-      mode: "shared_workspace",
-    });
-  });
-
-  it("inherits workspace linkage from an explicit source issue without creating a parent-child relationship", async () => {
-    const companyId = randomUUID();
-    const projectId = randomUUID();
-    const sourceIssueId = randomUUID();
-    const projectWorkspaceId = randomUUID();
-    const executionWorkspaceId = randomUUID();
-
-    await db.insert(companies).values({
-      id: companyId,
-      name: "Paperclip",
-      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
-      requireBoardApprovalForNewAgents: false,
-    });
-    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
-
-    await db.insert(projects).values({
-      id: projectId,
-      companyId,
-      name: "Workspace project",
-      status: "in_progress",
-    });
-
-    await db.insert(projectWorkspaces).values({
-      id: projectWorkspaceId,
-      companyId,
-      projectId,
-      name: "Primary workspace",
-    });
-
-    await db.insert(executionWorkspaces).values({
-      id: executionWorkspaceId,
-      companyId,
-      projectId,
-      projectWorkspaceId,
-      mode: "operator_branch",
-      strategyType: "git_worktree",
-      name: "Operator branch",
-      status: "active",
-      providerType: "git_worktree",
-    });
-
-    await db.insert(issues).values({
-      id: sourceIssueId,
-      companyId,
-      projectId,
-      projectWorkspaceId,
-      title: "Source issue",
-      status: "todo",
-      priority: "medium",
-      executionWorkspaceId,
-      executionWorkspacePreference: "reuse_existing",
-      executionWorkspaceSettings: {
-        mode: "operator_branch",
-      },
-    });
-
-    const followUp = await svc.create(companyId, {
-      projectId,
-      title: "Follow-up issue",
-      inheritExecutionWorkspaceFromIssueId: sourceIssueId,
-    });
-
-    expect(followUp.parentId).toBeNull();
-    expect(followUp.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(followUp.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(followUp.executionWorkspacePreference).toBe("reuse_existing");
-    expect(followUp.executionWorkspaceSettings).toEqual({
-      mode: "operator_branch",
-    });
-  });
-});
-
 describeEmbeddedPostgres("issueService.findMentionedProjectIds", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof issueService>;
@@ -2010,5 +1893,217 @@ describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0]);
     expect(row).toEqual({ executionRunId: null, executionLockedAt: null });
+
+});
+
+describeEmbeddedPostgres("issueService.create conversation project auto-association", () => {
+  let db!: ReturnType<typeof createDb>;
+  let svc!: ReturnType<typeof issueService>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-convo-assoc-");
+    db = createDb(tempDb.connectionString);
+    svc = issueService(db);
+  }, 20_000);
+
+  afterEach(async () => {
+    await db.delete(issues);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
+    await db.delete(agents);
+    await db.delete(companies);
+  });
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedCompany() {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "TestCo",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    return companyId;
+  }
+
+    async function seedCompany() {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "TestCo",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    return companyId;
+  }
+
+  async function seedAgent(companyId: string) {
+    const agentId = randomUUID();
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "TestAgent",
+      role: "ceo",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    return agentId;
+  }
+
+  async function seedProjectWithWorkspace(companyId: string, opts?: { isPrimary?: boolean; cwd?: string }) {
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Phase 0",
+      status: "active",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: workspaceId,
+      companyId,
+      projectId,
+      name: "main",
+      cwd: opts?.cwd ?? "/tmp/test-workspace",
+      isPrimary: opts?.isPrimary ?? true,
+    });
+    return { projectId, workspaceId };
+  }
+
+  it("auto-associates a conversation issue with the company's primary project workspace", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    const { projectId } = await seedProjectWithWorkspace(companyId, { isPrimary: true });
+
+    const issue = await svc.create(companyId, {
+      kind: "conversation",
+      title: "Conversation: TestAgent",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      priority: "medium",
+    });
+
+    expect(issue.projectId).toBe(projectId);
+  });
+
+  it("does not override an explicitly provided projectId on a conversation", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    const { projectId: autoProjectId } = await seedProjectWithWorkspace(companyId, { isPrimary: true });
+
+    const explicitProjectId = randomUUID();
+    await db.insert(projects).values({
+      id: explicitProjectId,
+      companyId,
+      name: "Explicit Project",
+      status: "active",
+    });
+
+    const issue = await svc.create(companyId, {
+      kind: "conversation",
+      title: "Conversation: TestAgent",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      projectId: explicitProjectId,
+      priority: "medium",
+    });
+
+    expect(issue.projectId).toBe(explicitProjectId);
+    expect(issue.projectId).not.toBe(autoProjectId);
+  });
+
+  it("does not auto-associate task issues — only conversations", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    await seedProjectWithWorkspace(companyId, { isPrimary: true });
+
+    const issue = await svc.create(companyId, {
+      kind: "task",
+      title: "Fix bug",
+      status: "todo",
+      assigneeAgentId: agentId,
+      priority: "medium",
+    });
+
+    expect(issue.projectId).toBeNull();
+  });
+
+  it("leaves projectId null when the company has no project workspaces", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+
+    const issue = await svc.create(companyId, {
+      kind: "conversation",
+      title: "Conversation: TestAgent",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      priority: "medium",
+    });
+
+    expect(issue.projectId).toBeNull();
+  });
+
+  it("prefers the primary workspace when multiple projects exist", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+
+    // Non-primary project created first
+    const secondaryProjectId = randomUUID();
+    const secondaryWorkspaceId = randomUUID();
+    await db.insert(projects).values({
+      id: secondaryProjectId,
+      companyId,
+      name: "Secondary",
+      status: "active",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: secondaryWorkspaceId,
+      companyId,
+      projectId: secondaryProjectId,
+      name: "secondary-ws",
+      cwd: "/tmp/secondary",
+      isPrimary: false,
+    });
+
+    // Primary project created after
+    const { projectId: primaryProjectId } = await seedProjectWithWorkspace(companyId, {
+      isPrimary: true,
+      cwd: "/tmp/primary",
+    });
+
+    const issue = await svc.create(companyId, {
+      kind: "conversation",
+      title: "Conversation: TestAgent",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      priority: "medium",
+    });
+
+    expect(issue.projectId).toBe(primaryProjectId);
+  });
+
+  it("resolves projectWorkspaceId when conversation inherits a project", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId);
+    const { projectId, workspaceId } = await seedProjectWithWorkspace(companyId, { isPrimary: true });
+
+    const issue = await svc.create(companyId, {
+      kind: "conversation",
+      title: "Conversation: TestAgent",
+      status: "blocked",
+      assigneeAgentId: agentId,
+      priority: "medium",
+    });
+
+    expect(issue.projectId).toBe(projectId);
+    expect(issue.projectWorkspaceId).toBe(workspaceId);
+});
   });
 });

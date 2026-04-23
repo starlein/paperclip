@@ -287,4 +287,11 @@ describe("MarkdownBody", () => {
     expect(html).toContain('href="/issues/PAP-77"');
     expect(html).toContain('data-mention-kind="issue"');
   });
+
+  it("does not treat UUID fragments as issue identifiers", () => {
+    const html = renderMarkdown("Agent b57ab089-f956-4873-8843-cf0556b80279 is assigned.");
+
+    expect(html).not.toContain('href="/issues/F956-4873"');
+    expect(html).not.toContain('data-mention-kind="issue"');
+  });
 });

@@ -27,6 +27,7 @@ import {
   updateIssueWorkProductSchema,
   upsertIssueDocumentSchema,
   updateIssueSchema,
+  ISSUE_KINDS,
   getClosedIsolatedExecutionWorkspaceMessage,
   isClosedIsolatedExecutionWorkspace,
   type ExecutionWorkspace,
@@ -513,9 +514,17 @@ export function issueRoutes(
   function requireAgentRunId(req: Request, res: Response) {
     if (req.actor.type !== "agent") return null;
     const runId = req.actor.runId?.trim();
-    if (runId) return runId;
-    res.status(401).json({ error: "Agent run id required" });
-    return null;
+    if (!runId) {
+      res.status(401).json({ error: "Agent run id required" });
+      return null;
+    }
+    // Validate runId is a valid UUID (required for database operations)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(runId)) {
+      res.status(400).json({ error: "Invalid run id format: must be a valid UUID" });
+      return null;
+    }
+    return runId;
   }
 
   async function hasActiveCheckoutManagementOverride(
@@ -806,6 +815,9 @@ export function issueRoutes(
 
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
+      kind: req.query.kind && (ISSUE_KINDS as readonly string[]).includes(req.query.kind as string)
+        ? (req.query.kind as string)
+        : undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
       assigneeUserId,
@@ -2171,6 +2183,10 @@ export function issueRoutes(
         entityId: issue.id,
         details: {
           commentId: comment.id,
+          // Full body included so plugins subscribing to issue.comment_added
+          // can bridge comments without an extra issues.listComments fetch.
+          // Truncated snippet kept for backward-compat with existing UIs.
+          body: comment.body,
           bodySnippet: comment.body.slice(0, 120),
           identifier: issue.identifier,
           issueTitle: issue.title,
@@ -2297,7 +2313,7 @@ export function issueRoutes(
         const assigneeId = issue.assigneeAgentId;
         const actorIsAgent = actor.actorType === "agent";
         const selfComment = actorIsAgent && actor.actorId === assigneeId;
-        const skipAssigneeCommentWake = selfComment || isClosed;
+        const skipAssigneeCommentWake = selfComment || isClosed || existing.status === "blocked";
 
         if (assigneeId && !assigneeChanged && (reopened || !skipAssigneeCommentWake)) {
           addWakeup(assigneeId, {
@@ -3201,6 +3217,9 @@ export function issueRoutes(
       entityId: currentIssue.id,
       details: {
         commentId: comment.id,
+        // Full body included so plugins subscribing to issue.comment_added
+        // can bridge comments without an extra issues.listComments fetch.
+        body: comment.body,
         bodySnippet: comment.body.slice(0, 120),
         identifier: currentIssue.identifier,
         issueTitle: currentIssue.title,
@@ -3235,7 +3254,7 @@ export function issueRoutes(
       const assigneeId = currentIssue.assigneeAgentId;
       const actorIsAgent = actor.actorType === "agent";
       const selfComment = actorIsAgent && actor.actorId === assigneeId;
-      const skipWake = selfComment || isClosed;
+      const skipWake = selfComment || isClosed || issue.status === "blocked";
       if (assigneeId && (reopened || !skipWake)) {
         if (reopened) {
           wakeups.set(assigneeId, {

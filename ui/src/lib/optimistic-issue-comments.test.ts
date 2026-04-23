@@ -336,6 +336,7 @@ describe("optimistic issue comments", () => {
         description: null,
         status: "done",
         priority: "medium",
+        kind: "task",
         assigneeAgentId: "agent-1",
         assigneeUserId: null,
         checkoutRunId: null,
@@ -385,6 +386,7 @@ describe("optimistic issue comments", () => {
         projectWorkspaceId: "workspace-1",
         goalId: null,
         parentId: null,
+        kind: "task",
         ancestors: [
           {
             id: "issue-9",
@@ -573,6 +575,7 @@ describe("optimistic issue comments", () => {
         projectWorkspaceId: null,
         goalId: null,
         parentId: null,
+        kind: "task",
         title: "Fix property pane",
         description: null,
         status: "todo",
@@ -614,6 +617,7 @@ describe("optimistic issue comments", () => {
         projectWorkspaceId: null,
         goalId: null,
         parentId: null,
+        kind: "task",
         title: "Leave me alone",
         description: null,
         status: "todo",

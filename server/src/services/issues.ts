@@ -73,6 +73,7 @@ function applyStatusSideEffects(
 
 export interface IssueFilters {
   status?: string;
+  kind?: string;
   assigneeAgentId?: string;
   participantAgentId?: string;
   assigneeUserId?: string;
@@ -319,7 +320,7 @@ async function getWorkspaceInheritanceIssue(
     .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)))
     .then((rows) => rows[0] ?? null);
   if (!issue) {
-    throw notFound("Workspace inheritance issue not found");
+    throw notFound(`Workspace inheritance issue not found: issue "${issueId}" does not exist in this company`);
   }
   return issue;
 }
@@ -689,6 +690,7 @@ const issueListSelect = {
   projectWorkspaceId: issues.projectWorkspaceId,
   goalId: issues.goalId,
   parentId: issues.parentId,
+  kind: issues.kind,
   title: issues.title,
   description: sql<string | null>`
     CASE
@@ -1355,6 +1357,9 @@ export function issueService(db: Db) {
         const statuses = filters.status.split(",").map((s) => s.trim());
         conditions.push(statuses.length === 1 ? eq(issues.status, statuses[0]) : inArray(issues.status, statuses));
       }
+      if (filters?.kind) {
+        conditions.push(eq(issues.kind, filters.kind));
+      }
       if (filters?.assigneeAgentId) {
         conditions.push(eq(issues.assigneeAgentId, filters.assigneeAgentId));
       }
@@ -1844,9 +1849,37 @@ export function issueService(db: Db) {
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
+
+      // Conversations without an explicit project inherit the company's primary
+      // project workspace so agents resolve the correct CWD during runs.  This
+      // keeps conversations working out of the box for operators who configure a
+      // project workspace but don't manually set adapterConfig.cwd.
+      if (issueData.kind === "conversation" && !issueData.projectId) {
+        const defaultProject = await db
+          .select({ projectId: projectWorkspaces.projectId })
+          .from(projectWorkspaces)
+          .where(eq(projectWorkspaces.companyId, companyId))
+          .orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt))
+          .then((rows) => rows[0] ?? null);
+        if (defaultProject) {
+          issueData.projectId = defaultProject.projectId;
+        }
+      }
+
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
+        const projectPolicyRaw =
+          issueData.projectId &&
+          (await tx
+            .select({
+              executionWorkspacePolicy: projects.executionWorkspacePolicy,
+            })
+            .from(projects)
+            .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
+            .then((rows) => rows[0]?.executionWorkspacePolicy ?? null));
+        const projectPolicy = parseProjectExecutionWorkspacePolicy(projectPolicyRaw);
+        const gatedProjectPolicy = gateProjectExecutionWorkspacePolicy(projectPolicy, isolatedWorkspacesEnabled);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
         let executionWorkspacePreference = issueData.executionWorkspacePreference ?? null;
@@ -1857,10 +1890,18 @@ export function issueService(db: Db) {
           issueData.executionWorkspaceId !== undefined ||
           issueData.executionWorkspacePreference !== undefined ||
           issueData.executionWorkspaceSettings !== undefined;
-        if (workspaceInheritanceIssueId) {
+        const inheritanceExplicitlyRequested = inheritExecutionWorkspaceFromIssueId != null;
+        const projectPrefersIsolatedWorkspaceDefault =
+          gatedProjectPolicy?.enabled &&
+          (gatedProjectPolicy.defaultMode === "isolated_workspace" || gatedProjectPolicy.defaultMode === "operator_branch");
+        const allowWorkspaceReuseFromInheritance = inheritanceExplicitlyRequested || !projectPrefersIsolatedWorkspaceDefault;
+        if (workspaceInheritanceIssueId && allowWorkspaceReuseFromInheritance) {
           const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
           if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
+          }
+          if (issueData.projectId == null && workspaceSource.projectId) {
+            issueData.projectId = workspaceSource.projectId;
           }
           if (
             isolatedWorkspacesEnabled &&
@@ -1890,29 +1931,11 @@ export function issueService(db: Db) {
           executionWorkspaceId == null &&
           issueData.projectId
         ) {
-          const project = await tx
-            .select({ executionWorkspacePolicy: projects.executionWorkspacePolicy })
-            .from(projects)
-            .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
-            .then((rows) => rows[0] ?? null);
           executionWorkspaceSettings =
-            defaultIssueExecutionWorkspaceSettingsForProject(
-              gateProjectExecutionWorkspacePolicy(
-                parseProjectExecutionWorkspacePolicy(project?.executionWorkspacePolicy),
-                isolatedWorkspacesEnabled,
-              ),
-            ) as Record<string, unknown> | null;
+            defaultIssueExecutionWorkspaceSettingsForProject(gatedProjectPolicy) as Record<string, unknown> | null;
         }
         if (!projectWorkspaceId && issueData.projectId) {
-          const project = await tx
-            .select({
-              executionWorkspacePolicy: projects.executionWorkspacePolicy,
-            })
-            .from(projects)
-            .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
-            .then((rows) => rows[0] ?? null);
-          const projectPolicy = parseProjectExecutionWorkspacePolicy(project?.executionWorkspacePolicy);
-          projectWorkspaceId = projectPolicy?.defaultProjectWorkspaceId ?? null;
+          projectWorkspaceId = gatedProjectPolicy?.defaultProjectWorkspaceId ?? null;
           if (!projectWorkspaceId) {
             projectWorkspaceId = await tx
               .select({ id: projectWorkspaces.id })

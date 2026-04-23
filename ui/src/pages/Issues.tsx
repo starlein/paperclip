@@ -94,6 +94,7 @@ export function Issues() {
     queryFn: () => issuesApi.list(selectedCompanyId!, {
       participantAgentId,
       workspaceId: workspaceIdFilter,
+      kind: "task",
       includeRoutineExecutions: true,
       ...(workspaceIdFilter ? { limit: WORKSPACE_FILTER_ISSUE_LIMIT } : {}),
     }),

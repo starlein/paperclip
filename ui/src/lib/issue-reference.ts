@@ -8,6 +8,29 @@ type MarkdownNode = {
 const BARE_ISSUE_IDENTIFIER_RE = /^[A-Z][A-Z0-9]+-\d+$/i;
 const ISSUE_SCHEME_RE = /^issue:\/\/:?([^?#\s]+)(?:[?#].*)?$/i;
 const ISSUE_REFERENCE_TOKEN_RE = /issue:\/\/:?[^\s<>()]+|https?:\/\/[^\s<>()]+|\b[A-Z][A-Z0-9]+-\d+\b/gi;
+const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
+
+function sanitizeIssuePathId(rawIssuePathId: string | null | undefined): string | null {
+  if (!rawIssuePathId) return null;
+  const trimmed = rawIssuePathId.trim();
+  if (!trimmed) return null;
+  const { core } = splitTrailingPunctuation(trimmed);
+  if (!core || core.startsWith(":")) return null;
+  if (/[{}<>]/.test(core)) return null;
+  return core;
+}
+
+function isUuidFragmentInText(value: string, start: number, end: number): boolean {
+  const uuidPattern = new RegExp(UUID_RE.source, "ig");
+  for (const match of value.matchAll(uuidPattern)) {
+    const uuid = match[0];
+    if (!uuid) continue;
+    const uuidStart = match.index ?? 0;
+    const uuidEnd = uuidStart + uuid.length;
+    if (start >= uuidStart && end <= uuidEnd) return true;
+  }
+  return false;
+}
 
 export function parseIssuePathIdFromPath(pathOrUrl: string | null | undefined): string | null {
   if (!pathOrUrl) return null;
@@ -27,8 +50,8 @@ export function parseIssuePathIdFromPath(pathOrUrl: string | null | undefined): 
   const segments = pathname.split("/").filter(Boolean);
   const issueIndex = segments.findIndex((segment) => segment === "issues");
   if (issueIndex === -1 || issueIndex === segments.length - 1) return null;
-  const issuePathId = decodeURIComponent(segments[issueIndex + 1] ?? "");
-  if (!issuePathId || issuePathId.startsWith(":")) return null;
+  const issuePathId = sanitizeIssuePathId(decodeURIComponent(segments[issueIndex + 1] ?? ""));
+  if (!issuePathId) return null;
   return issuePathId;
 }
 
@@ -37,7 +60,8 @@ export function parseIssueReferenceFromHref(href: string | null | undefined) {
   const trimmed = href.trim();
   const issueSchemeMatch = trimmed.match(ISSUE_SCHEME_RE);
   if (issueSchemeMatch?.[1]) {
-    const issuePathId = decodeURIComponent(issueSchemeMatch[1]);
+    const issuePathId = sanitizeIssuePathId(decodeURIComponent(issueSchemeMatch[1]));
+    if (!issuePathId) return null;
     return {
       issuePathId,
       href: `/issues/${encodeURIComponent(issuePathId)}`,
@@ -98,6 +122,7 @@ function linkifyIssueReferencesInText(value: string): MarkdownNode[] | null {
 
     const start = match.index ?? 0;
     const end = start + raw.length;
+    if (isUuidFragmentInText(value, start, end)) continue;
     const { core, trailing } = splitTrailingPunctuation(raw);
     const issueRef = parseIssueReferenceFromHref(core);
     if (!issueRef) continue;
