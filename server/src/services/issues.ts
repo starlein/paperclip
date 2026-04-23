@@ -283,6 +283,7 @@ async function listUnresolvedBlockerIssueIds(
       and(
         eq(issues.companyId, companyId),
         inArray(issues.id, uniqueBlockerIssueIds),
+        // Blockers remain unresolved until they reach a terminal status.
         ne(issues.status, "done"),
         ne(issues.status, "cancelled"),
       ),

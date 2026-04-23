@@ -1129,11 +1129,11 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
-  it("createChild applies parent defaults, acceptance criteria, workspace inheritance, and optional parent blocker chaining", async () => {
+  it("adds the child as a blocker of the parent when blockParentUntilDone is requested", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
-    const goalId = randomUUID();
     const parentIssueId = randomUUID();
+    const goalId = randomUUID();
     const projectWorkspaceId = randomUUID();
     const executionWorkspaceId = randomUUID();
 
@@ -1148,9 +1148,9 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await db.insert(goals).values({
       id: goalId,
       companyId,
-      title: "Ship child helpers",
-      level: "task",
+      title: "Execution goal",
       status: "active",
+      priority: "medium",
     });
 
     await db.insert(projects).values({
@@ -1159,6 +1159,11 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       goalId,
       name: "Workspace project",
       status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "inherit_from_issue",
+        workspaceStrategy: { type: "git_worktree" },
+      },
     });
 
     await db.insert(projectWorkspaces).values({
@@ -1167,6 +1172,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectId,
       name: "Primary workspace",
       isPrimary: true,
+      sharedWorkspaceKey: "workspace-key",
     });
 
     await db.insert(executionWorkspaces).values({
@@ -1176,7 +1182,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       projectWorkspaceId,
       mode: "isolated_workspace",
       strategyType: "git_worktree",
-      name: "Issue worktree",
+      name: "Parent worktree",
       status: "active",
       providerType: "git_worktree",
       providerRef: `/tmp/${executionWorkspaceId}`,
@@ -1225,6 +1231,118 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
         title: "Child helper",
       }),
     ]);
+  });
+
+  it("serializes sibling subissues created with blockParentUntilDone and unblocks on cancellation", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const parentIssueId = randomUUID();
+    const goalId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+    const executionWorkspaceId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+
+    await db.insert(goals).values({
+      id: goalId,
+      companyId,
+      title: "Execution goal",
+      status: "active",
+      priority: "medium",
+    });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      goalId,
+      name: "Workspace project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "inherit_from_issue",
+        workspaceStrategy: { type: "git_worktree" },
+      },
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+      sharedWorkspaceKey: "workspace-key",
+    });
+
+    await db.insert(executionWorkspaces).values({
+      id: executionWorkspaceId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      mode: "isolated_workspace",
+      strategyType: "git_worktree",
+      name: "Parent worktree",
+      status: "active",
+      providerType: "git_worktree",
+      providerRef: `/tmp/${executionWorkspaceId}`,
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      goalId,
+      title: "Parent issue",
+      status: "in_progress",
+      priority: "medium",
+      requestDepth: 1,
+      executionWorkspaceId,
+      executionWorkspacePreference: "reuse_existing",
+      executionWorkspaceSettings: {
+        mode: "isolated_workspace",
+      },
+    });
+
+    const { issue: firstChild } = await svc.createChild(parentIssueId, {
+      title: "First child",
+      status: "todo",
+      blockParentUntilDone: true,
+    });
+
+    const { issue: secondChild } = await svc.createChild(parentIssueId, {
+      title: "Second child",
+      status: "todo",
+      blockParentUntilDone: true,
+    });
+
+    const secondChildRelations = await svc.getRelationSummaries(secondChild.id);
+    expect(secondChildRelations.blockedBy).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: firstChild.id, title: "First child" }),
+      ]),
+    );
+
+    await expect(svc.getDependencyReadiness(secondChild.id)).resolves.toMatchObject({
+      blockerIssueIds: [firstChild.id],
+      unresolvedBlockerIssueIds: [firstChild.id],
+      unresolvedBlockerCount: 1,
+      isDependencyReady: false,
+    });
+
+    await svc.update(firstChild.id, { status: "cancelled" });
+
+    await expect(svc.getDependencyReadiness(secondChild.id)).resolves.toMatchObject({
+      blockerIssueIds: [firstChild.id],
+      unresolvedBlockerIssueIds: [],
+      unresolvedBlockerCount: 0,
+      isDependencyReady: true,
+    });
   });
 
   it("createChild keeps isolated defaults unless parent blocking or explicit reuse is requested", async () => {
@@ -1788,6 +1906,58 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     ]);
   });
 
+  it("treats cancelled blockers as terminal for dependent wakeups", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const blockerA = randomUUID();
+    const blockerB = randomUUID();
+    const blockedIssueId = randomUUID();
+    await db.insert(issues).values([
+      { id: blockerA, companyId, title: "Blocker A", status: "done", priority: "medium" },
+      { id: blockerB, companyId, title: "Blocker B", status: "in_progress", priority: "medium" },
+      {
+        id: blockedIssueId,
+        companyId,
+        title: "Blocked issue",
+        status: "blocked",
+        priority: "medium",
+        assigneeAgentId,
+      },
+    ]);
+
+    await svc.update(blockedIssueId, { blockedByIssueIds: [blockerA, blockerB] });
+
+    expect(await svc.listWakeableBlockedDependents(blockerA)).toEqual([]);
+
+    await svc.update(blockerB, { status: "cancelled" });
+
+    await expect(svc.listWakeableBlockedDependents(blockerA)).resolves.toEqual([
+      expect.objectContaining({
+        id: blockedIssueId,
+        assigneeAgentId,
+        blockerIssueIds: expect.arrayContaining([blockerA, blockerB]),
+      }),
+    ]);
+  });
+
   it("reports dependency readiness for blocked issue chains", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({
@@ -1815,6 +1985,43 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     });
 
     await svc.update(blockerId, { status: "done" });
+
+    await expect(svc.getDependencyReadiness(blockedId)).resolves.toMatchObject({
+      issueId: blockedId,
+      blockerIssueIds: [blockerId],
+      unresolvedBlockerIssueIds: [],
+      unresolvedBlockerCount: 0,
+      allBlockersDone: true,
+      isDependencyReady: true,
+    });
+  });
+
+  it("treats cancelled blockers as terminal in dependency readiness", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    const blockerId = randomUUID();
+    const blockedId = randomUUID();
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Blocker", status: "in_progress", priority: "medium" },
+      { id: blockedId, companyId, title: "Blocked", status: "todo", priority: "medium" },
+    ]);
+    await svc.update(blockedId, { blockedByIssueIds: [blockerId] });
+
+    await expect(svc.getDependencyReadiness(blockedId)).resolves.toMatchObject({
+      issueId: blockedId,
+      blockerIssueIds: [blockerId],
+      unresolvedBlockerIssueIds: [blockerId],
+      unresolvedBlockerCount: 1,
+      isDependencyReady: false,
+    });
+
+    await svc.update(blockerId, { status: "cancelled" });
 
     await expect(svc.getDependencyReadiness(blockedId)).resolves.toMatchObject({
       issueId: blockedId,
