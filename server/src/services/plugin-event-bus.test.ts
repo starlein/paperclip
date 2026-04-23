@@ -6,7 +6,6 @@ import { createPluginEventBus } from "./plugin-event-bus.js";
 function makeEvent(overrides: Partial<PluginEvent> & { eventType: PluginEvent["eventType"] }): PluginEvent {
   return {
     eventId: "evt-1",
-    eventType: overrides.eventType,
     occurredAt: new Date().toISOString(),
     companyId: "co-1",
     payload: {},
