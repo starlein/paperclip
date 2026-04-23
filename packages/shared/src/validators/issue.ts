@@ -124,6 +124,7 @@ export const createIssueSchema = z.object({
   parentId: z.string().uuid().optional().nullable(),
   kind: z.enum(ISSUE_KINDS).optional().default("task"),
   blockedByIssueIds: z.array(z.string().uuid()).optional(),
+  blockParentUntilDone: z.boolean().optional(),
   inheritExecutionWorkspaceFromIssueId: z.string().uuid().optional().nullable(),
   title: z.string().min(1),
   description: z.string().optional().nullable(),

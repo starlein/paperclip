@@ -1716,7 +1716,12 @@ export function issueRoutes(
 
     const actor = getActorInfo(req);
     const executionPolicy = normalizeIssueExecutionPolicy(req.body.executionPolicy);
-    const { issue, parentBlockerAdded } = await svc.createChild(parent.id, {
+    const {
+      issue,
+      parentBlockerAdded,
+      inheritedExecutionWorkspaceFromIssueId,
+      blockedByIssueIds,
+    } = await svc.createChild(parent.id, {
       ...req.body,
       executionPolicy,
       createdByAgentId: actor.agentId,
@@ -1738,8 +1743,10 @@ export function issueRoutes(
         parentId: parent.id,
         identifier: issue.identifier,
         title: issue.title,
-        inheritedExecutionWorkspaceFromIssueId: parent.id,
-        ...(Array.isArray(req.body.blockedByIssueIds) ? { blockedByIssueIds: req.body.blockedByIssueIds } : {}),
+        ...(inheritedExecutionWorkspaceFromIssueId
+          ? { inheritedExecutionWorkspaceFromIssueId }
+          : {}),
+        ...(Array.isArray(blockedByIssueIds) && blockedByIssueIds.length > 0 ? { blockedByIssueIds } : {}),
         ...(parentBlockerAdded ? { parentBlockerAdded: true } : {}),
       },
     });
@@ -2370,8 +2377,9 @@ export function issueRoutes(
         }
       }
 
-      const becameDone = existing.status !== "done" && issue.status === "done";
-      if (becameDone) {
+      const becameBlockerTerminal =
+        !isClosedIssueStatus(existing.status) && isClosedIssueStatus(issue.status);
+      if (becameBlockerTerminal) {
         const dependents = await svc.listWakeableBlockedDependents(issue.id);
         for (const dependent of dependents) {
           addWakeup(dependent.assigneeAgentId, {
@@ -2398,7 +2406,7 @@ export function issueRoutes(
       }
 
       const becameTerminal =
-        !["done", "cancelled"].includes(existing.status) && ["done", "cancelled"].includes(issue.status);
+        !isClosedIssueStatus(existing.status) && isClosedIssueStatus(issue.status);
       if (becameTerminal && issue.parentId) {
         const parent = await svc.getWakeableParentAfterChildCompletion(issue.parentId);
         if (parent) {

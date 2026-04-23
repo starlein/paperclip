@@ -912,6 +912,15 @@ function summarizeRunFailureForIssueComment(
   return null;
 }
 
+function summarizeRunBlockerForIssueComment(
+  run: Pick<typeof heartbeatRuns.$inferSelect, "livenessReason"> | null | undefined,
+) {
+  const blocker = readNonEmptyString(run?.livenessReason)?.trim() ?? null;
+  if (!blocker) return " Latest retry blocker: run declared a concrete blocker.";
+  const summary = blocker.length > 240 ? `${blocker.slice(0, 237)}...` : blocker;
+  return ` Latest retry blocker: ${summary}.`;
+}
+
 function didAutomaticRecoveryFail(
   latestRun: Pick<typeof heartbeatRuns.$inferSelect, "status" | "contextSnapshot"> | null,
   expectedRetryReason: "assignment_recovery" | "issue_continuation_needed",
@@ -926,6 +935,18 @@ function didAutomaticRecoveryFail(
       latestRun.status as (typeof UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES)[number],
     )
   );
+}
+
+function didAutomaticRecoveryDeclareBlocker(
+  latestRun: Pick<typeof heartbeatRuns.$inferSelect, "livenessState" | "contextSnapshot"> | null,
+  expectedRetryReason: "assignment_recovery" | "issue_continuation_needed",
+) {
+  if (!latestRun) return false;
+
+  const latestContext = parseObject(latestRun.contextSnapshot);
+  const latestRetryReason = readNonEmptyString(latestContext.retryReason);
+  const livenessState = readNonEmptyString(latestRun.livenessState);
+  return latestRetryReason === expectedRetryReason && livenessState === "blocked";
 }
 
 function normalizeLedgerBillingType(value: unknown): BillingType {
@@ -4006,6 +4027,8 @@ export function heartbeatService(db: Db) {
       .select({
         id: heartbeatRuns.id,
         status: heartbeatRuns.status,
+        livenessState: heartbeatRuns.livenessState,
+        livenessReason: heartbeatRuns.livenessReason,
         error: heartbeatRuns.error,
         errorCode: heartbeatRuns.errorCode,
         contextSnapshot: heartbeatRuns.contextSnapshot,
@@ -4242,7 +4265,7 @@ export function heartbeatService(db: Db) {
     previousStatus: "todo" | "in_progress";
     latestRun: Pick<
       typeof heartbeatRuns.$inferSelect,
-      "id" | "status" | "error" | "errorCode" | "contextSnapshot"
+      "id" | "status" | "livenessState" | "livenessReason" | "error" | "errorCode" | "contextSnapshot"
     > | null;
     comment: string;
   }) {
@@ -4326,15 +4349,18 @@ export function heartbeatService(db: Db) {
           continue;
         }
 
-        if (didAutomaticRecoveryFail(latestRun, "assignment_recovery")) {
-          const failureSummary = summarizeRunFailureForIssueComment(latestRun);
+        const recoveryFailed = didAutomaticRecoveryFail(latestRun, "assignment_recovery");
+        const recoveryDeclaredBlocker = didAutomaticRecoveryDeclareBlocker(latestRun, "assignment_recovery");
+        if (recoveryFailed || recoveryDeclaredBlocker) {
+          const failureSummary = recoveryFailed ? summarizeRunFailureForIssueComment(latestRun) : null;
+          const blockerSummary = recoveryDeclaredBlocker ? summarizeRunBlockerForIssueComment(latestRun) : null;
           const updated = await escalateStrandedAssignedIssue({
             issue,
             previousStatus: "todo",
             latestRun,
             comment:
               "Paperclip automatically retried dispatch for this assigned `todo` issue after a lost wake/run, " +
-              `but it still has no live execution path.${failureSummary ?? ""} ` +
+              `but it still has no live execution path.${failureSummary ?? blockerSummary ?? ""} ` +
               "Moving it to `blocked` so it is visible for intervention.",
           });
           if (updated) {
@@ -4367,15 +4393,23 @@ export function heartbeatService(db: Db) {
         result.skipped += 1;
         continue;
       }
-      if (didAutomaticRecoveryFail(latestRun, "issue_continuation_needed")) {
-        const failureSummary = summarizeRunFailureForIssueComment(latestRun);
+      const continuationRecoveryFailed = didAutomaticRecoveryFail(latestRun, "issue_continuation_needed");
+      const continuationRecoveryDeclaredBlocker = didAutomaticRecoveryDeclareBlocker(
+        latestRun,
+        "issue_continuation_needed",
+      );
+      if (continuationRecoveryFailed || continuationRecoveryDeclaredBlocker) {
+        const failureSummary = continuationRecoveryFailed ? summarizeRunFailureForIssueComment(latestRun) : null;
+        const blockerSummary = continuationRecoveryDeclaredBlocker
+          ? summarizeRunBlockerForIssueComment(latestRun)
+          : null;
         const updated = await escalateStrandedAssignedIssue({
           issue,
           previousStatus: "in_progress",
           latestRun,
           comment:
             "Paperclip automatically retried continuation for this assigned `in_progress` issue after its live " +
-            `execution disappeared, but it still has no live execution path.${failureSummary ?? ""} ` +
+            `execution disappeared, but it still has no live execution path.${failureSummary ?? blockerSummary ?? ""} ` +
             "Moving it to `blocked` so it is visible for intervention.",
         });
         if (updated) {

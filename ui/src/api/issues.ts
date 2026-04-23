@@ -79,6 +79,8 @@ export const issuesApi = {
     api.delete<{ id: string; archivedAt: Date } | { ok: true }>(`/issues/${id}/inbox-archive`),
   create: (companyId: string, data: Record<string, unknown>) =>
     api.post<Issue>(`/companies/${companyId}/issues`, data),
+  createChild: (parentIssueId: string, data: Record<string, unknown>) =>
+    api.post<Issue>(`/issues/${parentIssueId}/children`, data),
   update: (id: string, data: Record<string, unknown>) =>
     api.patch<IssueUpdateResponse>(`/issues/${id}`, data),
   remove: (id: string) => api.delete<Issue>(`/issues/${id}`),
