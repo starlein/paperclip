@@ -132,6 +132,7 @@ type DbReader = Pick<Db, "select">;
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
+  blockParentUntilDone?: boolean;
   inheritExecutionWorkspaceFromIssueId?: string | null;
 };
 type IssueChildCreateInput = IssueCreateInput & {
@@ -255,7 +256,7 @@ async function listIssueDependencyReadinessMap(
   for (const row of blockerRows) {
     const current = readinessMap.get(row.issueId) ?? createIssueDependencyReadiness(row.issueId);
     current.blockerIssueIds.push(row.blockerIssueId);
-    // Dependents are ready again once each blocker is terminal.
+    // Blockers are considered resolved once they reach a terminal status.
     if (row.blockerStatus !== "done" && row.blockerStatus !== "cancelled") {
       current.unresolvedBlockerIssueIds.push(row.blockerIssueId);
       current.unresolvedBlockerCount += 1;
@@ -1687,9 +1688,9 @@ export function issueService(db: Db) {
           return {
             ...candidate,
             blockerIssueIds: blockers.map((blocker) => blocker.blockerIssueId),
-            allBlockersDone: blockers.length > 0 && blockers.every(
-              (blocker) => blocker.blockerStatus === "done" || blocker.blockerStatus === "cancelled",
-            ),
+            allBlockersDone:
+              blockers.length > 0 &&
+              blockers.every((blocker) => blocker.blockerStatus === "done" || blocker.blockerStatus === "cancelled"),
           };
         })
         .filter((candidate) => candidate.allBlockersDone)
@@ -1790,11 +1791,10 @@ export function issueService(db: Db) {
       const {
         acceptanceCriteria,
         blockParentUntilDone,
-        actorAgentId,
-        actorUserId,
+        blockedByIssueIds: requestedBlockedByIssueIds,
         ...issueData
       } = data;
-      const siblingBlockerIssueIds = blockParentUntilDone
+      const serializedSiblingBlockerIssueIds = blockParentUntilDone
         ? await db
             .select({ id: issues.id })
             .from(issues)
@@ -1808,33 +1808,32 @@ export function issueService(db: Db) {
             )
             .then((rows) => rows.map((row) => row.id))
         : [];
+      const effectiveBlockedByIssueIds = Array.from(
+        new Set([...(requestedBlockedByIssueIds ?? []), ...serializedSiblingBlockerIssueIds]),
+      );
+      const shouldInheritExecutionWorkspaceFromParent = Boolean(
+        blockParentUntilDone ||
+          (issueData.executionWorkspacePreference === "reuse_existing" && !issueData.executionWorkspaceId),
+      );
       const child = await issueService(db).create(parent.companyId, {
         ...issueData,
-        blockedByIssueIds: [...new Set([...(issueData.blockedByIssueIds ?? []), ...siblingBlockerIssueIds])],
+        ...(effectiveBlockedByIssueIds.length > 0 ? { blockedByIssueIds: effectiveBlockedByIssueIds } : {}),
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
         goalId: issueData.goalId ?? parent.goalId,
         requestDepth: Math.max(parent.requestDepth + 1, issueData.requestDepth ?? 0),
         description: appendAcceptanceCriteriaToDescription(issueData.description, acceptanceCriteria),
-        inheritExecutionWorkspaceFromIssueId: parent.id,
+        ...(shouldInheritExecutionWorkspaceFromParent
+          ? { inheritExecutionWorkspaceFromIssueId: parent.id }
+          : {}),
+        blockParentUntilDone,
       });
-
-      if (blockParentUntilDone) {
-        const existingBlockers = await db
-          .select({ blockerIssueId: issueRelations.issueId })
-          .from(issueRelations)
-          .where(and(eq(issueRelations.companyId, parent.companyId), eq(issueRelations.relatedIssueId, parent.id), eq(issueRelations.type, "blocks")));
-        await syncBlockedByIssueIds(
-          parent.id,
-          parent.companyId,
-          [...new Set([...existingBlockers.map((row) => row.blockerIssueId), child.id])],
-          { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
-        );
-      }
 
       return {
         issue: child,
         parentBlockerAdded: Boolean(blockParentUntilDone),
+        inheritedExecutionWorkspaceFromIssueId: shouldInheritExecutionWorkspaceFromParent ? parent.id : null,
+        blockedByIssueIds: effectiveBlockedByIssueIds,
       };
     },
 
@@ -1845,6 +1844,7 @@ export function issueService(db: Db) {
       const {
         labelIds: inputLabelIds,
         blockedByIssueIds,
+        blockParentUntilDone,
         inheritExecutionWorkspaceFromIssueId,
         ...issueData
       } = data;
@@ -1911,7 +1911,11 @@ export function issueService(db: Db) {
         const projectPrefersIsolatedWorkspaceDefault =
           gatedProjectPolicy?.enabled &&
           (gatedProjectPolicy.defaultMode === "isolated_workspace" || gatedProjectPolicy.defaultMode === "operator_branch");
-        const allowWorkspaceReuseFromInheritance = inheritanceExplicitlyRequested || !projectPrefersIsolatedWorkspaceDefault;
+        const shouldPreferParentWorkspaceCoupling = Boolean(issueData.parentId && blockParentUntilDone);
+        const allowWorkspaceReuseFromInheritance =
+          inheritanceExplicitlyRequested ||
+          shouldPreferParentWorkspaceCoupling ||
+          !projectPrefersIsolatedWorkspaceDefault;
         if (workspaceInheritanceIssueId && allowWorkspaceReuseFromInheritance) {
           const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
           if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
@@ -2023,6 +2027,28 @@ export function issueService(db: Db) {
             issue.id,
             companyId,
             blockedByIssueIds,
+            {
+              agentId: issueData.createdByAgentId ?? null,
+              userId: issueData.createdByUserId ?? null,
+            },
+            tx,
+          );
+        }
+        if (issue.parentId && blockParentUntilDone) {
+          const existingParentBlockers = await tx
+            .select({ blockerIssueId: issueRelations.issueId })
+            .from(issueRelations)
+            .where(
+              and(
+                eq(issueRelations.companyId, companyId),
+                eq(issueRelations.relatedIssueId, issue.parentId),
+                eq(issueRelations.type, "blocks"),
+              ),
+            );
+          await syncBlockedByIssueIds(
+            issue.parentId,
+            companyId,
+            [...new Set([...existingParentBlockers.map((row) => row.blockerIssueId), issue.id])],
             {
               agentId: issueData.createdByAgentId ?? null,
               userId: issueData.createdByUserId ?? null,

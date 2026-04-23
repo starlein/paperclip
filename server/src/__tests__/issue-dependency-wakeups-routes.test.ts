@@ -211,7 +211,7 @@ describe("issue dependency wakeups in issue routes", () => {
       {
         id: "issue-2",
         assigneeAgentId: "agent-2",
-        blockerIssueIds: ["issue-1", "issue-3"],
+        blockerIssueIds: ["issue-1"],
       },
     ]);
 
