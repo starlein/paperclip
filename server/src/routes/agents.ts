@@ -549,47 +549,6 @@ export function agentRoutes(db: Db) {
     return { ...adapterConfig, devicePrivateKeyPem: generateEd25519PrivateKeyPem() };
   }
 
-  async function inheritCompanyAdapterDefaults(
-    companyId: string,
-    actorAgentId: string | null | undefined,
-    adapterType: string | null | undefined,
-    adapterConfig: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    // Only inherit for claude_local today — other adapters either have their
-    // own hardcoded defaults or require explicit model selection.
-    if (adapterType !== "claude_local") return adapterConfig;
-
-    const hasEnv = adapterConfig.env && typeof adapterConfig.env === "object";
-    const hasCommand = asNonEmptyString(adapterConfig.command);
-    const hasModel = asNonEmptyString(adapterConfig.model);
-    if (hasEnv && hasCommand && hasModel) return adapterConfig;
-
-    const siblings = await svc.list(companyId);
-    const byId = new Map(siblings.map((a) => [a.id, a] as const));
-    const actor = actorAgentId ? byId.get(actorAgentId) : undefined;
-    const candidates = [
-      actor,
-      ...siblings.filter((a) => a.id !== actorAgentId),
-    ].filter((a): a is (typeof siblings)[number] => !!a && a.adapterType === "claude_local");
-
-    const template = candidates.find((a) => {
-      const cfg = (a.adapterConfig ?? {}) as Record<string, unknown>;
-      return (
-        (cfg.env && typeof cfg.env === "object") ||
-        asNonEmptyString(cfg.command) ||
-        asNonEmptyString(cfg.model)
-      );
-    });
-    if (!template) return adapterConfig;
-
-    const tmplCfg = (template.adapterConfig ?? {}) as Record<string, unknown>;
-    const next = { ...adapterConfig };
-    if (!hasEnv && tmplCfg.env && typeof tmplCfg.env === "object") next.env = tmplCfg.env;
-    if (!hasCommand && asNonEmptyString(tmplCfg.command)) next.command = tmplCfg.command;
-    if (!hasModel && asNonEmptyString(tmplCfg.model)) next.model = tmplCfg.model;
-    return next;
-  }
-
   function applyCreateDefaultsByAdapterType(
     adapterType: string | null | undefined,
     adapterConfig: Record<string, unknown>,
@@ -1446,14 +1405,9 @@ export function agentRoutes(db: Db) {
       req,
       (hireInput.adapterConfig ?? {}) as Record<string, unknown>,
     );
-    const requestedAdapterConfig = await inheritCompanyAdapterDefaults(
-      companyId,
-      req.actor.type === "agent" ? req.actor.agentId : null,
+    const requestedAdapterConfig = applyCreateDefaultsByAdapterType(
       hireInput.adapterType,
-      applyCreateDefaultsByAdapterType(
-        hireInput.adapterType,
-        ((hireInput.adapterConfig ?? {}) as Record<string, unknown>),
-      ),
+      ((hireInput.adapterConfig ?? {}) as Record<string, unknown>),
     );
     const desiredSkillAssignment = await resolveDesiredSkillAssignment(
       companyId,
@@ -1636,14 +1590,9 @@ export function agentRoutes(db: Db) {
       req,
       (createInput.adapterConfig ?? {}) as Record<string, unknown>,
     );
-    const requestedAdapterConfig = await inheritCompanyAdapterDefaults(
-      companyId,
-      req.actor.type === "agent" ? req.actor.agentId : null,
+    const requestedAdapterConfig = applyCreateDefaultsByAdapterType(
       createInput.adapterType,
-      applyCreateDefaultsByAdapterType(
-        createInput.adapterType,
-        ((createInput.adapterConfig ?? {}) as Record<string, unknown>),
-      ),
+      ((createInput.adapterConfig ?? {}) as Record<string, unknown>),
     );
     const desiredSkillAssignment = await resolveDesiredSkillAssignment(
       companyId,
