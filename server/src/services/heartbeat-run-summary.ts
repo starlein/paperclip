@@ -103,6 +103,8 @@ export function buildHeartbeatRunIssueComment(
     readCommentText(resultJson.summary)
     ?? readCommentText(resultJson.result)
     ?? readCommentText(resultJson.message)
+    ?? readCommentText(resultJson.output)
+    ?? readCommentText(resultJson.response)
     ?? null
   );
 }

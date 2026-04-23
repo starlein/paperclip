@@ -47,6 +47,18 @@ maybeRepairLegacyWorktreeConfigAndEnvFiles();
 
 const TAILSCALE_DETECT_TIMEOUT_MS = 3000;
 
+function resolveHeartbeatSchedulerIntervalMs(rawValue: string | undefined): number {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 30000;
+  }
+
+  // New semantics: HEARTBEAT_SCHEDULER_INTERVAL_MS is configured in seconds.
+  // Backward compatibility: values >= 1000 are treated as legacy millisecond values.
+  const intervalMs = parsed >= 1000 ? parsed : parsed * 1000;
+  return Math.max(10000, Math.floor(intervalMs));
+}
+
 type DatabaseMode = "embedded-postgres" | "postgres";
 
 export interface Config {
@@ -330,7 +342,7 @@ export function loadConfig(): Config {
     feedbackExportBackendUrl,
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
-    heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    heartbeatSchedulerIntervalMs: resolveHeartbeatSchedulerIntervalMs(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS),
     companyDeletionEnabled,
     telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
   };
