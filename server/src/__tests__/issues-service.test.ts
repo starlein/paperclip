@@ -1345,6 +1345,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
+
   it("createChild keeps isolated defaults unless parent blocking or explicit reuse is requested", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
