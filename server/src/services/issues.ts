@@ -255,9 +255,8 @@ async function listIssueDependencyReadinessMap(
   for (const row of blockerRows) {
     const current = readinessMap.get(row.issueId) ?? createIssueDependencyReadiness(row.issueId);
     current.blockerIssueIds.push(row.blockerIssueId);
-    // Only done blockers resolve dependents; cancelled blockers stay unresolved
-    // until an operator removes or replaces the blocker relationship explicitly.
-    if (row.blockerStatus !== "done") {
+    // Dependents are ready again once each blocker is terminal.
+    if (row.blockerStatus !== "done" && row.blockerStatus !== "cancelled") {
       current.unresolvedBlockerIssueIds.push(row.blockerIssueId);
       current.unresolvedBlockerCount += 1;
       current.allBlockersDone = false;
@@ -283,8 +282,9 @@ async function listUnresolvedBlockerIssueIds(
       and(
         eq(issues.companyId, companyId),
         inArray(issues.id, uniqueBlockerIssueIds),
-        // Cancelled blockers intentionally remain unresolved until the relation changes.
+        // Blockers remain unresolved until they reach a terminal status.
         ne(issues.status, "done"),
+        ne(issues.status, "cancelled"),
       ),
     )
     .then((rows) => rows.map((row) => row.id));
@@ -1687,7 +1687,9 @@ export function issueService(db: Db) {
           return {
             ...candidate,
             blockerIssueIds: blockers.map((blocker) => blocker.blockerIssueId),
-            allBlockersDone: blockers.length > 0 && blockers.every((blocker) => blocker.blockerStatus === "done"),
+            allBlockersDone: blockers.length > 0 && blockers.every(
+              (blocker) => blocker.blockerStatus === "done" || blocker.blockerStatus === "cancelled",
+            ),
           };
         })
         .filter((candidate) => candidate.allBlockersDone)
@@ -1792,8 +1794,23 @@ export function issueService(db: Db) {
         actorUserId,
         ...issueData
       } = data;
+      const siblingBlockerIssueIds = blockParentUntilDone
+        ? await db
+            .select({ id: issues.id })
+            .from(issues)
+            .where(
+              and(
+                eq(issues.companyId, parent.companyId),
+                eq(issues.parentId, parent.id),
+                ne(issues.status, "done"),
+                ne(issues.status, "cancelled"),
+              ),
+            )
+            .then((rows) => rows.map((row) => row.id))
+        : [];
       const child = await issueService(db).create(parent.companyId, {
         ...issueData,
+        blockedByIssueIds: [...new Set([...(issueData.blockedByIssueIds ?? []), ...siblingBlockerIssueIds])],
         parentId: parent.id,
         projectId: issueData.projectId ?? parent.projectId,
         goalId: issueData.goalId ?? parent.goalId,
