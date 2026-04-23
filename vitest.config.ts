@@ -13,6 +13,7 @@ export default defineConfig({
       "packages/adapters/openclaw-gateway",
       "packages/adapters/pi-local",
       "packages/shared",
+      "packages/plugins/sdk",
       "server",
       "ui",
       "cli",
