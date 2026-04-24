@@ -883,7 +883,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await tempDb?.cleanup();
   });
 
-  it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
+  it("does not inherit parent execution workspace linkage unless explicitly requested", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -951,12 +951,9 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
 
     expect(child.parentId).toBe(parentIssueId);
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
-    expect(child.executionWorkspaceSettings).toEqual({
-      mode: "isolated_workspace",
-      workspaceRuntime: { profile: "agent" },
-    });
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
+    expect(child.executionWorkspaceSettings).toBeNull();
   });
 
   it("keeps explicit workspace fields instead of inheriting the parent linkage", async () => {
@@ -1055,6 +1052,74 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.executionWorkspacePreference).toBe("reuse_existing");
     expect(child.executionWorkspaceSettings).toEqual({
       mode: "shared_workspace",
+    });
+  });
+
+  it("inherits the parent projectId and project defaults when creating a child without an explicit project", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const goalId = randomUUID();
+    const parentIssueId = randomUUID();
+    const projectWorkspaceId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
+
+    await db.insert(goals).values({
+      id: goalId,
+      companyId,
+      title: "Project goal",
+      status: "active",
+      priority: "medium",
+    });
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      goalId,
+      name: "Workspace project",
+      status: "in_progress",
+      executionWorkspacePolicy: {
+        enabled: true,
+        defaultMode: "isolated_workspace",
+        workspaceStrategy: { type: "git_worktree" },
+      },
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: projectWorkspaceId,
+      companyId,
+      projectId,
+      name: "Primary workspace",
+      isPrimary: true,
+    });
+
+    await db.insert(issues).values({
+      id: parentIssueId,
+      companyId,
+      projectId,
+      projectWorkspaceId,
+      title: "Parent issue",
+      status: "todo",
+      priority: "medium",
+    });
+
+    const child = await svc.create(companyId, {
+      parentId: parentIssueId,
+      title: "Child issue",
+    });
+
+    expect(child.parentId).toBe(parentIssueId);
+    expect(child.projectId).toBe(projectId);
+    expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
+    expect(child.goalId).toBe(goalId);
+    expect(child.executionWorkspaceSettings).toEqual({
+      mode: "isolated_workspace",
     });
   });
 
@@ -1209,7 +1274,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       title: "Child helper",
       status: "todo",
       description: "Implement the helper.",
-      acceptanceCriteria: ["Uses the parent issue as parentId", "Reuses the parent execution workspace"],
+      acceptanceCriteria: ["Uses the parent issue as parentId", "Does not implicitly reuse parent execution workspace"],
       blockParentUntilDone: true,
     });
 
@@ -1221,8 +1286,8 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     expect(child.description).toContain("## Acceptance Criteria");
     expect(child.description).toContain("- Uses the parent issue as parentId");
     expect(child.projectWorkspaceId).toBe(projectWorkspaceId);
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
 
     const parentRelations = await svc.getRelationSummaries(parentIssueId);
     expect(parentRelations.blockedBy).toEqual([
@@ -1346,7 +1411,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
   });
 
 
-  it("createChild keeps isolated defaults unless parent blocking or explicit reuse is requested", async () => {
+  it("createChild keeps isolated defaults unless explicit reuse is requested", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -1506,7 +1571,7 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
   });
 
-  it("reuses parent workspace and blocks parent when blockParentUntilDone is true", async () => {
+  it("blocks parent without reusing parent workspace when blockParentUntilDone is true", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
     const parentIssueId = randomUUID();
@@ -1578,11 +1643,10 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       blockParentUntilDone: true,
     });
 
-    expect(child.executionWorkspaceId).toBe(executionWorkspaceId);
-    expect(child.executionWorkspacePreference).toBe("reuse_existing");
+    expect(child.executionWorkspaceId).toBeNull();
+    expect(child.executionWorkspacePreference).toBeNull();
     expect(child.executionWorkspaceSettings).toEqual({
       mode: "isolated_workspace",
-      workspaceRuntime: { profile: "agent" },
     });
 
     const parentRelations = await svc.getRelationSummaries(parentIssueId);

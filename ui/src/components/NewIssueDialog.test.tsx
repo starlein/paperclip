@@ -373,6 +373,72 @@ describe("NewIssueDialog", () => {
     act(() => root.unmount());
   });
 
+  it("does not auto-reuse parent workspace when only parent blocking is enabled", async () => {
+    mockProjectsApi.list.mockResolvedValue([
+      {
+        id: "project-1",
+        name: "Alpha",
+        description: null,
+        archivedAt: null,
+        color: "#445566",
+        executionWorkspacePolicy: {
+          enabled: true,
+          defaultMode: "isolated_workspace",
+        },
+      },
+    ]);
+    mockExecutionWorkspacesApi.list.mockResolvedValue([
+      {
+        id: "workspace-1",
+        name: "Parent workspace",
+        status: "active",
+        branchName: "feature/pap-1",
+        cwd: "/tmp/workspace-1",
+        lastUsedAt: new Date("2026-04-06T16:00:00.000Z"),
+      },
+    ]);
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: true });
+    dialogState.newIssueDefaults = {
+      parentId: "issue-1",
+      parentIdentifier: "PAP-1",
+      parentTitle: "Parent issue",
+      title: "Child issue",
+      projectId: "project-1",
+      parentExecutionWorkspaceLabel: "Parent workspace",
+      goalId: "goal-1",
+    };
+
+    const { root } = renderDialog(container);
+    await flush();
+
+    const toggleButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "toggle");
+    expect(toggleButton).not.toBeUndefined();
+
+    await act(async () => {
+      toggleButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Sub-Issue"));
+    expect(submitButton).not.toBeUndefined();
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenCalled();
+    const payload = mockIssuesApi.create.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(payload.parentId).toBe("issue-1");
+    expect(payload.blockParentUntilDone).toBe(true);
+    expect(payload.executionWorkspaceId).toBeUndefined();
+    expect(payload.executionWorkspacePreference).not.toBe("reuse_existing");
+
+    act(() => root.unmount());
+  });
+
   it("submits the parent assignee when a sub-issue opens with inherited defaults", async () => {
     dialogState.newIssueDefaults = {
       parentId: "issue-1",

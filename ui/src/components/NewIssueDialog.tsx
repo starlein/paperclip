@@ -953,30 +953,6 @@ export function NewIssueDialog() {
       setBlockParentUntilDone(defaultBlockParentUntilDoneForSubIssue(nextExecutionWorkspaceMode));
     }
   }, [newIssueOpen, orderedProjects, projectId, isSubIssueMode]);
-  useEffect(() => {
-    if (
-      !isSubIssueMode
-      || !blockParentUntilDone
-      || !parentExecutionWorkspaceId
-      || !showExecutionWorkspaceControls
-    ) {
-      return;
-    }
-    if (executionWorkspaceMode !== "reuse_existing") {
-      setExecutionWorkspaceMode("reuse_existing");
-    }
-    if (selectedExecutionWorkspaceId !== parentExecutionWorkspaceId) {
-      setSelectedExecutionWorkspaceId(parentExecutionWorkspaceId);
-    }
-  }, [
-    blockParentUntilDone,
-    executionWorkspaceMode,
-    isSubIssueMode,
-    parentExecutionWorkspaceId,
-    selectedExecutionWorkspaceId,
-    showExecutionWorkspaceControls,
-  ]);
-
   const modelOverrideOptions = useMemo<InlineEntityOption[]>(
     () => {
       return [...(assigneeAdapterModels ?? [])]
@@ -1418,10 +1394,6 @@ export function NewIssueDialog() {
                   onCheckedChange={() => {
                     const next = !blockParentUntilDone;
                     setBlockParentUntilDone(next);
-                    if (next && parentExecutionWorkspaceId) {
-                      setExecutionWorkspaceMode("reuse_existing");
-                      setSelectedExecutionWorkspaceId(parentExecutionWorkspaceId);
-                    }
                   }}
                 />
               </div>
@@ -1453,7 +1425,6 @@ export function NewIssueDialog() {
                   <select
                     className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
                     value={executionWorkspaceMode}
-                    disabled={Boolean(blockParentUntilDone && parentExecutionWorkspaceId)}
                     onChange={(e) => {
                       setExecutionWorkspaceMode(e.target.value);
                       if (e.target.value !== "reuse_existing") {
@@ -1471,7 +1442,6 @@ export function NewIssueDialog() {
                     <select
                       className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
                       value={selectedExecutionWorkspaceId}
-                      disabled={Boolean(blockParentUntilDone && parentExecutionWorkspaceId)}
                       onChange={(e) => setSelectedExecutionWorkspaceId(e.target.value)}
                     >
                       <option value="">Choose an existing workspace</option>
@@ -1489,9 +1459,9 @@ export function NewIssueDialog() {
                   Reusing {selectedReusableExecutionWorkspace.name} from {selectedReusableExecutionWorkspace.branchName ?? selectedReusableExecutionWorkspace.cwd ?? "existing execution workspace"}.
                 </div>
               )}
-              {blockParentUntilDone && parentExecutionWorkspaceId ? (
+              {blockParentUntilDone ? (
                 <div className="text-[11px] text-emerald-700 dark:text-emerald-300">
-                  Serialized mode active: this sub-issue will reuse the parent workspace and block the parent until completion.
+                  Serialized mode active: this sub-issue will block the parent until completion.
                 </div>
               ) : null}
               {showParentWorkspaceWarning ? (

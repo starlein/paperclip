@@ -1811,10 +1811,10 @@ export function issueService(db: Db) {
       const effectiveBlockedByIssueIds = Array.from(
         new Set([...(requestedBlockedByIssueIds ?? []), ...serializedSiblingBlockerIssueIds]),
       );
-      const shouldInheritExecutionWorkspaceFromParent = Boolean(
-        blockParentUntilDone ||
-          (issueData.executionWorkspacePreference === "reuse_existing" && !issueData.executionWorkspaceId),
-      );
+      const inheritedExecutionWorkspaceFromIssueId =
+        typeof issueData.inheritExecutionWorkspaceFromIssueId === "string"
+          ? issueData.inheritExecutionWorkspaceFromIssueId
+          : null;
       const child = await issueService(db).create(parent.companyId, {
         ...issueData,
         ...(effectiveBlockedByIssueIds.length > 0 ? { blockedByIssueIds: effectiveBlockedByIssueIds } : {}),
@@ -1823,16 +1823,13 @@ export function issueService(db: Db) {
         goalId: issueData.goalId ?? parent.goalId,
         requestDepth: Math.max(parent.requestDepth + 1, issueData.requestDepth ?? 0),
         description: appendAcceptanceCriteriaToDescription(issueData.description, acceptanceCriteria),
-        ...(shouldInheritExecutionWorkspaceFromParent
-          ? { inheritExecutionWorkspaceFromIssueId: parent.id }
-          : {}),
         blockParentUntilDone,
       });
 
       return {
         issue: child,
         parentBlockerAdded: Boolean(blockParentUntilDone),
-        inheritedExecutionWorkspaceFromIssueId: shouldInheritExecutionWorkspaceFromParent ? parent.id : null,
+        inheritedExecutionWorkspaceFromIssueId,
         blockedByIssueIds: effectiveBlockedByIssueIds,
       };
     },
@@ -1885,47 +1882,44 @@ export function issueService(db: Db) {
 
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
-        const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
-        const projectPolicyRaw =
-          issueData.projectId &&
-          (await tx
+        let projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
+        const loadGatedProjectPolicy = async (projectId: string | null | undefined) => {
+          if (!projectId) return null;
+          const projectPolicyRaw = await tx
             .select({
               executionWorkspacePolicy: projects.executionWorkspacePolicy,
             })
             .from(projects)
-            .where(and(eq(projects.id, issueData.projectId), eq(projects.companyId, companyId)))
-            .then((rows) => rows[0]?.executionWorkspacePolicy ?? null));
-        const projectPolicy = parseProjectExecutionWorkspacePolicy(projectPolicyRaw);
-        const gatedProjectPolicy = gateProjectExecutionWorkspacePolicy(projectPolicy, isolatedWorkspacesEnabled);
+            .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId)))
+            .then((rows) => rows[0]?.executionWorkspacePolicy ?? null);
+          const projectPolicy = parseProjectExecutionWorkspacePolicy(projectPolicyRaw);
+          return gateProjectExecutionWorkspacePolicy(projectPolicy, isolatedWorkspacesEnabled);
+        };
+        let gatedProjectPolicy = await loadGatedProjectPolicy(issueData.projectId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
         let executionWorkspacePreference = issueData.executionWorkspacePreference ?? null;
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as Record<string, unknown> | null | undefined) ?? null;
-        const workspaceInheritanceIssueId = inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null;
+        const workspaceContextIssueId = issueData.parentId ?? inheritExecutionWorkspaceFromIssueId ?? null;
+        const executionWorkspaceInheritanceIssueId = inheritExecutionWorkspaceFromIssueId ?? null;
         const hasExplicitExecutionWorkspaceOverride =
           issueData.executionWorkspaceId !== undefined ||
           issueData.executionWorkspacePreference !== undefined ||
           issueData.executionWorkspaceSettings !== undefined;
-        const inheritanceExplicitlyRequested = inheritExecutionWorkspaceFromIssueId != null;
-        const projectPrefersIsolatedWorkspaceDefault =
-          gatedProjectPolicy?.enabled &&
-          (gatedProjectPolicy.defaultMode === "isolated_workspace" || gatedProjectPolicy.defaultMode === "operator_branch");
-        const shouldPreferParentWorkspaceCoupling = Boolean(issueData.parentId && blockParentUntilDone);
-        const allowWorkspaceReuseFromInheritance =
-          inheritanceExplicitlyRequested ||
-          shouldPreferParentWorkspaceCoupling ||
-          !projectPrefersIsolatedWorkspaceDefault;
-        if (workspaceInheritanceIssueId && allowWorkspaceReuseFromInheritance) {
-          const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceInheritanceIssueId);
+        if (workspaceContextIssueId) {
+          const workspaceSource = await getWorkspaceInheritanceIssue(tx, companyId, workspaceContextIssueId);
           if (projectWorkspaceId == null && workspaceSource.projectWorkspaceId) {
             projectWorkspaceId = workspaceSource.projectWorkspaceId;
           }
           if (issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
+            projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
+            gatedProjectPolicy = await loadGatedProjectPolicy(issueData.projectId);
           }
           if (
             isolatedWorkspacesEnabled &&
+            executionWorkspaceInheritanceIssueId != null &&
             !hasExplicitExecutionWorkspaceOverride &&
             workspaceSource.executionWorkspaceId
           ) {
