@@ -9,7 +9,6 @@ type SubIssueDefaultSource = Pick<
   | "projectWorkspaceId"
   | "goalId"
   | "executionWorkspaceId"
-  | "executionWorkspacePreference"
   | "currentExecutionWorkspace"
   | "assigneeAgentId"
   | "assigneeUserId"
@@ -39,12 +38,6 @@ export function buildSubIssueDefaultsForViewer(
     ...(issue.projectId ? { projectId: issue.projectId } : {}),
     ...(issue.projectWorkspaceId ? { projectWorkspaceId: issue.projectWorkspaceId } : {}),
     ...(issue.goalId ? { goalId: issue.goalId } : {}),
-    ...(issue.executionWorkspaceId ? { executionWorkspaceId: issue.executionWorkspaceId } : {}),
-    ...(issue.executionWorkspaceId
-      ? { executionWorkspaceMode: "reuse_existing" }
-      : issue.executionWorkspacePreference
-        ? { executionWorkspaceMode: issue.executionWorkspacePreference }
-        : {}),
     ...(parentExecutionWorkspaceLabel ? { parentExecutionWorkspaceLabel } : {}),
     ...(issue.assigneeAgentId ? { assigneeAgentId: issue.assigneeAgentId } : {}),
     ...(inheritedAssigneeUserId ? { assigneeUserId: inheritedAssigneeUserId } : {}),
