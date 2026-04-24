@@ -8,6 +8,7 @@ export const models = [
   { id: "claude-haiku-4-6", label: "Claude Haiku 4.6" },
   { id: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
   { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+  { id: "glm-5.1:cloud", label: "z.ai GLM 5.1" },
 ];
 
 export const agentConfigurationDoc = `# claude_local agent configuration
