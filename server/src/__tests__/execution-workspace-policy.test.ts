@@ -85,6 +85,29 @@ describe("execution workspace policy helpers", () => {
     });
   });
 
+  it("keeps managed workspace strategy for operator branches", () => {
+    const result = buildExecutionWorkspaceAdapterConfig({
+      agentConfig: {
+        workspaceStrategy: { type: "project_primary" },
+      },
+      projectPolicy: {
+        enabled: true,
+        defaultMode: "operator_branch",
+        workspaceStrategy: {
+          type: "git_worktree",
+          branchTemplate: "operators/{{issue.identifier}}",
+        },
+      },
+      issueSettings: null,
+      mode: "operator_branch",
+      legacyUseProjectWorkspace: null,
+    });
+
+    expect(result.workspaceStrategy).toEqual({
+      type: "git_worktree",
+      branchTemplate: "operators/{{issue.identifier}}",
+    });
+  });
   it("clears managed workspace strategy when issue opts out to project primary or agent default", () => {
     const baseConfig = {
       workspaceStrategy: { type: "git_worktree", branchTemplate: "{{issue.identifier}}" },
