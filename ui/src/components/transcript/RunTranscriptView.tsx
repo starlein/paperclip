@@ -647,6 +647,7 @@ function TranscriptMessageBlock({
         </div>
       )}
       <MarkdownBody
+        linkIssueReferences={false}
         className={cn(
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           compact ? "text-xs leading-5 text-foreground/85" : "text-sm",
@@ -678,6 +679,7 @@ function TranscriptThinkingBlock({
 }) {
   return (
     <MarkdownBody
+      linkIssueReferences={false}
       className={cn(
         "italic text-foreground/70 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         density === "compact" ? "text-[11px] leading-5" : "text-sm leading-6",
@@ -1112,6 +1114,7 @@ function TranscriptEventRow({
         <div className="min-w-0 flex-1">
           {block.label === "result" && block.tone !== "error" ? (
             <MarkdownBody
+              linkIssueReferences={false}
               className={cn(
                 "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-sky-700 dark:text-sky-300",
                 compact ? "text-[11px] leading-5" : "text-xs leading-5",

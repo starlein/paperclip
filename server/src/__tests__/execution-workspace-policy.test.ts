@@ -108,6 +108,7 @@ describe("execution workspace policy helpers", () => {
       branchTemplate: "operators/{{issue.identifier}}",
     });
   });
+
   it("clears managed workspace strategy when issue opts out to project primary or agent default", () => {
     const baseConfig = {
       workspaceStrategy: { type: "git_worktree", branchTemplate: "{{issue.identifier}}" },

@@ -45,9 +45,11 @@ export const queryKeys = {
       ["issues", companyId, "execution-workspace", executionWorkspaceId] as const,
     detail: (id: string) => ["issues", "detail", id] as const,
     comments: (issueId: string) => ["issues", "comments", issueId] as const,
+    interactions: (issueId: string) => ["issues", "interactions", issueId] as const,
     feedbackVotes: (issueId: string) => ["issues", "feedback-votes", issueId] as const,
     attachments: (issueId: string) => ["issues", "attachments", issueId] as const,
     documents: (issueId: string) => ["issues", "documents", issueId] as const,
+    document: (issueId: string, key: string) => ["issues", "document", issueId, key] as const,
     documentRevisions: (issueId: string, key: string) => ["issues", "document-revisions", issueId, key] as const,
     activity: (issueId: string) => ["issues", "activity", issueId] as const,
     runs: (issueId: string) => ["issues", "runs", issueId] as const,
@@ -74,6 +76,13 @@ export const queryKeys = {
   projects: {
     list: (companyId: string) => ["projects", companyId] as const,
     detail: (id: string) => ["projects", "detail", id] as const,
+    workspaces: (projectId: string) => ["projects", projectId, "workspaces"] as const,
+  },
+  workspaceFiles: {
+    list: (workspaceId: string, dirPath: string) =>
+      ["workspace-files", workspaceId, "list", dirPath] as const,
+    read: (workspaceId: string, filePath: string) =>
+      ["workspace-files", workspaceId, "file", filePath] as const,
   },
   goals: {
     list: (companyId: string) => ["goals", companyId] as const,
@@ -120,6 +129,8 @@ export const queryKeys = {
     providers: (companyId: string) => ["secret-providers", companyId] as const,
   },
   dashboard: (companyId: string) => ["dashboard", companyId] as const,
+  userProfile: (companyId: string, userSlug: string) =>
+    ["user-profile", companyId, userSlug] as const,
   sidebarBadges: (companyId: string) => ["sidebar-badges", companyId] as const,
   inboxDismissals: (companyId: string) => ["inbox-dismissals", companyId] as const,
   activity: (companyId: string) => ["activity", companyId] as const,
@@ -148,6 +159,12 @@ export const queryKeys = {
   liveRuns: (companyId: string) => ["live-runs", companyId] as const,
   runIssues: (runId: string) => ["run-issues", runId] as const,
   org: (companyId: string) => ["org", companyId] as const,
+  conversations: {
+    list: (companyId: string) => ["conversations", companyId] as const,
+    ids: (companyId: string) => ["conversations", companyId, "ids"] as const,
+    unread: (companyId: string) => ["conversations", companyId, "unread"] as const,
+    liveRuns: (companyId: string) => ["conversations", companyId, "live-runs"] as const,
+  },
   skills: {
     available: ["skills", "available"] as const,
   },

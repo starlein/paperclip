@@ -27,6 +27,7 @@ export const issues = pgTable(
     projectWorkspaceId: uuid("project_workspace_id").references(() => projectWorkspaces.id, { onDelete: "set null" }),
     goalId: uuid("goal_id").references(() => goals.id),
     parentId: uuid("parent_id").references((): AnyPgColumn => issues.id),
+    kind: text("kind").notNull().default("task"),
     title: text("title").notNull(),
     description: text("description"),
     status: text("status").notNull().default("backlog"),
@@ -44,6 +45,7 @@ export const issues = pgTable(
     originKind: text("origin_kind").notNull().default("manual"),
     originId: text("origin_id"),
     originRunId: text("origin_run_id"),
+    originFingerprint: text("origin_fingerprint").notNull().default("default"),
     requestDepth: integer("request_depth").notNull().default(0),
     billingCode: text("billing_code"),
     assigneeAdapterOverrides: jsonb("assignee_adapter_overrides").$type<Record<string, unknown>>(),
@@ -61,6 +63,7 @@ export const issues = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    companyKindIdx: index("issues_company_kind_idx").on(table.companyId, table.kind),
     companyStatusIdx: index("issues_company_status_idx").on(table.companyId, table.status),
     assigneeStatusIdx: index("issues_company_assignee_status_idx").on(
       table.companyId,
@@ -82,7 +85,7 @@ export const issues = pgTable(
     identifierSearchIdx: index("issues_identifier_search_idx").using("gin", table.identifier.op("gin_trgm_ops")),
     descriptionSearchIdx: index("issues_description_search_idx").using("gin", table.description.op("gin_trgm_ops")),
     openRoutineExecutionIdx: uniqueIndex("issues_open_routine_execution_uq")
-      .on(table.companyId, table.originKind, table.originId)
+      .on(table.companyId, table.originKind, table.originId, table.originFingerprint)
       .where(
         sql`${table.originKind} = 'routine_execution'
           and ${table.originId} is not null

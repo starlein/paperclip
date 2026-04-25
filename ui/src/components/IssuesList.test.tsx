@@ -102,6 +102,7 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     projectWorkspaceId: null,
     goalId: null,
     parentId: null,
+    kind: "task",
     title: "Issue title",
     description: null,
     status: "todo",
@@ -648,6 +649,42 @@ describe("IssuesList", () => {
       workspaceButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
     });
+
+    await waitForAssertion(() => {
+      expect(container.textContent).toContain("Alpha issue");
+      expect(container.textContent).not.toContain("Beta issue");
+    });
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("applies an initial workspace filter from the issues URL state", async () => {
+    const alphaIssue = createIssue({
+      id: "issue-alpha",
+      identifier: "PAP-30",
+      title: "Alpha issue",
+      executionWorkspaceId: "workspace-alpha",
+    });
+    const betaIssue = createIssue({
+      id: "issue-beta",
+      identifier: "PAP-31",
+      title: "Beta issue",
+      executionWorkspaceId: "workspace-beta",
+    });
+
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[alphaIssue, betaIssue]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-issues"
+        initialWorkspaces={["workspace-alpha"]}
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
 
     await waitForAssertion(() => {
       expect(container.textContent).toContain("Alpha issue");

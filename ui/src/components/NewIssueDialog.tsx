@@ -15,6 +15,7 @@ import { buildCompanyUserInlineOptions, buildMarkdownMentionOptions } from "../l
 import { queryKeys } from "../lib/queryKeys";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
+import { getRecentProjectIds, trackRecentProject } from "../lib/recent-projects";
 import { buildExecutionPolicy } from "../lib/issue-execution-policy";
 import { useToastActions } from "../context/ToastContext";
 import {
@@ -25,6 +26,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
@@ -81,6 +83,7 @@ interface IssueDraft {
   assigneeChrome: boolean;
   executionWorkspaceMode?: string;
   selectedExecutionWorkspaceId?: string;
+  blockParentUntilDone?: boolean;
   useIsolatedExecutionWorkspace?: boolean;
 }
 
@@ -278,6 +281,10 @@ function issueExecutionWorkspaceModeForExistingWorkspace(mode: string | null | u
   return "shared_workspace";
 }
 
+function defaultBlockParentUntilDoneForSubIssue(executionMode: string) {
+  return executionMode === "reuse_existing" || executionMode === "shared_workspace";
+}
+
 export function NewIssueDialog() {
   const { newIssueOpen, newIssueDefaults, closeNewIssue } = useDialog();
   const { companies, selectedCompanyId, selectedCompany } = useCompany();
@@ -301,6 +308,7 @@ export function NewIssueDialog() {
   const [assigneeChrome, setAssigneeChrome] = useState(false);
   const [executionWorkspaceMode, setExecutionWorkspaceMode] = useState<string>("shared_workspace");
   const [selectedExecutionWorkspaceId, setSelectedExecutionWorkspaceId] = useState("");
+  const [blockParentUntilDone, setBlockParentUntilDone] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [dialogCompanyId, setDialogCompanyId] = useState<string | null>(null);
   const [stagedFiles, setStagedFiles] = useState<StagedIssueFile[]>([]);
@@ -408,7 +416,14 @@ export function NewIssueDialog() {
       stagedFiles: pendingStagedFiles,
       ...data
     }: { companyId: string; stagedFiles: StagedIssueFile[] } & Record<string, unknown>) => {
-      const issue = await issuesApi.create(companyId, data);
+      const parentId = typeof data.parentId === "string" ? data.parentId : null;
+      const issuePayload: Record<string, unknown> = { ...data };
+      if (parentId) {
+        delete issuePayload.parentId;
+      }
+      const issue = parentId
+        ? await issuesApi.createChild(parentId, issuePayload)
+        : await issuesApi.create(companyId, issuePayload);
       const failures: string[] = [];
 
       for (const stagedFile of pendingStagedFiles) {
@@ -492,6 +507,7 @@ export function NewIssueDialog() {
       assigneeChrome,
       executionWorkspaceMode,
       selectedExecutionWorkspaceId,
+      blockParentUntilDone,
     });
   }, [
     title,
@@ -508,6 +524,7 @@ export function NewIssueDialog() {
     assigneeChrome,
     executionWorkspaceMode,
     selectedExecutionWorkspaceId,
+    blockParentUntilDone,
     newIssueOpen,
     scheduleSave,
   ]);
@@ -524,8 +541,15 @@ export function NewIssueDialog() {
       const defaultProject = orderedProjects.find((project) => project.id === defaultProjectId);
       const defaultProjectWorkspaceId = newIssueDefaults.projectWorkspaceId
         ?? defaultProjectWorkspaceIdForProject(defaultProject);
-      const defaultExecutionWorkspaceMode =
-        newIssueDefaults.executionWorkspaceMode ?? defaultExecutionWorkspaceModeForProject(defaultProject);
+      const projectDefaultExecutionWorkspaceMode = defaultExecutionWorkspaceModeForProject(defaultProject);
+      const projectPrefersIsolatedWorkspaces =
+        projectDefaultExecutionWorkspaceMode === "isolated_workspace" ||
+        projectDefaultExecutionWorkspaceMode === "operator_branch";
+      const defaultExecutionWorkspaceMode = projectPrefersIsolatedWorkspaces
+        ? (newIssueDefaults.executionWorkspaceMode ?? projectDefaultExecutionWorkspaceMode)
+        : (newIssueDefaults.executionWorkspaceId
+          ? "reuse_existing"
+          : (newIssueDefaults.executionWorkspaceMode ?? projectDefaultExecutionWorkspaceMode));
       setTitle(newIssueDefaults.title ?? "");
       setDescription(newIssueDefaults.description ?? "");
       setStatus(newIssueDefaults.status ?? "todo");
@@ -537,7 +561,10 @@ export function NewIssueDialog() {
       setAssigneeThinkingEffort("");
       setAssigneeChrome(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceMode);
-      setSelectedExecutionWorkspaceId("");
+      setSelectedExecutionWorkspaceId(
+        defaultExecutionWorkspaceMode === "reuse_existing" ? (newIssueDefaults.executionWorkspaceId ?? "") : "",
+      );
+      setBlockParentUntilDone(defaultBlockParentUntilDoneForSubIssue(defaultExecutionWorkspaceMode));
       executionWorkspaceDefaultProjectId.current = defaultProjectId || null;
     } else if (newIssueDefaults.title) {
       setTitle(newIssueDefaults.title);
@@ -558,6 +585,7 @@ export function NewIssueDialog() {
       setAssigneeChrome(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForProject(defaultProject));
       setSelectedExecutionWorkspaceId("");
+      setBlockParentUntilDone(false);
       executionWorkspaceDefaultProjectId.current = defaultProjectId || null;
     } else if (draft && draft.title.trim()) {
       const restoredProjectId = newIssueDefaults.projectId ?? draft.projectId;
@@ -585,6 +613,7 @@ export function NewIssueDialog() {
           ?? (draft.useIsolatedExecutionWorkspace ? "isolated_workspace" : defaultExecutionWorkspaceModeForProject(restoredProject)),
       );
       setSelectedExecutionWorkspaceId(draft.selectedExecutionWorkspaceId ?? "");
+      setBlockParentUntilDone(draft.blockParentUntilDone ?? false);
       executionWorkspaceDefaultProjectId.current = restoredProjectId || null;
     } else {
       const defaultProjectId = newIssueDefaults.projectId ?? "";
@@ -603,6 +632,7 @@ export function NewIssueDialog() {
       setAssigneeChrome(false);
       setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForProject(defaultProject));
       setSelectedExecutionWorkspaceId("");
+      setBlockParentUntilDone(false);
       executionWorkspaceDefaultProjectId.current = defaultProjectId || null;
     }
   }, [newIssueOpen, newIssueDefaults, orderedProjects]);
@@ -652,6 +682,7 @@ export function NewIssueDialog() {
     setAssigneeChrome(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
+    setBlockParentUntilDone(false);
     setExpanded(false);
     setDialogCompanyId(null);
     setStagedFiles([]);
@@ -676,6 +707,7 @@ export function NewIssueDialog() {
     setAssigneeChrome(false);
     setExecutionWorkspaceMode("shared_workspace");
     setSelectedExecutionWorkspaceId("");
+    setBlockParentUntilDone(false);
   }
 
   function discardDraft() {
@@ -720,7 +752,7 @@ export function NewIssueDialog() {
       priority: priority || "medium",
       ...(selectedAssigneeAgentId ? { assigneeAgentId: selectedAssigneeAgentId } : {}),
       ...(selectedAssigneeUserId ? { assigneeUserId: selectedAssigneeUserId } : {}),
-      ...(newIssueDefaults.parentId ? { parentId: newIssueDefaults.parentId } : {}),
+      ...(newIssueDefaults.parentId ? { parentId: newIssueDefaults.parentId, blockParentUntilDone } : {}),
       ...(newIssueDefaults.goalId ? { goalId: newIssueDefaults.goalId } : {}),
       ...(projectId ? { projectId } : {}),
       ...(projectWorkspaceId ? { projectWorkspaceId } : {}),
@@ -834,8 +866,10 @@ export function NewIssueDialog() {
   const isUsingParentExecutionWorkspace = isSubIssueMode && parentExecutionWorkspaceId
     ? executionWorkspaceMode === "reuse_existing" && selectedExecutionWorkspaceId === parentExecutionWorkspaceId
     : false;
+  const showExecutionWorkspaceControls = currentProjectSupportsExecutionWorkspace
+    || (isSubIssueMode && Boolean(parentExecutionWorkspaceId));
   const showParentWorkspaceWarning = isSubIssueMode
-    && currentProjectSupportsExecutionWorkspace
+    && showExecutionWorkspaceControls
     && Boolean(parentExecutionWorkspaceId)
     && !isUsingParentExecutionWorkspace;
   const assigneeOptionsTitle =
@@ -853,6 +887,11 @@ export function NewIssueDialog() {
         ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
       : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
   const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
+  const recentAssigneeOptionIds = useMemo(
+    () => recentAssigneeIds.map((id) => assigneeValueFromSelection({ assigneeAgentId: id })),
+    [recentAssigneeIds],
+  );
+  const recentProjectIds = useMemo(() => getRecentProjectIds(), [newIssueOpen]);
   const assigneeOptions = useMemo<InlineEntityOption[]>(
     () => [
       ...currentUserAssigneeOption(currentUserId),
@@ -886,13 +925,18 @@ export function NewIssueDialog() {
   const stagedAttachments = stagedFiles.filter((file) => file.kind === "attachment");
 
   const handleProjectChange = useCallback((nextProjectId: string) => {
+    if (nextProjectId) trackRecentProject(nextProjectId);
     setProjectId(nextProjectId);
     const nextProject = orderedProjects.find((project) => project.id === nextProjectId);
     executionWorkspaceDefaultProjectId.current = nextProjectId || null;
     setProjectWorkspaceId(defaultProjectWorkspaceIdForProject(nextProject));
-    setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForProject(nextProject));
+    const nextExecutionWorkspaceMode = defaultExecutionWorkspaceModeForProject(nextProject);
+    setExecutionWorkspaceMode(nextExecutionWorkspaceMode);
     setSelectedExecutionWorkspaceId("");
-  }, [orderedProjects]);
+    if (isSubIssueMode) {
+      setBlockParentUntilDone(defaultBlockParentUntilDoneForSubIssue(nextExecutionWorkspaceMode));
+    }
+  }, [orderedProjects, isSubIssueMode]);
 
   useEffect(() => {
     if (!newIssueOpen || !projectId || executionWorkspaceDefaultProjectId.current === projectId) {
@@ -902,9 +946,37 @@ export function NewIssueDialog() {
     if (!project) return;
     executionWorkspaceDefaultProjectId.current = projectId;
     setProjectWorkspaceId(defaultProjectWorkspaceIdForProject(project));
-    setExecutionWorkspaceMode(defaultExecutionWorkspaceModeForProject(project));
+    const nextExecutionWorkspaceMode = defaultExecutionWorkspaceModeForProject(project);
+    setExecutionWorkspaceMode(nextExecutionWorkspaceMode);
     setSelectedExecutionWorkspaceId("");
-  }, [newIssueOpen, orderedProjects, projectId]);
+    if (isSubIssueMode) {
+      setBlockParentUntilDone(defaultBlockParentUntilDoneForSubIssue(nextExecutionWorkspaceMode));
+    }
+  }, [newIssueOpen, orderedProjects, projectId, isSubIssueMode]);
+  useEffect(() => {
+    if (
+      !isSubIssueMode
+      || !blockParentUntilDone
+      || !parentExecutionWorkspaceId
+      || !showExecutionWorkspaceControls
+    ) {
+      return;
+    }
+    if (executionWorkspaceMode !== "reuse_existing") {
+      setExecutionWorkspaceMode("reuse_existing");
+    }
+    if (selectedExecutionWorkspaceId !== parentExecutionWorkspaceId) {
+      setSelectedExecutionWorkspaceId(parentExecutionWorkspaceId);
+    }
+  }, [
+    blockParentUntilDone,
+    executionWorkspaceMode,
+    isSubIssueMode,
+    parentExecutionWorkspaceId,
+    selectedExecutionWorkspaceId,
+    showExecutionWorkspaceControls,
+  ]);
+
   const modelOverrideOptions = useMemo<InlineEntityOption[]>(
     () => {
       return [...(assigneeAdapterModels ?? [])]
@@ -963,6 +1035,7 @@ export function NewIssueDialog() {
           }
         }}
       >
+        <DialogTitle className="sr-only">New issue</DialogTitle>
         {/* Header bar */}
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -1095,6 +1168,7 @@ export function NewIssueDialog() {
                 ref={assigneeSelectorRef}
                 value={assigneeValue}
                 options={assigneeOptions}
+                recentOptionIds={recentAssigneeOptionIds}
                 placeholder="Assignee"
                 disablePortal
                 noneLabel="No assignee"
@@ -1146,6 +1220,7 @@ export function NewIssueDialog() {
                 ref={projectSelectorRef}
                 value={projectId}
                 options={projectOptions}
+                recentOptionIds={recentProjectIds}
                 placeholder="Project"
                 disablePortal
                 noneLabel="No project"
@@ -1235,6 +1310,7 @@ export function NewIssueDialog() {
                 <InlineEntitySelector
                 value={reviewerValue}
                 options={assigneeOptions}
+                recentOptionIds={recentAssigneeOptionIds}
                 placeholder="Reviewer"
                 disablePortal
                 noneLabel="No reviewer"
@@ -1279,6 +1355,7 @@ export function NewIssueDialog() {
                 <InlineEntitySelector
                 value={approverValue}
                 options={assigneeOptions}
+                recentOptionIds={recentAssigneeOptionIds}
                 placeholder="Approver"
                 disablePortal
                 noneLabel="No approver"
@@ -1318,7 +1395,7 @@ export function NewIssueDialog() {
           </div>
 
           {isSubIssueMode ? (
-            <div className="px-4 pb-2">
+            <div className="px-4 pb-2 space-y-2">
             <div className="max-w-full rounded-md border border-border bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground">
               <div className="flex items-center gap-1.5">
                 <ListTree className="h-3.5 w-3.5 shrink-0" />
@@ -1331,51 +1408,92 @@ export function NewIssueDialog() {
                 </div>
               ) : null}
             </div>
+            <div className="rounded-md border border-border bg-muted/20 px-2.5 py-1.5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs text-muted-foreground">
+                  Block parent issue until this sub-issue is done
+                </div>
+                <ToggleSwitch
+                  checked={blockParentUntilDone}
+                  onCheckedChange={() => {
+                    const next = !blockParentUntilDone;
+                    setBlockParentUntilDone(next);
+                    if (next && parentExecutionWorkspaceId) {
+                      setExecutionWorkspaceMode("reuse_existing");
+                      setSelectedExecutionWorkspaceId(parentExecutionWorkspaceId);
+                    }
+                  }}
+                />
+              </div>
+              {!blockParentUntilDone ? (
+                <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
+                  Parent and child can run concurrently. If both reuse the same workspace, uncommitted changes can be overwritten.
+                </div>
+              ) : null}
+            </div>
             </div>
           ) : null}
 
-          {currentProject && currentProjectSupportsExecutionWorkspace && (
+          {showExecutionWorkspaceControls && (
             <div className="px-4 py-3 space-y-2">
             <div className="space-y-1.5">
               <div className="text-xs font-medium">Execution workspace</div>
               <div className="text-[11px] text-muted-foreground">
-                Control whether this issue runs in the shared workspace, a new isolated workspace, or an existing one.
+                {currentProjectSupportsExecutionWorkspace
+                  ? "Control whether this issue runs in the shared workspace, a new isolated workspace, or an existing one."
+                  : "This sub-issue can inherit the parent workspace. Project policy controls advanced workspace options."}
               </div>
-              <select
-                className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
-                value={executionWorkspaceMode}
-                onChange={(e) => {
-                  setExecutionWorkspaceMode(e.target.value);
-                  if (e.target.value !== "reuse_existing") {
-                    setSelectedExecutionWorkspaceId("");
-                  }
-                }}
-              >
-                {EXECUTION_WORKSPACE_MODES.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-              {executionWorkspaceMode === "reuse_existing" && (
-                <select
-                  className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
-                  value={selectedExecutionWorkspaceId}
-                  onChange={(e) => setSelectedExecutionWorkspaceId(e.target.value)}
-                >
-                  <option value="">Choose an existing workspace</option>
-                  {deduplicatedReusableWorkspaces.map((workspace) => (
-                    <option key={workspace.id} value={workspace.id}>
-                      {workspace.name} · {workspace.status} · {workspace.branchName ?? workspace.cwd ?? workspace.id.slice(0, 8)}
-                    </option>
-                  ))}
-                </select>
-              )}
+              {isSubIssueMode && parentExecutionWorkspaceId ? (
+                <div className="rounded-md border border-border bg-muted/20 px-2 py-1.5 text-[11px] text-muted-foreground">
+                  Parent workspace: <span className="font-medium text-foreground">{parentExecutionWorkspaceLabel}</span>
+                </div>
+              ) : null}
+              {currentProjectSupportsExecutionWorkspace ? (
+                <>
+                  <select
+                    className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
+                    value={executionWorkspaceMode}
+                    disabled={Boolean(blockParentUntilDone && parentExecutionWorkspaceId)}
+                    onChange={(e) => {
+                      setExecutionWorkspaceMode(e.target.value);
+                      if (e.target.value !== "reuse_existing") {
+                        setSelectedExecutionWorkspaceId("");
+                      }
+                    }}
+                  >
+                    {EXECUTION_WORKSPACE_MODES.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  {executionWorkspaceMode === "reuse_existing" && (
+                    <select
+                      className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-xs outline-none"
+                      value={selectedExecutionWorkspaceId}
+                      disabled={Boolean(blockParentUntilDone && parentExecutionWorkspaceId)}
+                      onChange={(e) => setSelectedExecutionWorkspaceId(e.target.value)}
+                    >
+                      <option value="">Choose an existing workspace</option>
+                      {deduplicatedReusableWorkspaces.map((workspace) => (
+                        <option key={workspace.id} value={workspace.id}>
+                          {workspace.name} · {workspace.status} · {workspace.branchName ?? workspace.cwd ?? workspace.id.slice(0, 8)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </>
+              ) : null}
               {executionWorkspaceMode === "reuse_existing" && selectedReusableExecutionWorkspace && (
                 <div className="text-[11px] text-muted-foreground">
                   Reusing {selectedReusableExecutionWorkspace.name} from {selectedReusableExecutionWorkspace.branchName ?? selectedReusableExecutionWorkspace.cwd ?? "existing execution workspace"}.
                 </div>
               )}
+              {blockParentUntilDone && parentExecutionWorkspaceId ? (
+                <div className="text-[11px] text-emerald-700 dark:text-emerald-300">
+                  Serialized mode active: this sub-issue will reuse the parent workspace and block the parent until completion.
+                </div>
+              ) : null}
               {showParentWorkspaceWarning ? (
                 <div className="rounded-md border border-amber-300/60 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/30 dark:text-amber-100">
                   Warning: this sub-issue will no longer use the parent issue workspace{parentExecutionWorkspaceLabel ? ` (${parentExecutionWorkspaceLabel})` : ""}.
