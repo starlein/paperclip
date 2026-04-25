@@ -118,9 +118,9 @@ describe("issue dependency wakeups in issue routes", () => {
       id: "issue-1",
       companyId: "company-1",
       identifier: "PAP-100",
-      title: "Finish blocker",
+      title: "Close blocker",
       description: null,
-      status: "blocked",
+      status: "in_progress",
       priority: "medium",
       parentId: null,
       assigneeAgentId: "agent-1",
@@ -135,7 +135,7 @@ describe("issue dependency wakeups in issue routes", () => {
       id: "issue-1",
       companyId: "company-1",
       identifier: "PAP-100",
-      title: "Finish blocker",
+      title: "Close blocker",
       description: null,
       status: "done",
       priority: "medium",
@@ -211,7 +211,7 @@ describe("issue dependency wakeups in issue routes", () => {
       {
         id: "issue-2",
         assigneeAgentId: "agent-2",
-        blockerIssueIds: ["issue-1"],
+        blockerIssueIds: ["issue-1", "issue-3"],
       },
     ]);
 

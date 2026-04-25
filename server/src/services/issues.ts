@@ -1923,6 +1923,7 @@ export function issueService(db: Db) {
           }
           if (issueData.projectId == null && workspaceSource.projectId) {
             issueData.projectId = workspaceSource.projectId;
+
           }
           if (
             isolatedWorkspacesEnabled &&
