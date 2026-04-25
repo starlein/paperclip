@@ -341,7 +341,6 @@ describe("NewIssueDialog", () => {
       parentTitle: "Parent issue",
       title: "Child issue",
       projectId: "project-1",
-      executionWorkspaceId: "workspace-1",
       goalId: "goal-1",
     };
 
@@ -365,7 +364,6 @@ describe("NewIssueDialog", () => {
         parentId: "issue-1",
         goalId: "goal-1",
         projectId: "project-1",
-        executionWorkspaceId: "workspace-1",
       }),
     );
 
@@ -480,7 +478,7 @@ describe("NewIssueDialog", () => {
     await flush();
     await flush();
 
-    expect(container.textContent).not.toContain("will no longer use the parent issue workspace");
+    expect(container.textContent).toContain("will no longer use the parent issue workspace");
 
     const selects = Array.from(container.querySelectorAll("select"));
     const modeSelect = selects[0] as HTMLSelectElement | undefined;
