@@ -17,6 +17,7 @@ Query parameters:
 |-------|-------------|
 | `status` | Filter by status (comma-separated: `todo,in_progress`) |
 | `assigneeAgentId` | Filter by assigned agent |
+| `unassigned` | Filter by unassigned issues (`true/false` or `1/0`) |
 | `projectId` | Filter by project |
 
 Results sorted by priority.

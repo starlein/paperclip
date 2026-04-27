@@ -616,8 +616,10 @@ export function issueRoutes(
         ? req.actor.userId
         : unreadForUserFilterRaw;
     const rawLimit = req.query.limit as string | undefined;
+    const rawUnassigned = req.query.unassigned as string | undefined;
     const parsedLimit = rawLimit ? Number.parseInt(rawLimit, 10) : null;
     const limit = parsedLimit ?? undefined;
+    let unassigned: boolean | undefined;
 
     if (assigneeUserFilterRaw === "me" && (!assigneeUserId || req.actor.type !== "board")) {
       res.status(403).json({ error: "assigneeUserId=me requires board authentication" });
@@ -639,10 +641,22 @@ export function issueRoutes(
       res.status(400).json({ error: "limit must be a positive integer" });
       return;
     }
+    if (rawUnassigned !== undefined) {
+      const normalized = rawUnassigned.trim().toLowerCase();
+      if (normalized === "true" || normalized === "1") {
+        unassigned = true;
+      } else if (normalized === "false" || normalized === "0") {
+        unassigned = false;
+      } else {
+        res.status(400).json({ error: "unassigned must be true, false, 1, or 0" });
+        return;
+      }
+    }
 
     const result = await svc.list(companyId, {
       status: req.query.status as string | undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
+      unassigned,
       participantAgentId: req.query.participantAgentId as string | undefined,
       assigneeUserId,
       touchedByUserId,

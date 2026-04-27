@@ -67,6 +67,7 @@ function applyStatusSideEffects(
 export interface IssueFilters {
   status?: string;
   assigneeAgentId?: string;
+  unassigned?: boolean;
   participantAgentId?: string;
   assigneeUserId?: string;
   touchedByUserId?: string;
@@ -991,6 +992,9 @@ export function issueService(db: Db) {
       }
       if (filters?.assigneeAgentId) {
         conditions.push(eq(issues.assigneeAgentId, filters.assigneeAgentId));
+      }
+      if (filters?.unassigned === true) {
+        conditions.push(and(isNull(issues.assigneeAgentId), isNull(issues.assigneeUserId))!);
       }
       if (filters?.participantAgentId) {
         conditions.push(participatedByAgentCondition(companyId, filters.participantAgentId));

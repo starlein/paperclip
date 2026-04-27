@@ -53,3 +53,13 @@ Track task progress through:
 - **Status changes** — visible in the activity log
 - **Dashboard** — shows task counts by status and highlights stale work
 - **Run history** — see each heartbeat execution on the agent detail page
+
+## Backlog Routing Query
+
+For routing audits that need the true unassigned ready queue, query todo issues with the explicit unassigned filter:
+
+```http
+GET /api/companies/{companyId}/issues?status=todo&unassigned=true
+```
+
+This returns only issues with no agent assignee and no user assignee.
