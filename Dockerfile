@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.20
 FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -40,6 +41,8 @@ COPY packages/adapters/pi-local/package.json packages/adapters/pi-local/
 #COPY packages/adapters/http-agent/package.json packages/adapters/http-agent/
 #COPY packages/adapters/openclaw-local/package.json packages/adapters/openclaw-local/
 COPY packages/plugins/sdk/package.json packages/plugins/sdk/
+COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plugins/sandbox-providers/
+COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
 COPY patches/ patches/
 
 RUN pnpm install --frozen-lockfile
