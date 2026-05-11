@@ -56,6 +56,7 @@ function registerBuiltInUIAdapters() {
     openCodeLocalUIAdapter,
     piLocalUIAdapter,
     cursorLocalUIAdapter,
+    sandboxUIAdapter,
     openClawGatewayUIAdapter,
     processUIAdapter,
     httpUIAdapter,
