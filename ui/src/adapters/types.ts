@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import type { CreateConfigValues } from "@paperclipai/adapter-utils";
+import type { CompanySecret } from "@paperclipai/shared";
 
 // Re-export shared types so local consumers don't need to change imports
 export type { TranscriptEntry, StdoutLineParser, CreateConfigValues } from "@paperclipai/adapter-utils";
@@ -32,6 +33,10 @@ export interface AdapterConfigFieldsProps {
   mark: (group: "adapterConfig", field: string, value: unknown) => void;
   /** Available models for dropdowns */
   models: { id: string; label: string }[];
+  /** Available secrets for adapter-specific setup flows */
+  secrets?: CompanySecret[];
+  /** Optional secret creation hook for adapter-specific setup flows */
+  onCreateSecret?: (name: string, value: string) => Promise<CompanySecret>;
   /** When true, hides the instructions file path field (e.g. during import where it's set automatically) */
   hideInstructionsFile?: boolean;
 }

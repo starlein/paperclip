@@ -89,6 +89,11 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     description: "Local Cursor agent",
     icon: MousePointer2,
   },
+  sandbox: {
+    label: "Sandboxed Agent",
+    description: "Run local adapters inside managed or self-hosted remote sandboxes",
+    icon: Bot,
+  },
   openclaw_gateway: {
     label: "OpenClaw Gateway",
     description: "Invoke OpenClaw via gateway protocol",

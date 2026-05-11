@@ -55,6 +55,15 @@ import {
   agentConfigurationDoc as openclawGatewayAgentConfigurationDoc,
   models as openclawGatewayModels,
 } from "@paperclipai/adapter-openclaw-gateway";
+import {
+  execute as sandboxExecute,
+  testEnvironment as sandboxTestEnvironment,
+  sessionCodec as sandboxSessionCodec,
+} from "@paperclipai/adapter-sandbox/server";
+import {
+  agentConfigurationDoc as sandboxAgentConfigurationDoc,
+  models as sandboxModels,
+} from "@paperclipai/adapter-sandbox";
 import { listCodexModels, refreshCodexModels } from "./codex-models.js";
 import { listCursorModels } from "./cursor-models.js";
 import {
@@ -298,6 +307,19 @@ const hermesLocalAdapter: ServerAdapterModule = {
   detectModel: () => detectModelFromHermes(),
 };
 
+const sandboxAdapter: ServerAdapterModule = {
+  type: "sandbox",
+  execute: sandboxExecute,
+  testEnvironment: sandboxTestEnvironment,
+  sessionCodec: sandboxSessionCodec,
+  models: sandboxModels,
+  supportsLocalAgentJwt: true,
+  supportsInstructionsBundle: true,
+  instructionsPathKey: "instructionsFilePath",
+  requiresMaterializedRuntimeSkills: false,
+  agentConfigurationDoc: sandboxAgentConfigurationDoc,
+};
+
 const adaptersByType = new Map<string, ServerAdapterModule>();
 
 // For builtin types that are overridden by an external adapter, we keep the
@@ -317,6 +339,7 @@ function registerBuiltInAdapters() {
     piLocalAdapter,
     cursorLocalAdapter,
     geminiLocalAdapter,
+    sandboxAdapter,
     openclawGatewayAdapter,
     hermesLocalAdapter,
     processAdapter,
