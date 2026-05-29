@@ -98,9 +98,9 @@ services:
       PAPERCLIP_CONFIG: /paperclip/instances/default/config.json
       PAPERCLIP_DEPLOYMENT_MODE: authenticated
       PAPERCLIP_DEPLOYMENT_EXPOSURE: private
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}
       PAPERCLIP_AUTH_DISABLE_SIGN_UP: "true"
       PAPERCLIP_TELEMETRY_DISABLED: "true"
-      PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.local/bin
     ports:
       - "127.0.0.1:3100:3100"
     volumes:
