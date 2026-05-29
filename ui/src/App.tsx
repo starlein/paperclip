@@ -1,8 +1,11 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Layout } from "./components/Layout";
 import { OnboardingWizard } from "./components/OnboardingWizard";
-import { CloudAccessGate } from "./components/CloudAccessGate";
+import { authApi } from "./api/auth";
+import { healthApi } from "./api/health";
 import { Dashboard } from "./pages/Dashboard";
 import { Companies } from "./pages/Companies";
 import { Agents } from "./pages/Agents";
@@ -10,13 +13,10 @@ import { AgentDetail } from "./pages/AgentDetail";
 import { Projects } from "./pages/Projects";
 import { ProjectDetail } from "./pages/ProjectDetail";
 import { ProjectWorkspaceDetail } from "./pages/ProjectWorkspaceDetail";
-import { Workspaces } from "./pages/Workspaces";
 import { Issues } from "./pages/Issues";
 import { IssueDetail } from "./pages/IssueDetail";
-import { Conversations } from "./pages/Conversations";
 import { Routines } from "./pages/Routines";
 import { RoutineDetail } from "./pages/RoutineDetail";
-import { UserProfile } from "./pages/UserProfile";
 import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
 import { Goals } from "./pages/Goals";
 import { GoalDetail } from "./pages/GoalDetail";
@@ -26,33 +26,108 @@ import { Costs } from "./pages/Costs";
 import { Activity } from "./pages/Activity";
 import { Inbox } from "./pages/Inbox";
 import { CompanySettings } from "./pages/CompanySettings";
-import { CompanyAccess } from "./pages/CompanyAccess";
-import { CompanyInvites } from "./pages/CompanyInvites";
+import { CompanyMembers } from "./pages/CompanyMembers";
 import { CompanySkills } from "./pages/CompanySkills";
 import { CompanyExport } from "./pages/CompanyExport";
 import { CompanyImport } from "./pages/CompanyImport";
 import { DesignGuide } from "./pages/DesignGuide";
 import { InstanceGeneralSettings } from "./pages/InstanceGeneralSettings";
-import { InstanceAccess } from "./pages/InstanceAccess";
 import { InstanceSettings } from "./pages/InstanceSettings";
 import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
-import { ProfileSettings } from "./pages/ProfileSettings";
 import { PluginManager } from "./pages/PluginManager";
 import { PluginSettings } from "./pages/PluginSettings";
-import { AdapterManager } from "./pages/AdapterManager";
 import { PluginPage } from "./pages/PluginPage";
+import { RunTranscriptUxLab } from "./pages/RunTranscriptUxLab";
+import { CeoChat } from "./pages/CeoChat";
 import { OrgChart } from "./pages/OrgChart";
 import { NewAgent } from "./pages/NewAgent";
 import { AuthPage } from "./pages/Auth";
 import { BoardClaimPage } from "./pages/BoardClaim";
 import { CliAuthPage } from "./pages/CliAuth";
 import { InviteLandingPage } from "./pages/InviteLanding";
-import { JoinRequestQueue } from "./pages/JoinRequestQueue";
+import { Artifacts } from "./pages/Artifacts";
+import { ArtifactDetail } from "./pages/ArtifactDetail";
+import { Deployments } from "./pages/Deployments";
+import { CloudDeployments } from "./pages/CloudDeployments";
+import { Sandboxes } from "./pages/Sandboxes";
+import { CommunicationCenter } from "./pages/CommunicationCenter";
+import { CompanyVault } from "./pages/CompanyVault";
+import { Deliverables } from "./pages/Deliverables";
+import { DeliverableDetail } from "./pages/DeliverableDetail";
+import { ApiKeySettings } from "./pages/ApiKeySettings";
 import { NotFoundPage } from "./pages/NotFound";
+import { queryKeys } from "./lib/queryKeys";
 import { useCompany } from "./context/CompanyContext";
 import { useDialog } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
 import { shouldRedirectCompanylessRouteToOnboarding } from "./lib/onboarding-route";
+
+function BootstrapPendingPage({ hasActiveInvite = false }: { hasActiveInvite?: boolean }) {
+  return (
+    <div className="mx-auto max-w-xl py-10">
+      <div className="rounded-lg border border-border bg-card p-6">
+        <h1 className="text-xl font-semibold">Instance setup required</h1>
+        <p className="mt-2 text-sm text-muted-foreground">
+          {hasActiveInvite
+            ? "No instance admin exists yet. A bootstrap invite is already active. Check your OH MY Company startup logs for the first admin invite URL, or run this command to rotate it:"
+            : "No instance admin exists yet. Run this command in your OH MY Company environment to generate the first admin invite URL:"}
+        </p>
+        <pre className="mt-4 overflow-x-auto rounded-md border border-border bg-muted/30 p-3 text-xs">
+{`pnpm paperclipai auth bootstrap-ceo`}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+function CloudAccessGate() {
+  const location = useLocation();
+  const healthQuery = useQuery({
+    queryKey: queryKeys.health,
+    queryFn: () => healthApi.get(),
+    retry: false,
+    refetchInterval: (query) => {
+      const data = query.state.data as
+        | { deploymentMode?: "local_trusted" | "authenticated"; bootstrapStatus?: "ready" | "bootstrap_pending" }
+        | undefined;
+      return data?.deploymentMode === "authenticated" && data.bootstrapStatus === "bootstrap_pending"
+        ? 2000
+        : false;
+    },
+    refetchIntervalInBackground: true,
+  });
+
+  const isAuthenticatedMode = healthQuery.data?.deploymentMode === "authenticated";
+  const sessionQuery = useQuery({
+    queryKey: queryKeys.auth.session,
+    queryFn: () => authApi.getSession(),
+    enabled: isAuthenticatedMode,
+    retry: false,
+  });
+
+  if (healthQuery.isLoading || (isAuthenticatedMode && sessionQuery.isLoading)) {
+    return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
+  }
+
+  if (healthQuery.error) {
+    return (
+      <div className="mx-auto max-w-xl py-10 text-sm text-destructive">
+        {healthQuery.error instanceof Error ? healthQuery.error.message : "Failed to load app state"}
+      </div>
+    );
+  }
+
+  if (isAuthenticatedMode && healthQuery.data?.bootstrapStatus === "bootstrap_pending") {
+    return <BootstrapPendingPage hasActiveInvite={healthQuery.data.bootstrapInviteActive} />;
+  }
+
+  if (isAuthenticatedMode && !sessionQuery.data) {
+    const next = encodeURIComponent(`${location.pathname}${location.search}`);
+    return <Navigate to={`/auth?next=${next}`} replace />;
+  }
+
+  return <Outlet />;
+}
 
 function boardRoutes() {
   return (
@@ -62,8 +137,7 @@ function boardRoutes() {
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={<Companies />} />
       <Route path="company/settings" element={<CompanySettings />} />
-      <Route path="company/settings/access" element={<CompanyAccess />} />
-      <Route path="company/settings/invites" element={<CompanyInvites />} />
+      <Route path="company/members" element={<CompanyMembers />} />
       <Route path="company/export/*" element={<CompanyExport />} />
       <Route path="company/import" element={<CompanyImport />} />
       <Route path="skills/*" element={<CompanySkills />} />
@@ -89,7 +163,6 @@ function boardRoutes() {
       <Route path="projects/:projectId/workspaces" element={<ProjectDetail />} />
       <Route path="projects/:projectId/configuration" element={<ProjectDetail />} />
       <Route path="projects/:projectId/budget" element={<ProjectDetail />} />
-      <Route path="workspaces" element={<Workspaces />} />
       <Route path="issues" element={<Issues />} />
       <Route path="issues/all" element={<Navigate to="/issues" replace />} />
       <Route path="issues/active" element={<Navigate to="/issues" replace />} />
@@ -97,32 +170,35 @@ function boardRoutes() {
       <Route path="issues/done" element={<Navigate to="/issues" replace />} />
       <Route path="issues/recent" element={<Navigate to="/issues" replace />} />
       <Route path="issues/:issueId" element={<IssueDetail />} />
-      <Route path="conversations" element={<Conversations />} />
-      <Route path="conversations/:issueId" element={<Conversations />} />
       <Route path="routines" element={<Routines />} />
       <Route path="routines/:routineId" element={<RoutineDetail />} />
       <Route path="execution-workspaces/:workspaceId" element={<ExecutionWorkspaceDetail />} />
-      <Route path="execution-workspaces/:workspaceId/configuration" element={<ExecutionWorkspaceDetail />} />
-      <Route path="execution-workspaces/:workspaceId/runtime-logs" element={<ExecutionWorkspaceDetail />} />
-      <Route path="execution-workspaces/:workspaceId/issues" element={<ExecutionWorkspaceDetail />} />
       <Route path="goals" element={<Goals />} />
       <Route path="goals/:goalId" element={<GoalDetail />} />
+      <Route path="artifacts" element={<Artifacts />} />
+      <Route path="artifacts/:artifactId" element={<ArtifactDetail />} />
+      <Route path="deployments" element={<Deployments />} />
+      <Route path="cloud-deploy" element={<CloudDeployments />} />
+      <Route path="sandboxes" element={<Sandboxes />} />
+      <Route path="deliverables" element={<Deliverables />} />
+      <Route path="deliverables/:deliverableId" element={<DeliverableDetail />} />
       <Route path="approvals" element={<Navigate to="/approvals/pending" replace />} />
       <Route path="approvals/pending" element={<Approvals />} />
       <Route path="approvals/all" element={<Approvals />} />
       <Route path="approvals/:approvalId" element={<ApprovalDetail />} />
       <Route path="costs" element={<Costs />} />
+      <Route path="communication" element={<CommunicationCenter />} />
+      <Route path="vault" element={<CompanyVault />} />
       <Route path="activity" element={<Activity />} />
       <Route path="inbox" element={<InboxRootRedirect />} />
       <Route path="inbox/mine" element={<Inbox />} />
       <Route path="inbox/recent" element={<Inbox />} />
       <Route path="inbox/unread" element={<Inbox />} />
       <Route path="inbox/all" element={<Inbox />} />
-      <Route path="inbox/requests" element={<JoinRequestQueue />} />
       <Route path="inbox/new" element={<Navigate to="/inbox/mine" replace />} />
-      <Route path="u/:userSlug" element={<UserProfile />} />
+      <Route path="chat" element={<CeoChat />} />
       <Route path="design-guide" element={<DesignGuide />} />
-      <Route path="instance/settings/adapters" element={<AdapterManager />} />
+      <Route path="tests/ux/runs" element={<RunTranscriptUxLab />} />
       <Route path=":pluginRoutePath" element={<PluginPage />} />
       <Route path="*" element={<NotFoundPage scope="board" />} />
     </>
@@ -251,7 +327,7 @@ function NoCompaniesStartPage() {
 
 export function App() {
   return (
-    <>
+    <ErrorBoundary>
       <Routes>
         <Route path="auth" element={<AuthPage />} />
         <Route path="board-claim/:token" element={<BoardClaimPage />} />
@@ -264,21 +340,22 @@ export function App() {
           <Route path="instance" element={<Navigate to="/instance/settings/general" replace />} />
           <Route path="instance/settings" element={<Layout />}>
             <Route index element={<Navigate to="general" replace />} />
-            <Route path="profile" element={<ProfileSettings />} />
             <Route path="general" element={<InstanceGeneralSettings />} />
-            <Route path="access" element={<InstanceAccess />} />
             <Route path="heartbeats" element={<InstanceSettings />} />
             <Route path="experimental" element={<InstanceExperimentalSettings />} />
+            <Route path="api-keys" element={<ApiKeySettings />} />
             <Route path="plugins" element={<PluginManager />} />
             <Route path="plugins/:pluginId" element={<PluginSettings />} />
-            <Route path="adapters" element={<AdapterManager />} />
           </Route>
+          {/* Unprefixed board routes → redirect to /:companyPrefix/... */}
+          <Route path="dashboard" element={<UnprefixedBoardRedirect />} />
           <Route path="companies" element={<UnprefixedBoardRedirect />} />
+          <Route path="company/*" element={<UnprefixedBoardRedirect />} />
           <Route path="issues" element={<UnprefixedBoardRedirect />} />
           <Route path="issues/:issueId" element={<UnprefixedBoardRedirect />} />
           <Route path="routines" element={<UnprefixedBoardRedirect />} />
           <Route path="routines/:routineId" element={<UnprefixedBoardRedirect />} />
-          <Route path="u/:userSlug" element={<UnprefixedBoardRedirect />} />
+          <Route path="chat" element={<UnprefixedBoardRedirect />} />
           <Route path="skills/*" element={<UnprefixedBoardRedirect />} />
           <Route path="settings" element={<LegacySettingsRedirect />} />
           <Route path="settings/*" element={<LegacySettingsRedirect />} />
@@ -295,11 +372,30 @@ export function App() {
           <Route path="projects/:projectId/workspaces" element={<UnprefixedBoardRedirect />} />
           <Route path="projects/:projectId/workspaces/:workspaceId" element={<UnprefixedBoardRedirect />} />
           <Route path="projects/:projectId/configuration" element={<UnprefixedBoardRedirect />} />
-          <Route path="workspaces" element={<UnprefixedBoardRedirect />} />
+          <Route path="org" element={<UnprefixedBoardRedirect />} />
+          <Route path="goals" element={<UnprefixedBoardRedirect />} />
+          <Route path="goals/:goalId" element={<UnprefixedBoardRedirect />} />
+          <Route path="approvals" element={<UnprefixedBoardRedirect />} />
+          <Route path="approvals/*" element={<UnprefixedBoardRedirect />} />
+          <Route path="artifacts" element={<UnprefixedBoardRedirect />} />
+          <Route path="artifacts/:artifactId" element={<UnprefixedBoardRedirect />} />
+          <Route path="deployments" element={<UnprefixedBoardRedirect />} />
+          <Route path="cloud-deploy" element={<UnprefixedBoardRedirect />} />
+          <Route path="sandboxes" element={<UnprefixedBoardRedirect />} />
+          <Route path="deliverables" element={<UnprefixedBoardRedirect />} />
+          <Route path="deliverables/:deliverableId" element={<UnprefixedBoardRedirect />} />
+          <Route path="costs" element={<UnprefixedBoardRedirect />} />
+          <Route path="communication" element={<UnprefixedBoardRedirect />} />
+          <Route path="vault" element={<UnprefixedBoardRedirect />} />
+          <Route path="activity" element={<UnprefixedBoardRedirect />} />
+          <Route path="inbox" element={<UnprefixedBoardRedirect />} />
+          <Route path="inbox/*" element={<UnprefixedBoardRedirect />} />
+          <Route path="design-guide" element={<UnprefixedBoardRedirect />} />
+          <Route path="usage" element={<UnprefixedBoardRedirect />} />
+          <Route path="onboarding" element={<UnprefixedBoardRedirect />} />
+          <Route path="plugins/*" element={<UnprefixedBoardRedirect />} />
           <Route path="execution-workspaces/:workspaceId" element={<UnprefixedBoardRedirect />} />
-          <Route path="execution-workspaces/:workspaceId/configuration" element={<UnprefixedBoardRedirect />} />
-          <Route path="execution-workspaces/:workspaceId/runtime-logs" element={<UnprefixedBoardRedirect />} />
-          <Route path="execution-workspaces/:workspaceId/issues" element={<UnprefixedBoardRedirect />} />
+          <Route path="tests/ux/runs" element={<UnprefixedBoardRedirect />} />
           <Route path=":companyPrefix" element={<Layout />}>
             {boardRoutes()}
           </Route>
@@ -307,6 +403,6 @@ export function App() {
         </Route>
       </Routes>
       <OnboardingWizard />
-    </>
+    </ErrorBoundary>
   );
 }

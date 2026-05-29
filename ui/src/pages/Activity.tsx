@@ -121,7 +121,7 @@ export function Activity() {
     <div className="space-y-4">
       <div className="flex items-center justify-end">
         <Select value={filter} onValueChange={setFilter}>
-          <SelectTrigger className="w-[140px] h-8 text-xs">
+          <SelectTrigger className="w-[140px] h-8 text-xs rounded-[2px] font-[var(--font-mono)]">
             <SelectValue placeholder="Filter by type" />
           </SelectTrigger>
           <SelectContent>
@@ -142,7 +142,7 @@ export function Activity() {
       )}
 
       {filtered && filtered.length > 0 && (
-        <div className="border border-border divide-y divide-border">
+        <div className="border border-border divide-y divide-border rounded-[2px] hud-panel hud-shimmer">
           {filtered.map((event) => (
             <ActivityRow
               key={event.id}

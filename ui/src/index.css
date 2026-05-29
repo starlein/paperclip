@@ -36,82 +36,96 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0px;
-  --radius-xl: 0px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 6px;
 }
 
 :root {
-  color-scheme: light;
-  --radius: 0;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  /* HUD Command Center — Dark-first palette (OKLch) */
+  color-scheme: dark;
+  --radius: 2px;
+  --background: oklch(0.09 0.01 240);
+  --foreground: oklch(0.93 0.01 240);
+  --card: oklch(0.12 0.015 240);
+  --card-foreground: oklch(0.93 0.01 240);
+  --popover: oklch(0.14 0.015 240);
+  --popover-foreground: oklch(0.93 0.01 240);
+  --primary: oklch(0.72 0.15 220);
+  --primary-foreground: oklch(0.09 0.01 240);
+  --secondary: oklch(0.16 0.02 240);
+  --secondary-foreground: oklch(0.88 0.01 240);
+  --muted: oklch(0.18 0.015 240);
+  --muted-foreground: oklch(0.55 0.02 240);
+  --accent: oklch(0.16 0.02 240);
+  --accent-foreground: oklch(0.93 0.01 240);
+  --destructive: oklch(0.65 0.25 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.22 0.025 240);
+  --input: oklch(0.22 0.025 240);
+  --ring: oklch(0.72 0.15 220);
+  --chart-1: oklch(0.72 0.15 220);
+  --chart-2: oklch(0.75 0.18 155);
+  --chart-3: oklch(0.78 0.15 75);
+  --chart-4: oklch(0.65 0.2 290);
+  --chart-5: oklch(0.65 0.25 25);
+  --sidebar: oklch(0.10 0.015 240);
+  --sidebar-foreground: oklch(0.88 0.01 240);
+  --sidebar-primary: oklch(0.72 0.15 220);
+  --sidebar-primary-foreground: oklch(0.09 0.01 240);
+  --sidebar-accent: oklch(0.14 0.02 240);
+  --sidebar-accent-foreground: oklch(0.93 0.01 240);
+  --sidebar-border: oklch(0.20 0.02 240);
+  --sidebar-ring: oklch(0.72 0.15 220);
+
+  /* Semantic status colors */
+  --status-active: oklch(0.75 0.18 155);
+  --status-warning: oklch(0.78 0.15 75);
+  --status-error: oklch(0.65 0.25 25);
+  --status-info: oklch(0.72 0.15 220);
+  --status-violet: oklch(0.65 0.2 290);
+
+  /* Font families */
+  --font-display: 'Orbitron', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Inter', system-ui, sans-serif;
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.985 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.637 0.237 25.331);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.269 0 0);
-  --input: oklch(0.269 0 0);
-  --ring: oklch(0.439 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.145 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.269 0 0);
-  --sidebar-ring: oklch(0.439 0 0);
+  color-scheme: dark;
+  --background: oklch(0.09 0.01 240);
+  --foreground: oklch(0.93 0.01 240);
+  --card: oklch(0.12 0.015 240);
+  --card-foreground: oklch(0.93 0.01 240);
+  --popover: oklch(0.14 0.015 240);
+  --popover-foreground: oklch(0.93 0.01 240);
+  --primary: oklch(0.72 0.15 220);
+  --primary-foreground: oklch(0.09 0.01 240);
+  --secondary: oklch(0.16 0.02 240);
+  --secondary-foreground: oklch(0.88 0.01 240);
+  --muted: oklch(0.18 0.015 240);
+  --muted-foreground: oklch(0.55 0.02 240);
+  --accent: oklch(0.16 0.02 240);
+  --accent-foreground: oklch(0.93 0.01 240);
+  --destructive: oklch(0.65 0.25 25);
+  --destructive-foreground: oklch(0.98 0 0);
+  --border: oklch(0.22 0.025 240);
+  --input: oklch(0.22 0.025 240);
+  --ring: oklch(0.72 0.15 220);
+  --chart-1: oklch(0.72 0.15 220);
+  --chart-2: oklch(0.75 0.18 155);
+  --chart-3: oklch(0.78 0.15 75);
+  --chart-4: oklch(0.65 0.2 290);
+  --chart-5: oklch(0.65 0.25 25);
+  --sidebar: oklch(0.10 0.015 240);
+  --sidebar-foreground: oklch(0.88 0.01 240);
+  --sidebar-primary: oklch(0.72 0.15 220);
+  --sidebar-primary-foreground: oklch(0.09 0.01 240);
+  --sidebar-accent: oklch(0.14 0.02 240);
+  --sidebar-accent-foreground: oklch(0.93 0.01 240);
+  --sidebar-border: oklch(0.20 0.02 240);
+  --sidebar-ring: oklch(0.72 0.15 220);
 }
 
 @layer base {
@@ -142,11 +156,6 @@
   label {
     touch-action: manipulation;
   }
-  /* Let font-mono (utilities layer) override for monospace editors */
-  .paperclip-mdxeditor [class*="_placeholder_"],
-  .paperclip-mdxeditor-content {
-    font-family: inherit;
-  }
 }
 
 @media (pointer: coarse) {
@@ -175,16 +184,16 @@
 }
 
 .dark *::-webkit-scrollbar-track {
-  background: oklch(0.205 0 0);
+  background: oklch(0.12 0.015 240);
 }
 
 .dark *::-webkit-scrollbar-thumb {
-  background: oklch(0.4 0 0);
+  background: oklch(0.30 0.02 240);
   border-radius: 4px;
 }
 
 .dark *::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0);
+  background: oklch(0.72 0.15 220);
 }
 
 /* Auto-hide scrollbar: always reserves space, thumb visible only on hover */
@@ -198,25 +207,14 @@
 .scrollbar-auto-hide::-webkit-scrollbar-thumb {
   background: transparent !important;
 }
-/* Light mode scrollbar on hover */
 .scrollbar-auto-hide:hover::-webkit-scrollbar-track {
-  background: oklch(0.92 0 0) !important;
+  background: oklch(0.12 0.015 240) !important;
 }
 .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb {
-  background: oklch(0.7 0 0) !important;
+  background: oklch(0.30 0.02 240) !important;
 }
 .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.6 0 0) !important;
-}
-/* Dark mode scrollbar on hover */
-.dark .scrollbar-auto-hide:hover::-webkit-scrollbar-track {
-  background: oklch(0.205 0 0) !important;
-}
-.dark .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb {
-  background: oklch(0.4 0 0) !important;
-}
-.dark .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0) !important;
+  background: oklch(0.72 0.15 220) !important;
 }
 
 /* Expandable dialog transition for max-width changes */
@@ -266,64 +264,214 @@
   }
 }
 
-/* Chain-of-thought reasoning line ticker animations.
-   Pure translate, no opacity — the overflow-hidden container clips.
-   Both keyframes share the same easing so the two spans move in lockstep. */
-@keyframes cot-line-slide-in {
-  from { transform: translateY(100%); }
-  to   { transform: translateY(0); }
+/* ===== HUD COMMAND CENTER ANIMATIONS ===== */
+
+/* Scan Line — sweeps down panels */
+@keyframes hud-scan {
+  0% { transform: translateY(0); opacity: 0; }
+  5% { opacity: 1; }
+  95% { opacity: 1; }
+  100% { transform: translateY(100cqh); opacity: 0; }
 }
 
-@keyframes cot-line-slide-out {
-  from { transform: translateY(0); }
-  to   { transform: translateY(-100%); }
+/* Border Trace — electric blue glow traces panel edge on hover */
+@keyframes border-trace {
+  0% { background-position: 0% 0%; }
+  100% { background-position: 200% 0%; }
 }
 
-.cot-line-enter {
-  animation: cot-line-slide-in 300ms cubic-bezier(0.4, 0, 0.2, 1) both;
+/* Glow Pulse — status indicators breathe */
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 4px var(--glow-color, oklch(0.72 0.15 220)); }
+  50% { box-shadow: 0 0 12px var(--glow-color, oklch(0.72 0.15 220)), 0 0 24px var(--glow-color, oklch(0.72 0.15 220)); }
 }
 
-.cot-line-exit {
-  animation: cot-line-slide-out 300ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+/* Data Reveal — blur-to-sharp transition */
+@keyframes data-reveal {
+  0% { opacity: 0; filter: blur(4px); transform: translateY(4px); }
+  100% { opacity: 1; filter: blur(0); transform: translateY(0); }
 }
 
+/* Boot Sequence — page entrance */
+@keyframes boot-in {
+  0% { opacity: 0; transform: translateY(8px); filter: blur(2px); }
+  40% { opacity: 0.7; filter: blur(0); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* Radar Sweep — radial sweep on circular widgets */
+@keyframes radar-sweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Background Grid Pulse — tactical grid breathes */
+@keyframes grid-fade {
+  0%, 100% { opacity: 0.03; }
+  50% { opacity: 0.07; }
+}
+
+/* Holographic Shimmer — diagonal light sweep */
+@keyframes holo-shimmer {
+  0% { transform: translateX(-100%) rotate(-45deg); }
+  100% { transform: translateX(200%) rotate(-45deg); }
+}
+
+/* ===== HUD UTILITY CLASSES ===== */
+
+/* Font utilities */
+.font-display { font-family: var(--font-display); }
+.font-mono { font-family: var(--font-mono); }
+
+/* Boot-in animation (triggered by useBootAnimation hook) */
+.hud-boot {
+  animation: boot-in 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: filter, transform, opacity;
+}
+
+/* Data reveal container — children stagger in */
+.data-reveal > * {
+  animation: data-reveal 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: filter, transform, opacity;
+}
+.data-reveal > :nth-child(1) { animation-delay: 0ms; }
+.data-reveal > :nth-child(2) { animation-delay: 50ms; }
+.data-reveal > :nth-child(3) { animation-delay: 50ms; }
+.data-reveal > :nth-child(4) { animation-delay: 150ms; }
+.data-reveal > :nth-child(5) { animation-delay: 200ms; }
+.data-reveal > :nth-child(6) { animation-delay: 250ms; }
+.data-reveal > :nth-child(7) { animation-delay: 300ms; }
+.data-reveal > :nth-child(8) { animation-delay: 350ms; }
+.data-reveal > :nth-child(9) { animation-delay: 400ms; }
+.data-reveal > :nth-child(10) { animation-delay: 450ms; }
+
+/* Section header with decorative // prefix */
+.hud-section-header {
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.hud-section-header::before {
+  content: "// ";
+  color: var(--muted-foreground);
+}
+
+/* HUD Panel — clip-path tactical corners */
+.hud-panel {
+  position: relative;
+}
+
+/* Scan line pseudo-element on panels — uses ::before so it doesn't conflict with hud-shimmer ::after */
+.hud-panel::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--primary);
+  opacity: 0.15;
+  animation: hud-scan 8s linear infinite;
+  will-change: transform, opacity;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Inner wrapper gets the clip-path (so pseudo-elements on outer are not clipped) */
+.hud-panel-inner {
+  clip-path: polygon(
+    0 0,
+    calc(100% - 12px) 0,
+    100% 12px,
+    100% 100%,
+    12px 100%,
+    0 calc(100% - 12px)
+  );
+}
+
+/* Border trace on hover — uses outline + box-shadow to avoid ::before conflict with hud-panel */
+.hud-border-trace {
+  transition: box-shadow 200ms;
+}
+.hud-border-trace:hover {
+  box-shadow: inset 0 0 0 1px oklch(0.72 0.15 220 / 0.3), 0 0 12px oklch(0.72 0.15 220 / 0.08);
+}
+
+/* Holographic shimmer on hover — no overflow:hidden to avoid clipping content */
+.hud-shimmer {
+  position: relative;
+}
+.hud-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to right,
+    transparent 0%,
+    rgba(255, 255, 255, 0.03) 45%,
+    rgba(255, 255, 255, 0.05) 50%,
+    rgba(255, 255, 255, 0.03) 55%,
+    transparent 100%
+  );
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0;
+  transition: opacity 300ms;
+}
+.hud-shimmer:hover::after {
+  opacity: 1;
+}
+
+/* Glow pulse for status indicators */
+.hud-glow {
+  animation: glow-pulse 2s ease-in-out infinite;
+  --glow-color: var(--primary);
+}
+.hud-glow-fast {
+  animation: glow-pulse 1.5s ease-in-out infinite;
+  --glow-color: var(--status-error);
+}
+.hud-glow-success {
+  animation: glow-pulse 2s ease-in-out infinite;
+  --glow-color: var(--status-active);
+}
+
+/* Background tactical grid */
+.hud-grid-bg::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image:
+    repeating-linear-gradient(0deg, var(--border) 0 1px, transparent 1px 60px),
+    repeating-linear-gradient(90deg, var(--border) 0 1px, transparent 1px 60px);
+  animation: grid-fade 6s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Accessibility: respect reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  .cot-line-enter,
-  .cot-line-exit {
-    animation: none;
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
-/* Shimmer text effect for active "Working" state — Cursor-style sweep */
-@keyframes shimmer-text-slide {
-  0% { background-position: 100% center; }
-  60% { background-position: 0% center; }
-  100% { background-position: 0% center; }
-}
-
-.shimmer-text {
-  --shimmer-base: var(--foreground);
-  --shimmer-highlight: color-mix(in oklch, var(--foreground) 35%, transparent);
-  background: linear-gradient(
-    90deg,
-    var(--shimmer-base) 0%,
-    var(--shimmer-base) 40%,
-    var(--shimmer-highlight) 50%,
-    var(--shimmer-base) 60%,
-    var(--shimmer-base) 100%
-  );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: shimmer-text-slide 2.5s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .shimmer-text {
+/* Mobile: reduce animation intensity */
+@media (max-width: 768px) {
+  .hud-glow,
+  .hud-glow-fast,
+  .hud-glow-success {
     animation: none;
-    -webkit-text-fill-color: unset;
-    background: none;
+  }
+  .hud-shimmer:hover::after {
+    opacity: 0;
+  }
+  .hud-panel::before {
+    animation-duration: 16s;
   }
 }
 
@@ -355,16 +503,9 @@
   --accentBgActive: color-mix(in oklab, var(--accent) 72%, var(--background));
   --accentText: var(--accent-foreground);
   font-family: inherit;
-  font-size: 1rem;
+  font-size: 0.875rem;
   line-height: 1.5;
   color: var(--foreground);
-}
-
-@media (min-width: 768px) {
-  .paperclip-mdxeditor-scope,
-  .paperclip-mdxeditor {
-    font-size: 0.875rem;
-  }
 }
 
 .paperclip-mdxeditor-scope [class*="_iconButton_"],
@@ -392,12 +533,14 @@
 }
 
 .paperclip-mdxeditor [class*="_placeholder_"] {
-  font-size: inherit;
+  font-family: inherit;
+  font-size: 0.875rem;
   line-height: 1.5;
   color: var(--muted-foreground);
 }
 
 .paperclip-mdxeditor-content {
+  font-family: inherit;
   font-size: inherit;
   line-height: inherit;
   color: inherit;
@@ -550,7 +693,7 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
   padding: 0;
   border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent);
   border-radius: calc(var(--radius) - 3px);
-  background: #1e1e2e;
+  background: oklch(0.14 0.015 240);
   color: #cdd6f4;
   overflow-x: auto;
 }
@@ -558,19 +701,19 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
 /* Dark theme for CodeMirror code blocks inside the MDXEditor.
    Overrides the default cm6-theme-basic-light that MDXEditor bundles. */
 .paperclip-mdxeditor .cm-editor {
-  background-color: #1e1e2e !important;
+  background-color: oklch(0.14 0.015 240) !important;
   color: #cdd6f4 !important;
   font-size: 1em;
 }
 
 .paperclip-mdxeditor .cm-gutters {
-  background-color: #181825 !important;
+  background-color: oklch(0.12 0.015 240) !important;
   color: #585b70 !important;
   border-right: 1px solid #313244 !important;
 }
 
 .paperclip-mdxeditor .cm-activeLineGutter {
-  background-color: #1e1e2e !important;
+  background-color: oklch(0.14 0.015 240) !important;
 }
 
 .paperclip-mdxeditor .cm-activeLine {
@@ -627,16 +770,16 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
    Dark theme code blocks with compact sizing.
    Override prose CSS variables so prose-invert can't revert to defaults. */
 .paperclip-markdown {
-  --tw-prose-pre-bg: #1e1e2e;
+  --tw-prose-pre-bg: oklch(0.14 0.015 240);
   --tw-prose-pre-code: #cdd6f4;
-  --tw-prose-invert-pre-bg: #1e1e2e;
+  --tw-prose-invert-pre-bg: oklch(0.14 0.015 240);
   --tw-prose-invert-pre-code: #cdd6f4;
 }
 
 .paperclip-markdown pre {
   border: 1px solid color-mix(in oklab, var(--foreground) 12%, transparent) !important;
   border-radius: calc(var(--radius) - 3px) !important;
-  background-color: #1e1e2e !important;
+  background-color: oklch(0.14 0.015 240) !important;
   color: #cdd6f4 !important;
   padding: 0.5rem 0.65rem !important;
   margin: 0.4rem 0 !important;
@@ -761,11 +904,6 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
 
 .paperclip-markdown a.paperclip-mention-chip {
   text-decoration: none;
-}
-
-.paperclip-markdown a.paperclip-mention-chip[data-mention-kind="issue"] {
-  border-color: color-mix(in oklab, var(--foreground) 14%, var(--border) 86%);
-  background: color-mix(in oklab, var(--accent) 42%, transparent);
 }
 
 .dark .paperclip-markdown a {
