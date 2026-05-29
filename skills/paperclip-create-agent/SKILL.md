@@ -70,6 +70,8 @@ curl -sS "$PAPERCLIP_API_URL/llms/agent-icons.txt" \
 - reporting line (`reportsTo`)
 - adapter type
 - optional `desiredSkills` from the company skill library when this role needs installed skills on day one
+- for `Coder` hires, include the default seven-skill `desiredSkills` bundle in this order unless the charter diverges (and explain any deviation in the hire comment): `progress-comment-template`, `paperclip-classify-issue`, `paperclip-plan-from-issue`, `paperclip-implement-plan`, `paperclip-commit-message`, `paperclip-pr-from-branch`, `paperclip-branch-name`
+- if any `desiredSkills` or adapter settings expand browser access, external-system reach, filesystem scope, or secret-handling capability, justify each one in the hire comment
 - adapter and runtime config aligned to this environment
 - leave timer heartbeats off by default; only set `runtimeConfig.heartbeat.enabled=true` with an `intervalSec` when the role genuinely needs scheduled recurring work or the user explicitly asked for it
 - capabilities
