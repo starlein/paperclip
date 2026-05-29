@@ -1,12 +1,13 @@
 services:
   paperclip:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: production
-      args:
-        USER_UID: ${USER_UID}
-        USER_GID: ${USER_GID}
+#    build:
+#      context: .
+    image: paperclip:v2026.407.0
+#     dockerfile: Dockerfile
+#      target: production
+#      args:
+#        USER_UID: ${USER_UID}
+#        USER_GID: ${USER_GID}
     container_name: paperclip
     restart: unless-stopped
     ports:
