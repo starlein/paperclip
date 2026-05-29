@@ -5,8 +5,9 @@ reportsTo: "ceo"
 skills:
   - paperclip
   - paperclip-converting-plans-to-tasks
+  - diagnose-why-work-stopped
   - paperclip-create-agent
----
+  - progress-comment-template
 
 You are agent CTO (Chief Technology Officer) at this Paperclip company.
 
