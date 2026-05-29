@@ -2,54 +2,67 @@
 
 **Image:** `ghcr.io/starlein/paperclip:v2026.403.1-stable`
 
-This README is for the `v2026.403.1-stable` Docker image built from the current branch head.
+This README was created from the current working branch state for the Docker patch stream that includes the **companies startup template / starter-template** work.
 
-## What is included in this release
+## Release base and build metadata
 
-The image includes the Docker and template-related patches from your recent commits:
+- Branch: `docs/v2026.403.1-stable-docker-readme`
+- Built-on commit: `fc629891` (`docs: add docker v2026.403.1-stable release notes`)
+- OCI tag label used in build:
+  - `org.opencontainers.image.description=v2026.403.1-stable - including companies-create-plugin - stable version`
 
-- `2a97d155` — **Docker helpers**
-  - Adds `data/docker/.bashrc` with `paperclipai` alias for container shell usage.
-  - Adds `data/docker/bin/xdg-open` helper script.
-- `9f3ac37b` and `b4acba70` — **Company startup template work**
-  - Introduces `companies/paperclip-startup-template` package (8-role company scaffold, governance docs, skills, and import manifest).
-  - Keeps onboarding/roles/skills structure in a reusable, importable package.
-- `6da27f81` — **Dockerfile + runtime toolchain update**
-  - Adds commonly used tools in image (`mc`, `nano`, `procps`, `zstd`, `tini`, `php-cli`, etc.).
-  - Installs CLI/runtime helper packages used by adapters.
-  - Switches container entrypoint to `tini` for cleaner signal handling.
-  - Enables Codex/OpenAI tooling setup expected for local adapter runs.
-- `b7aa3fb5` / `d9fb1fe7` — **docker-compose workflow refinements**
-  - Adds/updates compose-level defaults and image reference wiring for deployments.
+## Included patches / release ingredients
 
-## Build and publish commands used
+From recent commits on this branch:
 
-The commands from shell history you shared (`history | grep paperclip`) and your latest build/push actions are:
+- `fc629891` — docs: add docker v2026.403.1-stable release notes
+- `2a97d155` — Docker helpers
+- `9f3ac37b` — paperclip-startup-template
+- `d9fb1fe7` — docker-compose
+- `b7aa3fb5` — docker-compose
+- `b4acba70` — paperclip-startup-template
+- `6da27f81` — dockerfile & `gpt 5.5 update to codex`
 
-```bash
-# Build the stable image with an OCI description label
+### What that means for v2026.403.1-stable
 
-docker build -t paperclip:v2026.403.1-stable \
-  --label "org.opencontainers.image.description=v2026.403.1-stable - including companies-create-plugin - stable version" .
+- Runtime image has Docker helper tooling and shell helpers wired for container workflows.
+- Template/workspace bootstrap assets for a company starter kit are included.
+- `paperclip-startup-template` is present and intended for import into a new instance.
+- Compose and startup defaults were refined in the patch window leading to this release.
 
-# Push to GitHub Container Registry
+## Commands used (from shell history check)
 
-docker push ghcr.io/starlein/paperclip:v2026.403.1-stable
-```
-
-Other noteworthy history commands that prepared this patch stream:
+The latest `history | grep paperclip`/`~/.bash_history` sweep includes these important commands:
 
 ```bash
 cp _PATCH-feat-PAP-31-paperclip-startup-template.diff ..
 patch -p0 < ../_PATCH-feat-PAP-31-paperclip-startup-template.diff
+
 git add _PATCH-feat-PAP-31-paperclip-startup-template.diff docker-compose.yml
 git commit -m "paperclip-startup-template"
-git remote add kksecura https://github.com/kksecura/paperclip.git
+
+docker exec -u node -it paperclip /bin/bash
+
+docker build -t paperclip:v2026.403.1-stable \
+  --label "org.opencontainers.image.description=v2026.403.1-stable - including companies-create-plugin - stable version"
+
+docker push ghcr.io/starlein/paperclip:v2026.403.1-stable
 ```
 
-## Run this image
+## Build and publish
 
-### Quick run
+```bash
+# Build
+
+docker build -t paperclip:v2026.403.1-stable \
+  --label "org.opencontainers.image.description=v2026.403.1-stable - including companies-create-plugin - stable version" .
+
+# Publish
+
+docker push ghcr.io/starlein/paperclip:v2026.403.1-stable
+```
+
+## Quick run (single container)
 
 ```bash
 mkdir -p ./data/docker-paperclip
@@ -69,9 +82,7 @@ docker run -d --name paperclip \
 
 Open: `http://localhost:3100`
 
-### Compose usage
-
-Create your own compose file (or use repo `docker-compose.yml`) with at least:
+## Compose example
 
 ```yaml
 services:
@@ -96,9 +107,9 @@ services:
       - ${PAPERCLIP_DATA_DIR:-./data/docker-paperclip}:/paperclip
 ```
 
-## Companies starter template (included in this release)
+## Companies starter template (included)
 
-If you want to import the bundled `paperclip-startup-template`:
+Import example:
 
 ```bash
 paperclipai company import companies/paperclip-startup-template \
@@ -108,31 +119,14 @@ paperclipai company import companies/paperclip-startup-template \
   --yes
 ```
 
-Verify first with:
+Dry-run first:
 
 ```bash
 paperclipai company import companies/paperclip-startup-template --dry-run
 ```
 
-## Git base for this release
+Notes:
 
-Last relevant commits on this branch:
-
-```text
-2a97d155 2026-05-29 Docker helpers
-9f3ac37b 2026-05-29 paperclip-startup-template
-d9fb1fe7 2026-05-22 docker-compose
-b7aa3fb5 2026-05-22 docker-compose
-b4acba70 2026-05-22 paperclip-startup-template
-6da27f81 2026-05-22 dockerfile & gpt 5.5 update to codex
-```
-
-## Notes
-
-- If you run in authenticated mode, keep `PAPERCLIP_AUTH_SECRET` stable across restarts.
-- This image expects volume-mounted data at `/paperclip` for persistence.
-- Built-in helper alias (`paperclipai`) is added in the container shell via `data/docker/.bashrc`.
-
----
-
-Release notes target: Docker image only. For full app changelog, see `doc/*` and `releases/*.md` files in this repository.
+- Keep `PAPERCLIP_AUTH_SECRET` stable for persistent authenticated sessions.
+- Persist data via the mounted `/paperclip` volume.
+- For full changelog across app code, see `doc/*` and release notes in the repo.
