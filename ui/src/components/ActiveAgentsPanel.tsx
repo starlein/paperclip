@@ -1,18 +1,23 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import { Link } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import type { Issue } from "@paperclipai/shared";
 import { heartbeatsApi, type LiveRunForIssue } from "../api/heartbeats";
-import { issuesApi } from "../api/issues";
 import type { TranscriptEntry } from "../adapters";
+import { issuesApi } from "../api/issues";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, relativeTime } from "../lib/utils";
 import { ExternalLink } from "lucide-react";
 import { Identity } from "./Identity";
-import { RunTranscriptView } from "./transcript/RunTranscriptView";
+import { RunChatSurface } from "./RunChatSurface";
 import { useLiveRunTranscripts } from "./transcript/useLiveRunTranscripts";
 
 const MIN_DASHBOARD_RUNS = 4;
+const DASHBOARD_RUN_CARD_LIMIT = 4;
+const DASHBOARD_LOG_POLL_INTERVAL_MS = 15_000;
+const DASHBOARD_LOG_READ_LIMIT_BYTES = 64_000;
+const DASHBOARD_MAX_CHUNKS_PER_RUN = 40;
+const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
 
 function isRunActive(run: LiveRunForIssue): boolean {
   return run.status === "queued" || run.status === "running";
@@ -28,61 +33,81 @@ export function ActiveAgentsPanel({ companyId }: ActiveAgentsPanelProps) {
     queryFn: () => heartbeatsApi.liveRunsForCompany(companyId, MIN_DASHBOARD_RUNS),
   });
 
-  const runs = liveRuns ?? [];
+  const allRuns = liveRuns ?? [];
   const { data: issues } = useQuery({
-    queryKey: queryKeys.issues.list(companyId),
-    queryFn: () => issuesApi.list(companyId),
-    enabled: runs.length > 0,
+    queryKey: [...queryKeys.issues.list(companyId), "with-routine-executions"],
+    queryFn: () => issuesApi.list(companyId, { includeRoutineExecutions: true }),
+    enabled: allRuns.length > 0,
   });
-
   const issueById = useMemo(() => {
     const map = new Map<string, Issue>();
-    for (const issue of issues ?? []) {
-      map.set(issue.id, issue);
-    }
+    for (const issue of issues ?? []) map.set(issue.id, issue);
     return map;
   }, [issues]);
+  const runs = useMemo(
+    () => allRuns.filter((run) => {
+      if (!run.issueId) return true;
+      const issue = issueById.get(run.issueId);
+      return !issue || issue.kind !== "conversation";
+    }),
+    [allRuns, issueById],
+  );
+  const visibleRuns = useMemo(() => runs.slice(0, DASHBOARD_RUN_CARD_LIMIT), [runs]);
+  const hiddenRunCount = Math.max(0, runs.length - visibleRuns.length);
 
   const { transcriptByRun, hasOutputForRun } = useLiveRunTranscripts({
-    runs,
+    runs: visibleRuns,
     companyId,
-    maxChunksPerRun: 120,
+    maxChunksPerRun: DASHBOARD_MAX_CHUNKS_PER_RUN,
+    logPollIntervalMs: DASHBOARD_LOG_POLL_INTERVAL_MS,
+    logReadLimitBytes: DASHBOARD_LOG_READ_LIMIT_BYTES,
+    enableRealtimeUpdates: false,
   });
 
   return (
     <div>
-      <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+      <h3 className="hud-section-header mb-3">
         Agents
       </h3>
       {runs.length === 0 ? (
-        <div className="rounded-xl border border-border p-4">
-          <p className="text-sm text-muted-foreground">No recent agent runs.</p>
+        <div className="rounded-[2px] border border-border p-4 hud-panel">
+          <p className="text-sm font-[var(--font-mono)] text-muted-foreground">No recent agent runs.</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 sm:gap-4 xl:grid-cols-4">
-          {runs.map((run) => (
+          {visibleRuns.map((run) => (
             <AgentRunCard
               key={run.id}
+              companyId={companyId}
               run={run}
               issue={run.issueId ? issueById.get(run.issueId) : undefined}
-              transcript={transcriptByRun.get(run.id) ?? []}
+              transcript={transcriptByRun.get(run.id) ?? EMPTY_TRANSCRIPT}
               hasOutput={hasOutputForRun(run.id)}
               isActive={isRunActive(run)}
             />
           ))}
         </div>
       )}
+      {hiddenRunCount > 0 && (
+        <div className="mt-3 flex justify-end text-xs text-muted-foreground">
+          <Link to="/agents" className="hover:text-foreground hover:underline">
+            {hiddenRunCount} more active/recent run{hiddenRunCount === 1 ? "" : "s"}
+          </Link>
+        </div>
+      )}
     </div>
   );
 }
 
-function AgentRunCard({
+const AgentRunCard = memo(function AgentRunCard({
+  companyId,
   run,
   issue,
   transcript,
   hasOutput,
   isActive,
 }: {
+  companyId: string;
   run: LiveRunForIssue;
   issue?: Issue;
   transcript: TranscriptEntry[];
@@ -91,9 +116,9 @@ function AgentRunCard({
 }) {
   return (
     <div className={cn(
-      "flex h-[320px] flex-col overflow-hidden rounded-xl border shadow-sm",
+      "flex h-[320px] flex-col overflow-hidden rounded-[2px] border shadow-sm",
       isActive
-        ? "border-cyan-500/25 bg-cyan-500/[0.04] shadow-[0_16px_40px_rgba(6,182,212,0.08)]"
+        ? "border-[var(--primary)]/25 bg-[var(--primary)]/[0.04] shadow-[0_16px_40px_oklch(0.72_0.15_220_/_0.08)]"
         : "border-border bg-background/70",
     )}>
       <div className="border-b border-border/60 px-3 py-3">
@@ -102,34 +127,34 @@ function AgentRunCard({
             <div className="flex items-center gap-2">
               {isActive ? (
                 <span className="relative flex h-2.5 w-2.5 shrink-0">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-70" />
-                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-cyan-500" />
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-[var(--status-info)] hud-glow" />
+                  <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[var(--status-info)]" />
                 </span>
               ) : (
                 <span className="inline-flex h-2.5 w-2.5 rounded-full bg-muted-foreground/35" />
               )}
               <Identity name={run.agentName} size="sm" className="[&>span:last-child]:!text-[11px]" />
             </div>
-            <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
+            <div className="mt-2 flex items-center gap-2 text-[10px] font-[var(--font-mono)] text-muted-foreground">
               <span>{isActive ? "Live now" : run.finishedAt ? `Finished ${relativeTime(run.finishedAt)}` : `Started ${relativeTime(run.createdAt)}`}</span>
             </div>
           </div>
 
           <Link
             to={`/agents/${run.agentId}/runs/${run.id}`}
-            className="inline-flex items-center gap-1 rounded-full border border-border/70 bg-background/70 px-2 py-1 text-[10px] text-muted-foreground transition-colors hover:text-foreground"
+            className="inline-flex items-center gap-1 rounded-[2px] border border-border/70 bg-background/70 px-2 py-1 text-[10px] font-[var(--font-mono)] text-muted-foreground transition-colors hover:text-[var(--primary)]"
           >
             <ExternalLink className="h-2.5 w-2.5" />
           </Link>
         </div>
 
         {run.issueId && (
-          <div className="mt-3 rounded-lg border border-border/60 bg-background/60 px-2.5 py-2 text-xs">
+          <div className="mt-3 rounded-[2px] border border-border/60 bg-background/60 px-2.5 py-2 text-xs font-[var(--font-mono)]">
             <Link
               to={`/issues/${issue?.identifier ?? run.issueId}`}
               className={cn(
                 "line-clamp-2 hover:underline",
-                isActive ? "text-cyan-700 dark:text-cyan-300" : "text-muted-foreground hover:text-foreground",
+                isActive ? "text-[var(--primary)]" : "text-muted-foreground hover:text-foreground",
               )}
               title={issue?.title ? `${issue?.identifier ?? run.issueId.slice(0, 8)} - ${issue.title}` : issue?.identifier ?? run.issueId.slice(0, 8)}
             >
@@ -141,16 +166,13 @@ function AgentRunCard({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
-        <RunTranscriptView
-          entries={transcript}
-          density="compact"
-          limit={5}
-          streaming={isActive}
-          collapseStdout
-          thinkingClassName="!text-[10px] !leading-4"
-          emptyMessage={hasOutput ? "Waiting for transcript parsing..." : isActive ? "Waiting for output..." : "No transcript captured."}
+        <RunChatSurface
+          run={run}
+          transcript={transcript}
+          hasOutput={hasOutput}
+          companyId={companyId}
         />
       </div>
     </div>
   );
-}
+});

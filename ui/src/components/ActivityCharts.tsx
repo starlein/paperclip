@@ -1,4 +1,4 @@
-import type { HeartbeatRun } from "@paperclipai/shared";
+import type { DashboardRunActivityDay, HeartbeatRun } from "@paperclipai/shared";
 
 /* ---- Utilities ---- */
 
@@ -23,7 +23,7 @@ function DateLabels({ days }: { days: string[] }) {
       {days.map((day, i) => (
         <div key={day} className="flex-1 text-center">
           {(i === 0 || i === 6 || i === 13) ? (
-            <span className="text-[9px] text-muted-foreground tabular-nums">{formatDayLabel(day)}</span>
+            <span className="text-[9px] font-[var(--font-mono)] text-muted-foreground tabular-nums">{formatDayLabel(day)}</span>
           ) : null}
         </div>
       ))}
@@ -35,8 +35,8 @@ function ChartLegend({ items }: { items: { color: string; label: string }[] }) {
   return (
     <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 mt-2">
       {items.map(item => (
-        <span key={item.label} className="flex items-center gap-1 text-[9px] text-muted-foreground">
-          <span className="h-1.5 w-1.5 rounded-full shrink-0" style={{ backgroundColor: item.color }} />
+        <span key={item.label} className="flex items-center gap-1 text-[9px] font-[var(--font-mono)] text-muted-foreground">
+          <span className="h-1.5 w-1.5 rounded-[1px] shrink-0" style={{ backgroundColor: item.color }} />
           {item.label}
         </span>
       ))}
@@ -46,10 +46,10 @@ function ChartLegend({ items }: { items: { color: string; label: string }[] }) {
 
 export function ChartCard({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
-    <div className="border border-border rounded-lg p-4 space-y-3">
+    <div className="border border-border rounded-[2px] p-4 space-y-3 hud-panel hud-shimmer">
       <div>
-        <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
-        {subtitle && <span className="text-[10px] text-muted-foreground/60">{subtitle}</span>}
+        <h3 className="text-[10px] font-semibold font-[var(--font-display)] uppercase tracking-[0.08em] text-muted-foreground">{title}</h3>
+        {subtitle && <span className="text-[9px] font-[var(--font-mono)] text-muted-foreground/60">{subtitle}</span>}
       </div>
       {children}
     </div>
@@ -58,11 +58,14 @@ export function ChartCard({ title, subtitle, children }: { title: string; subtit
 
 /* ---- Chart Components ---- */
 
-export function RunActivityChart({ runs }: { runs: HeartbeatRun[] }) {
-  const days = getLast14Days();
+type RunChartProps =
+  | { activity?: DashboardRunActivityDay[] | null; runs?: never }
+  | { runs?: HeartbeatRun[] | null; activity?: never };
 
-  const grouped = new Map<string, { succeeded: number; failed: number; other: number }>();
-  for (const day of days) grouped.set(day, { succeeded: 0, failed: 0, other: 0 });
+function aggregateRuns(runs: readonly HeartbeatRun[] = []): DashboardRunActivityDay[] {
+  const days = getLast14Days();
+  const grouped = new Map<string, DashboardRunActivityDay>();
+  for (const day of days) grouped.set(day, { date: day, succeeded: 0, failed: 0, other: 0, total: 0 });
   for (const run of runs) {
     const day = new Date(run.createdAt).toISOString().slice(0, 10);
     const entry = grouped.get(day);
@@ -70,10 +73,24 @@ export function RunActivityChart({ runs }: { runs: HeartbeatRun[] }) {
     if (run.status === "succeeded") entry.succeeded++;
     else if (run.status === "failed" || run.status === "timed_out") entry.failed++;
     else entry.other++;
+    entry.total++;
   }
+  return Array.from(grouped.values());
+}
 
-  const maxValue = Math.max(...Array.from(grouped.values()).map(v => v.succeeded + v.failed + v.other), 1);
-  const hasData = Array.from(grouped.values()).some(v => v.succeeded + v.failed + v.other > 0);
+function resolveRunActivity(props: RunChartProps): DashboardRunActivityDay[] {
+  if (Array.isArray(props.activity)) return props.activity;
+  if (Array.isArray(props.runs)) return aggregateRuns(props.runs);
+  return [];
+}
+
+export function RunActivityChart(props: RunChartProps) {
+  const activity = resolveRunActivity(props);
+  const days = activity.length > 0 ? activity.map((day) => day.date) : getLast14Days();
+  const grouped = new Map(activity.map((day) => [day.date, day]));
+
+  const maxValue = Math.max(...activity.map(v => v.total), 1);
+  const hasData = activity.some(v => v.total > 0);
 
   if (!hasData) return <p className="text-xs text-muted-foreground">No runs yet</p>;
 
@@ -81,8 +98,8 @@ export function RunActivityChart({ runs }: { runs: HeartbeatRun[] }) {
     <div>
       <div className="flex items-end gap-[3px] h-20">
         {days.map(day => {
-          const entry = grouped.get(day)!;
-          const total = entry.succeeded + entry.failed + entry.other;
+          const entry = grouped.get(day) ?? { date: day, succeeded: 0, failed: 0, other: 0, total: 0 };
+          const total = entry.total;
           const heightPct = (total / maxValue) * 100;
           return (
             <div key={day} className="flex-1 h-full flex flex-col justify-end" title={`${day}: ${total} runs`}>
@@ -105,10 +122,10 @@ export function RunActivityChart({ runs }: { runs: HeartbeatRun[] }) {
 }
 
 const priorityColors: Record<string, string> = {
-  critical: "#ef4444",
-  high: "#f97316",
-  medium: "#eab308",
-  low: "#6b7280",
+  critical: "oklch(0.65 0.2 25)",
+  high: "oklch(0.7 0.15 55)",
+  medium: "oklch(0.75 0.12 85)",
+  low: "oklch(0.55 0.02 240)",
 };
 
 const priorityOrder = ["critical", "high", "medium", "low"] as const;
@@ -158,13 +175,13 @@ export function PriorityChart({ issues }: { issues: { priority: string; createdA
 }
 
 const statusColors: Record<string, string> = {
-  todo: "#3b82f6",
-  in_progress: "#8b5cf6",
-  in_review: "#a855f7",
-  done: "#10b981",
-  blocked: "#ef4444",
-  cancelled: "#6b7280",
-  backlog: "#64748b",
+  todo: "oklch(0.72 0.15 220)",
+  in_progress: "oklch(0.65 0.18 290)",
+  in_review: "oklch(0.6 0.2 300)",
+  done: "oklch(0.7 0.18 155)",
+  blocked: "oklch(0.65 0.2 25)",
+  cancelled: "oklch(0.55 0.02 240)",
+  backlog: "oklch(0.5 0.02 240)",
 };
 
 const statusLabels: Record<string, string> = {
@@ -224,26 +241,19 @@ export function IssueStatusChart({ issues }: { issues: { status: string; created
   );
 }
 
-export function SuccessRateChart({ runs }: { runs: HeartbeatRun[] }) {
-  const days = getLast14Days();
-  const grouped = new Map<string, { succeeded: number; total: number }>();
-  for (const day of days) grouped.set(day, { succeeded: 0, total: 0 });
-  for (const run of runs) {
-    const day = new Date(run.createdAt).toISOString().slice(0, 10);
-    const entry = grouped.get(day);
-    if (!entry) continue;
-    entry.total++;
-    if (run.status === "succeeded") entry.succeeded++;
-  }
+export function SuccessRateChart(props: RunChartProps) {
+  const activity = resolveRunActivity(props);
+  const days = activity.length > 0 ? activity.map((day) => day.date) : getLast14Days();
+  const grouped = new Map(activity.map((day) => [day.date, day]));
 
-  const hasData = Array.from(grouped.values()).some(v => v.total > 0);
+  const hasData = activity.some(v => v.total > 0);
   if (!hasData) return <p className="text-xs text-muted-foreground">No runs yet</p>;
 
   return (
     <div>
       <div className="flex items-end gap-[3px] h-20">
         {days.map(day => {
-          const entry = grouped.get(day)!;
+          const entry = grouped.get(day) ?? { date: day, succeeded: 0, failed: 0, other: 0, total: 0 };
           const rate = entry.total > 0 ? entry.succeeded / entry.total : 0;
           const color = entry.total === 0 ? undefined : rate >= 0.8 ? "#10b981" : rate >= 0.5 ? "#eab308" : "#ef4444";
           return (

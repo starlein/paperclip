@@ -8,6 +8,7 @@ import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
 import { cn, projectWorkspaceUrl } from "../lib/utils";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Check, Copy, GitBranch, FolderOpen, Pencil, X } from "lucide-react";
 
 /* -------------------------------------------------------------------------- */
@@ -87,7 +88,7 @@ function CopyableInline({ value, label, mono }: { value: string; label?: string;
         onClick={handleCopy}
         title={copied ? "Copied!" : "Copy"}
       >
-        {copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+        {copied ? <Check className="h-3 w-3 text-[var(--status-active)]" /> : <Copy className="h-3 w-3" />}
       </button>
     </span>
   );
@@ -144,15 +145,34 @@ function workspaceDetailLink(input: {
 
 function statusBadge(status: string) {
   const colors: Record<string, string> = {
-    active: "bg-green-500/15 text-green-700 dark:text-green-400",
+    active: "bg-[var(--status-active)]/15 text-[var(--status-active)]",
     idle: "bg-muted text-muted-foreground",
-    in_review: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
+    in_review: "bg-[var(--primary)]/15 text-[var(--primary)]",
     archived: "bg-muted text-muted-foreground",
   };
   return (
-    <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium", colors[status] ?? colors.idle)}>
+    <span className={cn("text-[9px] px-1.5 py-0.5 rounded-[2px] font-[var(--font-mono)] font-medium uppercase", colors[status] ?? colors.idle)}>
       {status.replace(/_/g, " ")}
     </span>
+  );
+}
+
+function IssueWorkspaceCardSkeleton() {
+  return (
+    <div className="rounded-lg border border-border p-3 space-y-3" data-testid="issue-workspace-card-skeleton">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Skeleton className="h-4 w-4 rounded-full" />
+          <Skeleton className="h-4 w-36" />
+          <Skeleton className="h-5 w-16 rounded-full" />
+        </div>
+        <Skeleton className="h-6 w-14" />
+      </div>
+      <div className="space-y-2">
+        <Skeleton className="h-3 w-40" />
+        <Skeleton className="h-3 w-full" />
+      </div>
+    </div>
   );
 }
 
@@ -180,7 +200,7 @@ interface IssueWorkspaceCardProps {
   onUpdate: (data: Record<string, unknown>) => void;
   initialEditing?: boolean;
   livePreview?: boolean;
-  onDraftChange?: (data: Record<string, unknown>, meta: { canSave: boolean }) => void;
+  onDraftChange?: (data: Record<string, unknown>, meta: { canSave: boolean; workspaceBranchName?: string | null }) => void;
 }
 
 export function IssueWorkspaceCard({
@@ -195,14 +215,15 @@ export function IssueWorkspaceCard({
   const companyId = issue.companyId ?? selectedCompanyId;
   const [editing, setEditing] = useState(initialEditing);
 
-  const { data: experimentalSettings } = useQuery({
+  const { data: experimentalSettings, isLoading: experimentalSettingsLoading } = useQuery({
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
     retry: false,
   });
 
+  const projectWorkspacePolicyEnabled = Boolean(project?.executionWorkspacePolicy?.enabled);
   const policyEnabled = experimentalSettings?.enableIsolatedWorkspaces === true
-    && Boolean(project?.executionWorkspacePolicy?.enabled);
+    && projectWorkspacePolicyEnabled;
 
   const workspace = issue.currentExecutionWorkspace as ExecutionWorkspace | null | undefined;
 
@@ -277,6 +298,10 @@ export function IssueWorkspaceCard({
   });
 
   const canSaveWorkspaceConfig = draftSelection !== "reuse_existing" || draftExecutionWorkspaceId.length > 0;
+  const draftWorkspaceBranchName =
+    draftSelection === "reuse_existing" && configuredReusableWorkspace?.mode !== "shared_workspace"
+      ? configuredReusableWorkspace?.branchName ?? null
+      : null;
 
   const buildWorkspaceDraftUpdate = useCallback(() => ({
     executionWorkspacePreference: draftSelection,
@@ -295,8 +320,11 @@ export function IssueWorkspaceCard({
 
   useEffect(() => {
     if (!onDraftChange) return;
-    onDraftChange(buildWorkspaceDraftUpdate(), { canSave: canSaveWorkspaceConfig });
-  }, [buildWorkspaceDraftUpdate, canSaveWorkspaceConfig, onDraftChange]);
+    onDraftChange(buildWorkspaceDraftUpdate(), {
+      canSave: canSaveWorkspaceConfig,
+      workspaceBranchName: draftWorkspaceBranchName,
+    });
+  }, [buildWorkspaceDraftUpdate, canSaveWorkspaceConfig, draftWorkspaceBranchName, onDraftChange]);
 
   const handleSave = useCallback(() => {
     if (!canSaveWorkspaceConfig) return;
@@ -314,12 +342,16 @@ export function IssueWorkspaceCard({
     setEditing(false);
   }, [currentSelection, issue.executionWorkspaceId]);
 
+  if (project && projectWorkspacePolicyEnabled && experimentalSettingsLoading) {
+    return <IssueWorkspaceCardSkeleton />;
+  }
+
   if (!policyEnabled || !project) return null;
 
   const showEditingControls = livePreview || editing;
 
   return (
-    <div className="rounded-lg border border-border p-3 space-y-2">
+    <div className="rounded-[2px] border border-border p-3 space-y-2">
       {/* Header row */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-sm font-medium text-foreground">

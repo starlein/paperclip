@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import { routinesApi, type RoutineTriggerResponse, type RotateRoutineTriggerResponse } from "../api/routines";
 import { heartbeatsApi } from "../api/heartbeats";
-import { instanceSettingsApi } from "../api/instanceSettings";
 import { LiveRunWidget } from "../components/LiveRunWidget";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
@@ -32,12 +31,6 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { AgentIcon } from "../components/AgentIconPicker";
 import { InlineEntitySelector, type InlineEntityOption } from "../components/InlineEntitySelector";
 import { MarkdownEditor, type MarkdownEditorRef } from "../components/MarkdownEditor";
-import {
-  RoutineRunVariablesDialog,
-  routineRunNeedsConfiguration,
-  type RoutineRunDialogSubmitData,
-} from "../components/RoutineRunVariablesDialog";
-import { RoutineVariablesEditor, RoutineVariablesHint } from "../components/RoutineVariablesEditor";
 import { ScheduleEditor, describeSchedule } from "../components/ScheduleEditor";
 import { RunButton } from "../components/AgentActionButtons";
 import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
@@ -55,7 +48,7 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import type { RoutineTrigger, RoutineVariable } from "@paperclipai/shared";
+import type { RoutineTrigger } from "@paperclipai/shared";
 
 const concurrencyPolicies = ["coalesce_if_active", "always_enqueue", "skip_if_active"];
 const catchUpPolicies = ["skip_missed", "enqueue_missed_with_cap"];
@@ -147,9 +140,9 @@ function TriggerEditor({
   }, [trigger]);
 
   return (
-    <div className="rounded-lg border border-border p-4 space-y-4">
+    <div className="hud-panel rounded-[2px] border border-border p-4 space-y-4">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-sm font-medium">
+        <div className="flex items-center gap-2 text-sm font-[var(--font-display)] uppercase tracking-[0.06em]">
           {trigger.kind === "schedule" ? <Clock3 className="h-3.5 w-3.5" /> : trigger.kind === "webhook" ? <Webhook className="h-3.5 w-3.5" /> : <Zap className="h-3.5 w-3.5" />}
           {trigger.label ?? trigger.kind}
         </div>
@@ -223,7 +216,7 @@ function TriggerEditor({
             onClick={() => onSave(trigger.id, buildRoutineTriggerPatch(trigger, draft, getLocalTimezone()))}
           >
             <Save className="mr-1.5 h-3.5 w-3.5" />
-            Save trigger
+            Save
           </Button>
           <Button
             variant="ghost"
@@ -254,23 +247,13 @@ export function RoutineDetail() {
   const projectSelectorRef = useRef<HTMLButtonElement | null>(null);
   const [secretMessage, setSecretMessage] = useState<SecretMessage | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [runVariablesOpen, setRunVariablesOpen] = useState(false);
   const [newTrigger, setNewTrigger] = useState({
     kind: "schedule",
     cronExpression: "0 10 * * *",
     signingMode: "bearer",
     replayWindowSec: "300",
   });
-  const [editDraft, setEditDraft] = useState<{
-    title: string;
-    description: string;
-    projectId: string;
-    assigneeAgentId: string;
-    priority: string;
-    concurrencyPolicy: string;
-    catchUpPolicy: string;
-    variables: RoutineVariable[];
-  }>({
+  const [editDraft, setEditDraft] = useState({
     title: "",
     description: "",
     projectId: "",
@@ -278,7 +261,6 @@ export function RoutineDetail() {
     priority: "medium",
     concurrencyPolicy: "coalesce_if_active",
     catchUpPolicy: "skip_missed",
-    variables: [],
   });
   const activeTab = useMemo(() => getRoutineTabFromSearch(location.search), [location.search]);
 
@@ -327,11 +309,6 @@ export function RoutineDetail() {
     queryFn: () => projectsApi.list(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
-  const { data: experimentalSettings } = useQuery({
-    queryKey: queryKeys.instance.experimentalSettings,
-    queryFn: () => instanceSettingsApi.getExperimental(),
-    retry: false,
-  });
 
   const routineDefaults = useMemo(
     () =>
@@ -344,7 +321,6 @@ export function RoutineDetail() {
             priority: routine.priority,
             concurrencyPolicy: routine.concurrencyPolicy,
             catchUpPolicy: routine.catchUpPolicy,
-            variables: routine.variables,
           }
         : null,
     [routine],
@@ -358,8 +334,7 @@ export function RoutineDetail() {
       editDraft.assigneeAgentId !== routineDefaults.assigneeAgentId ||
       editDraft.priority !== routineDefaults.priority ||
       editDraft.concurrencyPolicy !== routineDefaults.concurrencyPolicy ||
-      editDraft.catchUpPolicy !== routineDefaults.catchUpPolicy ||
-      JSON.stringify(editDraft.variables) !== JSON.stringify(routineDefaults.variables)
+      editDraft.catchUpPolicy !== routineDefaults.catchUpPolicy
     );
   }, [editDraft, routineDefaults]);
 
@@ -427,27 +402,16 @@ export function RoutineDetail() {
     onError: (error) => {
       pushToast({
         title: "Failed to save routine",
-        body: error instanceof Error ? error.message : "Paperclip could not save the routine.",
+        body: error instanceof Error ? error.message : "OhMyCompany could not save the routine.",
         tone: "error",
       });
     },
   });
 
   const runRoutine = useMutation({
-    mutationFn: (data?: RoutineRunDialogSubmitData) =>
-      routinesApi.run(routineId!, {
-        ...(data?.variables && Object.keys(data.variables).length > 0 ? { variables: data.variables } : {}),
-        ...(data?.executionWorkspaceId !== undefined ? { executionWorkspaceId: data.executionWorkspaceId } : {}),
-        ...(data?.executionWorkspacePreference !== undefined
-          ? { executionWorkspacePreference: data.executionWorkspacePreference }
-          : {}),
-        ...(data?.executionWorkspaceSettings !== undefined
-          ? { executionWorkspaceSettings: data.executionWorkspaceSettings }
-          : {}),
-      }),
+    mutationFn: () => routinesApi.run(routineId!),
     onSuccess: async () => {
       pushToast({ title: "Routine run started", tone: "success" });
-      setRunVariablesOpen(false);
       setActiveTab("runs");
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.routines.detail(routineId!) }),
@@ -459,7 +423,7 @@ export function RoutineDetail() {
     onError: (error) => {
       pushToast({
         title: "Routine run failed",
-        body: error instanceof Error ? error.message : "Paperclip could not start the routine run.",
+        body: error instanceof Error ? error.message : "OhMyCompany could not start the routine run.",
         tone: "error",
       });
     },
@@ -481,7 +445,7 @@ export function RoutineDetail() {
     onError: (error) => {
       pushToast({
         title: "Failed to update routine",
-        body: error instanceof Error ? error.message : "Paperclip could not update the routine.",
+        body: error instanceof Error ? error.message : "OhMyCompany could not update the routine.",
         tone: "error",
       });
     },
@@ -512,12 +476,6 @@ export function RoutineDetail() {
           webhookUrl: result.secretMaterial.webhookUrl,
           webhookSecret: result.secretMaterial.webhookSecret,
         });
-      } else {
-        pushToast({
-          title: "Trigger added",
-          body: "The routine schedule was saved.",
-          tone: "success",
-        });
       }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.routines.detail(routineId!) }),
@@ -528,7 +486,7 @@ export function RoutineDetail() {
     onError: (error) => {
       pushToast({
         title: "Failed to add trigger",
-        body: error instanceof Error ? error.message : "Paperclip could not create the trigger.",
+        body: error instanceof Error ? error.message : "OhMyCompany could not create the trigger.",
         tone: "error",
       });
     },
@@ -537,11 +495,6 @@ export function RoutineDetail() {
   const updateTrigger = useMutation({
     mutationFn: ({ id, patch }: { id: string; patch: Record<string, unknown> }) => routinesApi.updateTrigger(id, patch),
     onSuccess: async () => {
-      pushToast({
-        title: "Trigger saved",
-        body: "The routine cadence update was saved.",
-        tone: "success",
-      });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.routines.detail(routineId!) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.routines.list(selectedCompanyId!) }),
@@ -551,7 +504,7 @@ export function RoutineDetail() {
     onError: (error) => {
       pushToast({
         title: "Failed to update trigger",
-        body: error instanceof Error ? error.message : "Paperclip could not update the trigger.",
+        body: error instanceof Error ? error.message : "OhMyCompany could not update the trigger.",
         tone: "error",
       });
     },
@@ -560,10 +513,6 @@ export function RoutineDetail() {
   const deleteTrigger = useMutation({
     mutationFn: (id: string) => routinesApi.deleteTrigger(id),
     onSuccess: async () => {
-      pushToast({
-        title: "Trigger deleted",
-        tone: "success",
-      });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.routines.detail(routineId!) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.routines.list(selectedCompanyId!) }),
@@ -573,7 +522,7 @@ export function RoutineDetail() {
     onError: (error) => {
       pushToast({
         title: "Failed to delete trigger",
-        body: error instanceof Error ? error.message : "Paperclip could not delete the trigger.",
+        body: error instanceof Error ? error.message : "OhMyCompany could not delete the trigger.",
         tone: "error",
       });
     },
@@ -595,7 +544,7 @@ export function RoutineDetail() {
     onError: (error) => {
       pushToast({
         title: "Failed to rotate webhook secret",
-        body: error instanceof Error ? error.message : "Paperclip could not rotate the webhook secret.",
+        body: error instanceof Error ? error.message : "OhMyCompany could not rotate the webhook secret.",
         tone: "error",
       });
     },
@@ -651,18 +600,12 @@ export function RoutineDetail() {
   }
 
   const automationEnabled = routine.status === "active";
-  const selectedProject = projects?.find((project) => project.id === routine.projectId) ?? null;
-  const needsRunConfiguration = routineRunNeedsConfiguration({
-    variables: routine.variables ?? [],
-    project: selectedProject,
-    isolatedWorkspacesEnabled: experimentalSettings?.enableIsolatedWorkspaces === true,
-  });
   const automationToggleDisabled = updateRoutineStatus.isPending || routine.status === "archived";
   const automationLabel = routine.status === "archived" ? "Archived" : automationEnabled ? "Active" : "Paused";
   const automationLabelClassName = routine.status === "archived"
     ? "text-muted-foreground"
     : automationEnabled
-      ? "text-emerald-400"
+      ? "text-[var(--status-active)]"
       : "text-muted-foreground";
 
   return (
@@ -671,7 +614,7 @@ export function RoutineDetail() {
       <div className="flex items-start gap-4">
         <textarea
           ref={titleInputRef}
-          className="flex-1 min-w-0 resize-none overflow-hidden bg-transparent text-xl font-bold outline-none placeholder:text-muted-foreground/50"
+          className="flex-1 min-w-0 resize-none overflow-hidden bg-transparent text-xl font-[var(--font-display)] uppercase tracking-[0.06em] outline-none placeholder:text-muted-foreground/50"
           placeholder="Routine title"
           rows={1}
           value={editDraft.title}
@@ -700,16 +643,7 @@ export function RoutineDetail() {
           }}
         />
         <div className="flex shrink-0 items-center gap-3 pt-1">
-          <RunButton
-            onClick={() => {
-              if (needsRunConfiguration) {
-                setRunVariablesOpen(true);
-                return;
-              }
-              runRoutine.mutate({});
-            }}
-            disabled={runRoutine.isPending}
-          />
+          <RunButton onClick={() => runRoutine.mutate()} disabled={runRoutine.isPending} />
           <button
             type="button"
             role="switch"
@@ -718,7 +652,7 @@ export function RoutineDetail() {
             aria-label={automationEnabled ? "Pause automatic triggers" : "Enable automatic triggers"}
             disabled={automationToggleDisabled}
             className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-              automationEnabled ? "bg-emerald-500" : "bg-muted"
+              automationEnabled ? "bg-[var(--status-active)]" : "bg-muted"
             } ${automationToggleDisabled ? "cursor-not-allowed opacity-50" : ""}`}
             onClick={() => updateRoutineStatus.mutate(automationEnabled ? "paused" : "active")}
           >
@@ -736,10 +670,10 @@ export function RoutineDetail() {
 
       {/* Secret message banner */}
       {secretMessage && (
-        <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-4 space-y-3 text-sm">
+        <div className="rounded-[2px] border border-[var(--status-info)]/30 bg-[var(--status-info)]/5 p-4 space-y-3 text-sm">
           <div>
             <p className="font-medium">{secretMessage.title}</p>
-            <p className="text-xs text-muted-foreground">Save this now. Paperclip will not show the secret value again.</p>
+            <p className="text-xs text-muted-foreground">Save this now. OhMyCompany will not show the secret value again.</p>
           </div>
           <div className="space-y-2">
             <div className="flex items-center gap-2">
@@ -863,12 +797,6 @@ export function RoutineDetail() {
           }
         }}
       />
-      <RoutineVariablesHint />
-      <RoutineVariablesEditor
-        description={editDraft.description}
-        value={editDraft.variables}
-        onChange={(variables) => setEditDraft((current) => ({ ...current, variables }))}
-      />
 
       {/* Advanced delivery settings */}
       <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
@@ -919,7 +847,7 @@ export function RoutineDetail() {
       {/* Save bar */}
       <div className="flex items-center justify-between">
         {isEditDirty ? (
-          <span className="text-xs text-amber-600">Unsaved changes</span>
+          <span className="text-xs text-[var(--status-warning)]">Unsaved changes</span>
         ) : (
           <span />
         )}
@@ -944,7 +872,7 @@ export function RoutineDetail() {
           <TabsTrigger value="runs" className="gap-1.5">
             <Play className="h-3.5 w-3.5" />
             Runs
-            {hasLiveRun && <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />}
+            {hasLiveRun && <span className="h-2 w-2 rounded-full bg-[var(--status-info)] animate-pulse" />}
           </TabsTrigger>
 <TabsTrigger value="activity" className="gap-1.5">
             <ActivityIcon className="h-3.5 w-3.5" />
@@ -954,8 +882,8 @@ export function RoutineDetail() {
 
         <TabsContent value="triggers" className="space-y-4">
           {/* Add trigger form */}
-          <div className="rounded-lg border border-border p-4 space-y-3">
-            <p className="text-sm font-medium">Add trigger</p>
+          <div className="hud-panel rounded-[2px] border border-border p-4 space-y-3">
+            <p className="text-sm font-[var(--font-display)] uppercase tracking-[0.06em]">Add trigger</p>
             <div className="grid gap-3 md:grid-cols-2">
               <div className="space-y-1.5">
                 <Label className="text-xs">Kind</Label>
@@ -1036,7 +964,7 @@ export function RoutineDetail() {
           {(routineRuns ?? []).length === 0 ? (
             <p className="text-xs text-muted-foreground">No runs yet.</p>
           ) : (
-            <div className="border border-border rounded-lg divide-y divide-border">
+            <div className="border border-border rounded-[2px] divide-y divide-border">
               {(routineRuns ?? []).map((run) => (
                 <div key={run.id} className="flex items-center justify-between px-3 py-2 text-sm">
                   <div className="flex items-center gap-2 min-w-0">
@@ -1064,7 +992,7 @@ export function RoutineDetail() {
           {(activity ?? []).length === 0 ? (
             <p className="text-xs text-muted-foreground">No activity yet.</p>
           ) : (
-            <div className="border border-border rounded-lg divide-y divide-border">
+            <div className="border border-border rounded-[2px] divide-y divide-border">
               {(activity ?? []).map((event) => (
                 <div key={event.id} className="flex items-center justify-between px-3 py-2 text-xs gap-4">
                   <div className="flex items-center gap-2 min-w-0">
@@ -1088,16 +1016,6 @@ export function RoutineDetail() {
           )}
         </TabsContent>
       </Tabs>
-
-      <RoutineRunVariablesDialog
-        open={runVariablesOpen}
-        onOpenChange={setRunVariablesOpen}
-        companyId={routine.companyId}
-        project={selectedProject}
-        variables={routine.variables ?? []}
-        isPending={runRoutine.isPending}
-        onSubmit={(data) => runRoutine.mutate(data)}
-      />
     </div>
   );
 }

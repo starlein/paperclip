@@ -18,13 +18,15 @@ import {
   accessService,
   agentService,
   budgetService,
+  companyBootstrapService,
   companyPortabilityService,
   companyService,
   feedbackService,
+  heartbeatService,
   logActivity,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
-import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
 
 export function companyRoutes(db: Db, storage?: StorageService) {
   const router = Router();
@@ -34,6 +36,8 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const access = accessService(db);
   const budgets = budgetService(db);
   const feedback = feedbackService(db);
+  const heartbeat = heartbeatService(db);
+  const bootstrap = companyBootstrapService(db, heartbeat);
 
   function parseBooleanQuery(value: unknown) {
     return value === true || value === "true" || value === "1";
@@ -46,6 +50,17 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       throw badRequest(`Invalid ${field} query value`);
     }
     return parsed;
+  }
+
+  function assertImportTargetAccess(
+    req: Request,
+    target: { mode: "new_company" } | { mode: "existing_company"; companyId: string },
+  ) {
+    if (target.mode === "new_company") {
+      assertInstanceAdmin(req);
+      return;
+    }
+    assertCompanyAccess(req, target.companyId);
   }
 
   async function assertCanUpdateBranding(req: Request, companyId: string) {
@@ -153,25 +168,21 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/:companyId/export", validate(companyPortabilityExportSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertCompanyAccess(req, companyId);
+    await assertCanManagePortability(req, companyId, "exports");
     const result = await portability.exportBundle(companyId, req.body);
     res.json(result);
   });
 
   router.post("/import/preview", validate(companyPortabilityPreviewSchema), async (req, res) => {
     assertBoard(req);
-    if (req.body.target.mode === "existing_company") {
-      assertCompanyAccess(req, req.body.target.companyId);
-    }
+    assertImportTargetAccess(req, req.body.target);
     const preview = await portability.previewImport(req.body);
     res.json(preview);
   });
 
   router.post("/import", validate(companyPortabilityImportSchema), async (req, res) => {
     assertBoard(req);
-    if (req.body.target.mode === "existing_company") {
-      assertCompanyAccess(req, req.body.target.companyId);
-    }
+    assertImportTargetAccess(req, req.body.target);
     const actor = getActorInfo(req);
     const result = await portability.importBundle(req.body, req.actor.type === "board" ? req.actor.userId : null);
     await logActivity(db, {
@@ -286,6 +297,15 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       );
     }
     res.status(201).json(company);
+
+    // Auto-bootstrap founding team if enabled (fire-and-forget, don't block response)
+    if ((company as Record<string, unknown>).autoBootstrapCeo !== false) {
+      void bootstrap.bootstrapCompany(company.id, {
+        actorUserId: req.actor.userId ?? undefined,
+      }).catch((err) => {
+        console.error(`[company-bootstrap] Failed to bootstrap founding team for ${company.id}:`, err);
+      });
+    }
   });
 
   router.patch("/:companyId", async (req, res) => {

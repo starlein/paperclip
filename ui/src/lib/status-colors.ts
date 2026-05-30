@@ -43,6 +43,7 @@ export const statusBadge: Record<string, string> = {
   // Agent statuses
   active: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
   running: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/50 dark:text-cyan-300",
+  scheduled_retry: "bg-sky-100 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300",
   paused: "bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300",
   idle: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300",
   archived: "bg-muted text-muted-foreground",
@@ -65,6 +66,20 @@ export const statusBadge: Record<string, string> = {
   revision_requested: "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
   approved: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
   rejected: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
+
+  // Deployment statuses
+  deploying: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/50 dark:text-cyan-300",
+  rolling_back: "bg-orange-100 text-orange-700 dark:bg-orange-900/50 dark:text-orange-300",
+
+  // Sandbox statuses
+  provisioning: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/50 dark:text-cyan-300",
+  stopped: "bg-muted text-muted-foreground",
+
+  // Health statuses
+  healthy: "bg-green-100 text-green-700 dark:bg-green-900/50 dark:text-green-300",
+  degraded: "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-300",
+  unhealthy: "bg-red-100 text-red-700 dark:bg-red-900/50 dark:text-red-300",
+  unknown: "bg-muted text-muted-foreground",
 
   // Issue statuses — consistent hues with issueStatusIcon above
   backlog: "bg-muted text-muted-foreground",

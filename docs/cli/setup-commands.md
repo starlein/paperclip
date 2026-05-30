@@ -33,7 +33,7 @@ Interactive first-time setup:
 pnpm paperclipai onboard
 ```
 
-If Paperclip is already configured, rerunning `onboard` keeps the existing config in place. Use `paperclipai configure` to change settings on an existing install.
+If OhMyCompany is already configured, rerunning `onboard` keeps the existing config in place. Use `paperclipai configure` to change settings on an existing install.
 
 First prompt:
 
@@ -52,7 +52,7 @@ Non-interactive defaults + immediate start (opens browser on server listen):
 pnpm paperclipai onboard --yes
 ```
 
-On an existing install, `--yes` now preserves the current config and just starts Paperclip with that setup.
+On an existing install, `--yes` now preserves the current config and just starts OhMyCompany with that setup.
 
 ## `paperclipai doctor`
 
@@ -88,6 +88,8 @@ Show resolved environment configuration:
 ```sh
 pnpm paperclipai env
 ```
+
+This now includes bind-oriented deployment settings such as `PAPERCLIP_BIND` and `PAPERCLIP_BIND_HOST` when configured.
 
 ## `paperclipai allowed-hostname`
 

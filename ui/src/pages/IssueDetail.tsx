@@ -3,25 +3,20 @@ import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { Link, useLocation, useNavigate, useParams } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { issuesApi } from "../api/issues";
+import { deliverablesApi } from "../api/deliverables";
 import { activityApi } from "../api/activity";
 import { heartbeatsApi } from "../api/heartbeats";
-import { instanceSettingsApi } from "../api/instanceSettings";
 import { agentsApi } from "../api/agents";
 import { authApi } from "../api/auth";
+import { instanceSettingsApi } from "../api/instanceSettings";
 import { projectsApi } from "../api/projects";
 import { useCompany } from "../context/CompanyContext";
 import { usePanel } from "../context/PanelContext";
 import { useToast } from "../context/ToastContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { assigneeValueFromSelection, suggestedCommentAssigneeValue } from "../lib/assignees";
-import { extractIssueTimelineEvents } from "../lib/issue-timeline-events";
 import { queryKeys } from "../lib/queryKeys";
-import {
-  createIssueDetailPath,
-  readIssueDetailBreadcrumb,
-  shouldArmIssueDetailInboxQuickArchive,
-} from "../lib/issueDetailBreadcrumb";
-import { hasBlockingShortcutDialog, resolveInboxQuickArchiveKeyAction } from "../lib/keyboardShortcuts";
+import { createIssueDetailPath, readIssueDetailBreadcrumb } from "../lib/issueDetailBreadcrumb";
 import {
   applyOptimisticIssueCommentUpdate,
   createOptimisticIssueComment,
@@ -40,7 +35,6 @@ import { IssueProperties } from "../components/IssueProperties";
 import { IssueWorkspaceCard } from "../components/IssueWorkspaceCard";
 import { LiveRunWidget } from "../components/LiveRunWidget";
 import type { MentionOption } from "../components/MarkdownEditor";
-import { ImageGalleryModal } from "../components/ImageGalleryModal";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { StatusIcon } from "../components/StatusIcon";
 import { PriorityIcon } from "../components/PriorityIcon";
@@ -70,6 +64,7 @@ import {
   Repeat,
   SlidersHorizontal,
   Trash2,
+  PackageCheck,
 } from "lucide-react";
 import type { ActivityEvent } from "@paperclipai/shared";
 import type { Agent, FeedbackVote, Issue, IssueAttachment, IssueComment } from "@paperclipai/shared";
@@ -108,7 +103,7 @@ const ACTION_LABELS: Record<string, string> = {
   "approval.rejected": "rejected",
 };
 
-const FEEDBACK_TERMS_URL = import.meta.env.VITE_FEEDBACK_TERMS_URL?.trim() || "https://paperclip.ing/tos";
+const FEEDBACK_TERMS_URL = import.meta.env.VITE_FEEDBACK_TERMS_URL?.trim() || "https://www.linkedin.com/groups/18235015/";
 
 function humanizeValue(value: unknown): string {
   if (typeof value !== "string") return String(value ?? "none");
@@ -294,8 +289,6 @@ export function IssueDetail() {
   });
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [attachmentDragActive, setAttachmentDragActive] = useState(false);
-  const [galleryOpen, setGalleryOpen] = useState(false);
-  const [galleryIndex, setGalleryIndex] = useState(0);
   const [optimisticComments, setOptimisticComments] = useState<OptimisticIssueComment[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const lastMarkedReadIssueIdRef = useRef<string | null>(null);
@@ -324,6 +317,12 @@ export function IssueDetail() {
     queryFn: () => activityApi.runsForIssue(issueId!),
     enabled: !!issueId,
     refetchInterval: 5000,
+  });
+
+  const { data: issueDeliverables } = useQuery({
+    queryKey: queryKeys.deliverables.list(resolvedCompanyId!, { issueId: issueId! }),
+    queryFn: () => deliverablesApi.list(resolvedCompanyId!, { issueId: issueId! }),
+    enabled: !!resolvedCompanyId && !!issueId,
   });
 
   const { data: linkedApprovals } = useQuery({
@@ -409,7 +408,6 @@ export function IssueDetail() {
     enabled: !!issueId,
     retry: false,
   });
-  const keyboardShortcutsEnabled = instanceGeneralSettings?.keyboardShortcuts === true;
   const feedbackDataSharingPreference = instanceGeneralSettings?.feedbackDataSharingPreference ?? "prompt";
   const { orderedProjects } = useProjectOrder({
     projects: projects ?? [],
@@ -554,10 +552,6 @@ export function IssueDetail() {
   const timelineComments = useMemo(
     () => commentsWithRunMeta.filter((comment) => comment.queueState !== "queued"),
     [commentsWithRunMeta],
-  );
-  const timelineEvents = useMemo(
-    () => extractIssueTimelineEvents(activity),
-    [activity],
   );
 
   const issueCostSummary = useMemo(() => {
@@ -927,22 +921,6 @@ export function IssueDetail() {
     },
   });
 
-  const archiveFromInbox = useMutation({
-    mutationFn: (id: string) => issuesApi.archiveFromInbox(id),
-    onSuccess: () => {
-      invalidateIssue();
-      navigate(sourceBreadcrumb.href.startsWith("/inbox") ? sourceBreadcrumb.href : "/inbox", { replace: true });
-      pushToast({ title: "Issue archived from inbox", tone: "success" });
-    },
-    onError: (err) => {
-      pushToast({
-        title: "Archive failed",
-        body: err instanceof Error ? err.message : "Unable to archive this issue from the inbox",
-        tone: "error",
-      });
-    },
-  });
-
   useEffect(() => {
     const titleLabel = issue?.title ?? issueId ?? "Issue";
     setBreadcrumbs([
@@ -976,76 +954,6 @@ export function IssueDetail() {
     }
     return () => closePanel();
   }, [issue]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const inboxQuickArchiveArmedRef = useRef(false);
-  const canQuickArchiveFromInbox =
-    keyboardShortcutsEnabled &&
-    !issue?.hiddenAt &&
-    sourceBreadcrumb.href.startsWith("/inbox") &&
-    shouldArmIssueDetailInboxQuickArchive(location.state);
-
-  useEffect(() => {
-    if (!issue?.id || !canQuickArchiveFromInbox) {
-      inboxQuickArchiveArmedRef.current = false;
-      return;
-    }
-
-    inboxQuickArchiveArmedRef.current = true;
-
-    const disarm = () => {
-      inboxQuickArchiveArmedRef.current = false;
-    };
-
-    const handlePointerDown = () => {
-      disarm();
-    };
-
-    const handleFocusIn = (event: FocusEvent) => {
-      if (event.target instanceof HTMLElement && event.target !== document.body) {
-        disarm();
-      }
-    };
-
-    const handleSelectionChange = () => {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || selection.toString().trim().length === 0) return;
-      disarm();
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      const action = resolveInboxQuickArchiveKeyAction({
-        armed: inboxQuickArchiveArmedRef.current,
-        defaultPrevented: event.defaultPrevented,
-        key: event.key,
-        metaKey: event.metaKey,
-        ctrlKey: event.ctrlKey,
-        altKey: event.altKey,
-        target: event.target,
-        hasOpenDialog: hasBlockingShortcutDialog(document),
-      });
-
-      if (action === "ignore") return;
-
-      disarm();
-      if (action !== "archive") return;
-
-      event.preventDefault();
-      if (!archiveFromInbox.isPending) {
-        archiveFromInbox.mutate(issue.id);
-      }
-    };
-
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    document.addEventListener("focusin", handleFocusIn, true);
-    document.addEventListener("selectionchange", handleSelectionChange);
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-      document.removeEventListener("focusin", handleFocusIn, true);
-      document.removeEventListener("selectionchange", handleSelectionChange);
-      document.removeEventListener("keydown", handleKeyDown, true);
-    };
-  }, [archiveFromInbox, canQuickArchiveFromInbox, issue?.id]);
 
   const copyIssueToClipboard = async () => {
     if (!issue) return;
@@ -1100,7 +1008,6 @@ export function IssueDetail() {
 
   const isImageAttachment = (attachment: IssueAttachment) => attachment.contentType.startsWith("image/");
   const attachmentList = attachments ?? [];
-  const imageAttachments = attachmentList.filter(isImageAttachment);
   const hasAttachments = attachmentList.length > 0;
   const attachmentUploadButton = (
     <>
@@ -1157,7 +1064,7 @@ export function IssueDetail() {
       )}
 
       {issue.hiddenAt && (
-        <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <div className="flex items-center gap-2 rounded-[2px] border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           <EyeOff className="h-4 w-4 shrink-0" />
           This issue is hidden
         </div>
@@ -1176,10 +1083,10 @@ export function IssueDetail() {
           <span className="text-sm font-mono text-muted-foreground shrink-0">{issue.identifier ?? issue.id.slice(0, 8)}</span>
 
           {hasLiveRuns && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 px-2 py-0.5 text-[10px] font-medium text-cyan-600 dark:text-cyan-400 shrink-0">
+            <span className="inline-flex items-center gap-1.5 rounded-[2px] bg-[var(--status-info)]/10 border border-[var(--status-info)]/30 px-2 py-0.5 font-[var(--font-mono)] text-[9px] uppercase text-[var(--status-info)] shrink-0">
               <span className="relative flex h-1.5 w-1.5">
-                <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-cyan-400" />
+                <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-[var(--status-info)] opacity-75" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-[var(--status-info)]" />
               </span>
               Live
             </span>
@@ -1188,7 +1095,7 @@ export function IssueDetail() {
           {issue.originKind === "routine_execution" && issue.originId && (
             <Link
               to={`/routines/${issue.originId}`}
-              className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 border border-violet-500/30 px-2 py-0.5 text-[10px] font-medium text-violet-600 dark:text-violet-400 shrink-0 hover:bg-violet-500/20 transition-colors"
+              className="inline-flex items-center gap-1 rounded-[2px] bg-[var(--status-violet)]/10 border border-[var(--status-violet)]/30 px-2 py-0.5 font-[var(--font-mono)] text-[9px] uppercase text-[var(--status-violet)] shrink-0 hover:bg-[var(--status-violet)]/20 transition-colors"
             >
               <Repeat className="h-3 w-3" />
               Routine
@@ -1215,7 +1122,7 @@ export function IssueDetail() {
               {(issue.labels ?? []).slice(0, 4).map((label) => (
                 <span
                   key={label.id}
-                  className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium"
+                  className="inline-flex items-center rounded-[2px] border px-2 py-0.5 font-[var(--font-mono)] text-[9px] uppercase"
                   style={{
                     borderColor: label.color,
                     color: pickTextColorForPillBg(label.color, 0.12),
@@ -1238,7 +1145,7 @@ export function IssueDetail() {
               onClick={copyIssueToClipboard}
               title="Copy issue as markdown"
             >
-              {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+              {copied ? <Check className="h-4 w-4 text-[var(--status-active)]" /> : <Copy className="h-4 w-4" />}
             </Button>
             <Button
               variant="ghost"
@@ -1257,7 +1164,7 @@ export function IssueDetail() {
               onClick={copyIssueToClipboard}
               title="Copy issue as markdown"
             >
-              {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+              {copied ? <Check className="h-4 w-4 text-[var(--status-active)]" /> : <Copy className="h-4 w-4" />}
             </Button>
             <Button
               variant="ghost"
@@ -1280,7 +1187,7 @@ export function IssueDetail() {
               </PopoverTrigger>
             <PopoverContent className="w-44 p-1" align="end">
               <button
-                className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-accent/50 text-destructive"
+                className="flex items-center gap-2 w-full px-2 py-1.5 text-xs rounded hover:bg-[var(--sidebar-accent)] text-destructive"
                 onClick={() => {
                   updateIssue.mutate(
                     { hiddenAt: new Date().toISOString() },
@@ -1301,7 +1208,7 @@ export function IssueDetail() {
           value={issue.title}
           onSave={(title) => updateIssue.mutateAsync({ title })}
           as="h2"
-          className="text-xl font-bold"
+          className="text-xl font-[var(--font-display)] uppercase tracking-[0.06em]"
         />
 
         <InlineEditor
@@ -1356,7 +1263,7 @@ export function IssueDetail() {
           entityType: "issue",
         }}
         className="space-y-3"
-        itemClassName="rounded-lg border border-border p-3"
+        itemClassName="hud-panel rounded-[2px] border border-border p-3"
         missingBehavior="placeholder"
       />
 
@@ -1387,7 +1294,7 @@ export function IssueDetail() {
       {hasAttachments ? (
         <div
         className={cn(
-          "space-y-3 rounded-lg transition-colors",
+          "space-y-3 rounded-[2px] transition-colors",
         )}
         onDragEnter={(evt) => {
           evt.preventDefault();
@@ -1404,7 +1311,7 @@ export function IssueDetail() {
         onDrop={(evt) => void handleAttachmentDrop(evt)}
       >
         <div className="flex items-center justify-between gap-2">
-          <h3 className="text-sm font-medium text-muted-foreground">Attachments</h3>
+          <h3 className="hud-section-header text-sm font-[var(--font-display)] uppercase tracking-[0.06em] text-muted-foreground">Attachments</h3>
           {attachmentUploadButton}
         </div>
 
@@ -1414,7 +1321,7 @@ export function IssueDetail() {
 
         <div className="space-y-2">
           {attachmentList.map((attachment) => (
-            <div key={attachment.id} className="border border-border rounded-md p-2">
+            <div key={attachment.id} className="border border-border rounded-[2px] p-2">
               <div className="flex items-center justify-between gap-2">
                 <a
                   href={attachment.contentPath}
@@ -1439,35 +1346,20 @@ export function IssueDetail() {
                 {attachment.contentType} · {(attachment.byteSize / 1024).toFixed(1)} KB
               </p>
               {isImageAttachment(attachment) && (
-                <button
-                  type="button"
-                  className="block w-full text-left"
-                  onClick={() => {
-                    const idx = imageAttachments.findIndex((a) => a.id === attachment.id);
-                    setGalleryIndex(idx >= 0 ? idx : 0);
-                    setGalleryOpen(true);
-                  }}
-                >
+                <a href={attachment.contentPath} target="_blank" rel="noreferrer">
                   <img
                     src={attachment.contentPath}
                     alt={attachment.originalFilename ?? "attachment"}
-                    className="mt-2 max-h-56 rounded border border-border object-contain bg-accent/10 cursor-pointer hover:opacity-80 transition-opacity"
+                    className="mt-2 max-h-56 rounded border border-border object-contain bg-accent/10"
                     loading="lazy"
                   />
-                </button>
+                </a>
               )}
             </div>
           ))}
         </div>
         </div>
       ) : null}
-
-      <ImageGalleryModal
-        images={imageAttachments}
-        initialIndex={galleryIndex}
-        open={galleryOpen}
-        onOpenChange={setGalleryOpen}
-      />
 
       <IssueWorkspaceCard
         issue={issue}
@@ -1491,6 +1383,15 @@ export function IssueDetail() {
             <ActivityIcon className="h-3.5 w-3.5" />
             Activity
           </TabsTrigger>
+          <TabsTrigger value="deliverables" className="gap-1.5">
+            <PackageCheck className="h-3.5 w-3.5" />
+            Deliverables
+            {issueDeliverables && issueDeliverables.length > 0 && (
+              <span className="ml-1 rounded-[2px] bg-primary/10 px-1.5 py-0 font-[var(--font-mono)] text-[9px] uppercase text-primary">
+                {issueDeliverables.length}
+              </span>
+            )}
+          </TabsTrigger>
           {issuePluginTabItems.map((item) => (
             <TabsTrigger key={item.value} value={item.value}>
               {item.label}
@@ -1506,12 +1407,10 @@ export function IssueDetail() {
             feedbackDataSharingPreference={feedbackDataSharingPreference}
             feedbackTermsUrl={FEEDBACK_TERMS_URL}
             linkedRuns={timelineRuns}
-            timelineEvents={timelineEvents}
             companyId={issue.companyId}
             projectId={issue.projectId}
             issueStatus={issue.status}
             agentMap={agentMap}
-            currentUserId={currentUserId}
             draftKey={`paperclip:issue-comment-draft:${issue.id}`}
             enableReassign
             reassignOptions={commentReassignOptions}
@@ -1554,13 +1453,13 @@ export function IssueDetail() {
           {childIssues.length === 0 ? (
             <p className="text-xs text-muted-foreground">No sub-issues.</p>
           ) : (
-            <div className="border border-border rounded-lg divide-y divide-border">
+            <div className="hud-panel border border-border rounded-[2px] divide-y divide-border">
               {childIssues.map((child) => (
                 <Link
                   key={child.id}
                   to={createIssueDetailPath(child.identifier ?? child.id, location.state, location.search)}
                   state={location.state}
-                  className="flex items-center justify-between px-3 py-2 text-sm hover:bg-accent/20 transition-colors"
+                  className="flex items-center justify-between px-3 py-2 text-sm hover:bg-[var(--sidebar-accent)] transition-colors"
                 >
                   <div className="flex items-center gap-2 min-w-0">
                     <StatusIcon status={child.status} />
@@ -1584,8 +1483,8 @@ export function IssueDetail() {
 
         <TabsContent value="activity">
           {linkedRuns && linkedRuns.length > 0 && (
-            <div className="mb-3 px-3 py-2 rounded-lg border border-border">
-              <div className="text-sm font-medium text-muted-foreground mb-1">Cost Summary</div>
+            <div className="hud-panel mb-3 px-3 py-2 rounded-[2px] border border-border">
+              <div className="hud-section-header text-sm font-[var(--font-display)] uppercase tracking-[0.06em] text-muted-foreground mb-1">Cost Summary</div>
               {!issueCostSummary.hasCost && !issueCostSummary.hasTokens ? (
                 <div className="text-xs text-muted-foreground">No cost data yet.</div>
               ) : (
@@ -1622,6 +1521,37 @@ export function IssueDetail() {
           )}
         </TabsContent>
 
+        <TabsContent value="deliverables">
+          {!issueDeliverables || issueDeliverables.length === 0 ? (
+            <div className="py-6 text-center">
+              <PackageCheck className="mx-auto h-8 w-8 text-muted-foreground/40 mb-2" />
+              <p className="text-xs text-muted-foreground">No deliverables linked to this issue.</p>
+              <Link
+                to={`/deliverables`}
+                className="mt-2 inline-block text-xs text-primary hover:underline"
+              >
+                Create a deliverable →
+              </Link>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {issueDeliverables.map((d) => (
+                <Link
+                  key={d.id}
+                  to={`/deliverables/${d.id}`}
+                  className="flex items-center justify-between gap-3 rounded-[2px] border border-border p-3 hover:border-primary/30 hover:bg-[var(--sidebar-accent)] transition-colors"
+                >
+                  <div className="min-w-0">
+                    <span className="text-sm font-medium truncate block">{d.title}</span>
+                    <span className="text-[10px] text-muted-foreground capitalize">{d.type} · {d.status.replace(/_/g, " ")}</span>
+                  </div>
+                  <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+                </Link>
+              ))}
+            </div>
+          )}
+        </TabsContent>
+
         {activePluginTab && (
           <TabsContent value={activePluginTab.value}>
             <PluginSlotMount
@@ -1642,10 +1572,10 @@ export function IssueDetail() {
         <Collapsible
           open={secondaryOpen.approvals}
           onOpenChange={(open) => setSecondaryOpen((prev) => ({ ...prev, approvals: open }))}
-          className="rounded-lg border border-border"
+          className="hud-panel rounded-[2px] border border-border"
         >
           <CollapsibleTrigger className="flex w-full items-center justify-between px-3 py-2 text-left">
-            <span className="text-sm font-medium text-muted-foreground">
+            <span className="hud-section-header text-sm font-[var(--font-display)] uppercase tracking-[0.06em] text-muted-foreground">
               Linked Approvals ({linkedApprovals.length})
             </span>
             <ChevronDown
@@ -1658,7 +1588,7 @@ export function IssueDetail() {
                 <Link
                   key={approval.id}
                   to={`/approvals/${approval.id}`}
-                  className="flex items-center justify-between px-3 py-2 text-xs hover:bg-accent/20 transition-colors"
+                  className="flex items-center justify-between px-3 py-2 text-xs hover:bg-[var(--sidebar-accent)] transition-colors"
                 >
                   <div className="flex items-center gap-2">
                     <StatusBadge status={approval.status} />

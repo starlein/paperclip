@@ -32,6 +32,7 @@ export const AGENT_ADAPTER_TYPES = [
   "cursor",
   "openclaw_gateway",
   "hermes_local",
+  "lmstudio_local",
 ] as const;
 export type AgentAdapterType = (typeof AGENT_ADAPTER_TYPES)[number];
 
@@ -166,9 +167,6 @@ export type RoutineTriggerKind = (typeof ROUTINE_TRIGGER_KINDS)[number];
 export const ROUTINE_TRIGGER_SIGNING_MODES = ["bearer", "hmac_sha256"] as const;
 export type RoutineTriggerSigningMode = (typeof ROUTINE_TRIGGER_SIGNING_MODES)[number];
 
-export const ROUTINE_VARIABLE_TYPES = ["text", "textarea", "number", "boolean", "select"] as const;
-export type RoutineVariableType = (typeof ROUTINE_VARIABLE_TYPES)[number];
-
 export const ROUTINE_RUN_STATUSES = [
   "received",
   "coalesced",
@@ -198,7 +196,7 @@ export const PROJECT_COLORS = [
   "#3b82f6", // blue
 ] as const;
 
-export const APPROVAL_TYPES = ["hire_agent", "approve_ceo_strategy", "budget_override_required"] as const;
+export const APPROVAL_TYPES = ["hire_agent", "approve_ceo_strategy", "budget_override_required", "terminate_agent"] as const;
 export type ApprovalType = (typeof APPROVAL_TYPES)[number];
 
 export const APPROVAL_STATUSES = [
@@ -293,6 +291,10 @@ export const HEARTBEAT_INVOCATION_SOURCES = [
   "assignment",
   "on_demand",
   "automation",
+  "mention",
+  "approval_response",
+  "message",
+  "skill_available",
 ] as const;
 export type HeartbeatInvocationSource = (typeof HEARTBEAT_INVOCATION_SOURCES)[number];
 
@@ -451,7 +453,6 @@ export const PLUGIN_CAPABILITIES = [
   "agent.sessions.close",
   "activity.log.write",
   "metrics.write",
-  "telemetry.track",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",
@@ -702,3 +703,30 @@ export const PLUGIN_BRIDGE_ERROR_CODES = [
   "UNKNOWN",
 ] as const;
 export type PluginBridgeErrorCode = (typeof PLUGIN_BRIDGE_ERROR_CODES)[number];
+
+export const DELIVERABLE_TYPES = ["code", "document", "deployment", "mixed"] as const;
+export type DeliverableType = (typeof DELIVERABLE_TYPES)[number];
+
+export const DELIVERABLE_STATUSES = [
+  "draft",
+  "in_review",
+  "changes_requested",
+  "approved",
+  "rejected",
+] as const;
+export type DeliverableStatus = (typeof DELIVERABLE_STATUSES)[number];
+
+export const DELIVERABLE_PRIORITIES = ["critical", "high", "medium", "low"] as const;
+export type DeliverablePriority = (typeof DELIVERABLE_PRIORITIES)[number];
+
+export const DELIVERABLE_CONTENT_KINDS = ["file", "url", "markdown", "code_ref", "preview"] as const;
+export type DeliverableContentKind = (typeof DELIVERABLE_CONTENT_KINDS)[number];
+
+export const DELIVERABLE_STAGE_STATUSES = [
+  "pending",
+  "approved",
+  "changes_requested",
+  "rejected",
+  "skipped",
+] as const;
+export type DeliverableStageStatus = (typeof DELIVERABLE_STAGE_STATUSES)[number];

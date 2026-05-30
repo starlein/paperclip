@@ -134,7 +134,7 @@ export function OpenClawGatewayConfigFields({
 
       {!isCreate && (
         <>
-          <Field label="Paperclip API URL override">
+          <Field label="OhMyCompany API URL override">
             <DraftInput
               value={
                 eff(
@@ -147,6 +147,16 @@ export function OpenClawGatewayConfigFields({
               immediate
               className={inputClass}
               placeholder="https://paperclip.example"
+            />
+          </Field>
+
+          <Field label="Claimed API key path">
+            <DraftInput
+              value={eff("adapterConfig", "claimedApiKeyPath", String(config.claimedApiKeyPath ?? ""))}
+              onCommit={(v) => mark("adapterConfig", "claimedApiKeyPath", v || undefined)}
+              immediate
+              className={inputClass}
+              placeholder="~/.openclaw/workspace/paperclip-claimed-api-key.json"
             />
           </Field>
 
@@ -226,7 +236,7 @@ export function OpenClawGatewayConfigFields({
 
           <Field label="Device auth">
             <div className="text-xs text-muted-foreground leading-relaxed">
-              Always enabled for gateway agents. Paperclip persists a device key during onboarding so pairing approvals
+              Always enabled for gateway agents. OhMyCompany persists a device key during onboarding so pairing approvals
               remain stable across runs.
             </div>
           </Field>

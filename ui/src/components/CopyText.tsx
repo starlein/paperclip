@@ -1,20 +1,33 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 
 interface CopyTextProps {
   text: string;
   /** What to display. Defaults to `text`. */
   children?: React.ReactNode;
+  containerClassName?: string;
   className?: string;
+  ariaLabel?: string;
+  title?: string;
   /** Tooltip message shown after copying. Default: "Copied!" */
   copiedLabel?: string;
 }
 
-export function CopyText({ text, children, className, copiedLabel = "Copied!" }: CopyTextProps) {
+export function CopyText({
+  text,
+  children,
+  containerClassName,
+  className,
+  ariaLabel,
+  title,
+  copiedLabel = "Copied!",
+}: CopyTextProps) {
   const [visible, setVisible] = useState(false);
   const [label, setLabel] = useState(copiedLabel);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const triggerRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => () => clearTimeout(timerRef.current), []);
 
   const handleClick = useCallback(async () => {
     try {
@@ -45,10 +58,12 @@ export function CopyText({ text, children, className, copiedLabel = "Copied!" }:
   }, [copiedLabel, text]);
 
   return (
-    <span className="relative inline-flex">
+    <span className={cn("relative inline-flex", containerClassName)}>
       <button
         ref={triggerRef}
         type="button"
+        aria-label={ariaLabel}
+        title={title}
         className={cn(
           "cursor-copy hover:text-foreground transition-colors",
           className,
@@ -61,7 +76,7 @@ export function CopyText({ text, children, className, copiedLabel = "Copied!" }:
         role="status"
         aria-live="polite"
         className={cn(
-          "pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 rounded-md bg-foreground text-background px-2 py-1 text-xs whitespace-nowrap transition-opacity duration-300",
+          "pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 rounded-[2px] bg-foreground text-background px-2 py-1 text-xs font-[var(--font-mono)] whitespace-nowrap transition-opacity duration-300",
           visible ? "opacity-100" : "opacity-0",
         )}
       >

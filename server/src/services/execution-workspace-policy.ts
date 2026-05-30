@@ -185,7 +185,7 @@ export function buildExecutionWorkspaceAdapterConfig(input: {
   const hasWorkspaceControl = projectHasPolicy || issueHasWorkspaceOverrides || input.legacyUseProjectWorkspace === false;
 
   if (hasWorkspaceControl) {
-    if (input.mode === "isolated_workspace") {
+    if (input.mode === "isolated_workspace" || input.mode === "operator_branch") {
       const strategy =
         input.issueSettings?.workspaceStrategy ??
         input.projectPolicy?.workspaceStrategy ??
