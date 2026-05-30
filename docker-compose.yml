@@ -13,7 +13,7 @@ services:
       timeout: 5s
       retries: 20
   paperclip:
-    image: ghcr.io/starlein/paperclip:v2026.403.11
+    image: ghcr.io/starlein/paperclip:v2026.403.12
     build:
       context: .
       dockerfile: Dockerfile
