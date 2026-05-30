@@ -49,12 +49,6 @@ export interface HeartbeatRun {
   lastUsefulActionAt: Date | null;
   nextAction: string | null;
   contextSnapshot: Record<string, unknown> | null;
-  pausedAt: Date | null;
-  interruptedAt: Date | null;
-  interruptMessage: string | null;
-  interruptMode: string | null;
-  circuitBreakerTripped: boolean;
-  circuitBreakerReason: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

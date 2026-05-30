@@ -3,7 +3,7 @@ title: Deployment Overview
 summary: Deployment modes at a glance
 ---
 
-OhMyCompany supports three deployment configurations, from zero-friction local to internet-facing production.
+Paperclip supports three deployment configurations, from zero-friction local to internet-facing production.
 
 ## Deployment Modes
 
@@ -38,7 +38,7 @@ OhMyCompany supports three deployment configurations, from zero-friction local t
 
 ## Choosing a Mode
 
-- **Just trying OhMyCompany?** Use `local_trusted` (the default)
+- **Just trying Paperclip?** Use `local_trusted` (the default)
 - **Sharing with a team on private network?** Use `authenticated` + `private`
 - **Deploying to the cloud?** Use `authenticated` + `public`
 

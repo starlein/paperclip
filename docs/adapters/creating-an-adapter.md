@@ -3,7 +3,7 @@ title: Creating an Adapter
 summary: Guide to building a custom adapter
 ---
 
-Build a custom adapter to connect OhMyCompany to any agent runtime.
+Build a custom adapter to connect Paperclip to any agent runtime.
 
 <Tip>
 If you're using Claude Code, the `.agents/skills/create-agent-adapter` skill can guide you through the full adapter creation process interactively. Just ask Claude to create a new adapter and it will walk you through each step.
@@ -242,7 +242,7 @@ If capability flags are not set, the server falls back to legacy hardcoded lists
 
 ## Skills Injection
 
-Make OhMyCompany skills discoverable to your agent runtime without writing to the agent's working directory:
+Make Paperclip skills discoverable to your agent runtime without writing to the agent's working directory:
 
 1. **Best: tmpdir + flag** — create tmpdir, symlink skills, pass via CLI flag, clean up after
 2. **Acceptable: global config dir** — symlink to the runtime's global plugins directory

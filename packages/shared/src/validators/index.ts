@@ -364,12 +364,3 @@ export {
   type SetPluginState,
   type ListPluginState,
 } from "./plugin.js";
-
-export {
-  createDeliverableSchema,
-  updateDeliverableSchema,
-  addDeliverableCommentSchema,
-  type CreateDeliverable,
-  type UpdateDeliverable,
-  type AddDeliverableComment,
-} from "./deliverable.js";

@@ -4,7 +4,7 @@ import { FlaskConical } from "lucide-react";
 import { instanceSettingsApi } from "@/api/instanceSettings";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
-import { cn } from "../lib/utils";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
 
 export function InstanceExperimentalSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -60,7 +60,7 @@ export function InstanceExperimentalSettings() {
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <FlaskConical className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-lg font-semibold font-[var(--font-display)] uppercase tracking-[0.06em]">Experimental</h1>
+          <h1 className="text-lg font-semibold">Experimental</h1>
         </div>
         <p className="text-sm text-muted-foreground">
           Opt into features that are still being evaluated before they become default behavior.
@@ -73,7 +73,7 @@ export function InstanceExperimentalSettings() {
         </div>
       )}
 
-      <section className="rounded-[2px] border border-border bg-card p-5 hud-panel hud-shimmer">
+      <section className="rounded-xl border border-border bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
             <h2 className="text-sm font-semibold">Enable Isolated Workspaces</h2>
@@ -82,28 +82,16 @@ export function InstanceExperimentalSettings() {
               and existing issue runs.
             </p>
           </div>
-          <button
-            type="button"
-            data-slot="toggle"
-            aria-label="Toggle isolated workspaces experimental setting"
+          <ToggleSwitch
+            checked={enableIsolatedWorkspaces}
+            onCheckedChange={() => toggleMutation.mutate({ enableIsolatedWorkspaces: !enableIsolatedWorkspaces })}
             disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              enableIsolatedWorkspaces ? "bg-[var(--status-active)]" : "bg-muted",
-            )}
-            onClick={() => toggleMutation.mutate({ enableIsolatedWorkspaces: !enableIsolatedWorkspaces })}
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                enableIsolatedWorkspaces ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
+            aria-label="Toggle isolated workspaces experimental setting"
+          />
         </div>
       </section>
 
-      <section className="rounded-[2px] border border-border bg-card p-5 hud-panel hud-shimmer">
+      <section className="rounded-xl border border-border bg-card p-5">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1.5">
             <h2 className="text-sm font-semibold">Auto-Restart Dev Server When Idle</h2>
@@ -112,26 +100,12 @@ export function InstanceExperimentalSettings() {
               automatically when backend changes or migrations make the current boot stale.
             </p>
           </div>
-          <button
-            type="button"
-            data-slot="toggle"
-            aria-label="Toggle guarded dev-server auto-restart"
+          <ToggleSwitch
+            checked={autoRestartDevServerWhenIdle}
+            onCheckedChange={() => toggleMutation.mutate({ autoRestartDevServerWhenIdle: !autoRestartDevServerWhenIdle })}
             disabled={toggleMutation.isPending}
-            className={cn(
-              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-              autoRestartDevServerWhenIdle ? "bg-[var(--status-active)]" : "bg-muted",
-            )}
-            onClick={() =>
-              toggleMutation.mutate({ autoRestartDevServerWhenIdle: !autoRestartDevServerWhenIdle })
-            }
-          >
-            <span
-              className={cn(
-                "inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform",
-                autoRestartDevServerWhenIdle ? "translate-x-4.5" : "translate-x-0.5",
-              )}
-            />
-          </button>
+            aria-label="Toggle guarded dev-server auto-restart"
+          />
         </div>
       </section>
     </div>

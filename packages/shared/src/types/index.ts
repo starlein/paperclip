@@ -289,12 +289,3 @@ export type {
   PluginDatabaseNamespaceMode,
   PluginDatabaseNamespaceStatus,
 } from "./plugin.js";
-export type {
-  Deliverable,
-  DeliverableContent,
-  DeliverableReviewStage,
-  DeliverableComment,
-  ReviewPipelineTemplate,
-  ReviewPipelineTemplateStage,
-  ProjectReviewDefault,
-} from "./deliverable.js";

@@ -160,7 +160,7 @@ function sourceMeta(sourceBadge: CompanySkillSourceBadge, sourceLabel: string | 
     case "local":
       return { icon: Folder, label: sourceLabel ?? "Folder", managedLabel: "Folder managed" };
     case "paperclip":
-      return { icon: Paperclip, label: sourceLabel ?? "OH MY Company", managedLabel: "OH MY Company managed" };
+      return { icon: Paperclip, label: sourceLabel ?? "Paperclip", managedLabel: "Paperclip managed" };
     default:
       return { icon: Boxes, label: sourceLabel ?? "Catalog", managedLabel: "Catalog managed" };
   }
@@ -318,7 +318,7 @@ function SkillTree({
             <div key={node.path ?? node.name}>
               <div
                 className={cn(
-                  "group grid w-full grid-cols-[minmax(0,1fr)_2.25rem] items-center gap-x-1 pr-3 text-left text-sm text-muted-foreground hover:bg-[var(--sidebar-accent)] hover:text-foreground",
+                  "group grid w-full grid-cols-[minmax(0,1fr)_2.25rem] items-center gap-x-1 pr-3 text-left text-sm text-muted-foreground hover:bg-accent/30 hover:text-foreground",
                   SKILL_TREE_ROW_HEIGHT_CLASS,
                 )}
               >
@@ -335,7 +335,7 @@ function SkillTree({
                 </button>
                 <button
                   type="button"
-                  className="flex h-9 w-9 items-center justify-center self-center rounded-sm text-muted-foreground opacity-70 transition-[background-color,color,opacity] hover:bg-[var(--sidebar-accent)] hover:text-foreground group-hover:opacity-100"
+                  className="flex h-9 w-9 items-center justify-center self-center rounded-sm text-muted-foreground opacity-70 transition-[background-color,color,opacity] hover:bg-accent hover:text-foreground group-hover:opacity-100"
                   onClick={() => node.path && onToggleDir(node.path)}
                 >
                   {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
@@ -361,7 +361,7 @@ function SkillTree({
           <Link
             key={node.path ?? node.name}
             className={cn(
-              "flex w-full items-center gap-2 pr-3 text-left text-sm text-muted-foreground hover:bg-[var(--sidebar-accent)] hover:text-foreground",
+              "flex w-full items-center gap-2 pr-3 text-left text-sm text-muted-foreground hover:bg-accent/30 hover:text-foreground",
               SKILL_TREE_ROW_HEIGHT_CLASS,
               node.path === selectedPath && "text-foreground",
             )}
@@ -428,7 +428,7 @@ function SkillList({
           <div key={skill.id} className="border-b border-border">
             <div
               className={cn(
-                "group grid grid-cols-[minmax(0,1fr)_2.25rem] items-center gap-x-1 px-3 py-1.5 hover:bg-[var(--sidebar-accent)]",
+                "group grid grid-cols-[minmax(0,1fr)_2.25rem] items-center gap-x-1 px-3 py-1.5 hover:bg-accent/30",
                 skill.id === selectedSkillId && "text-foreground",
               )}
             >
@@ -454,7 +454,7 @@ function SkillList({
               </Link>
               <button
                 type="button"
-                className="flex h-9 w-9 shrink-0 items-center justify-center self-center rounded-sm text-muted-foreground opacity-80 transition-[background-color,color,opacity] hover:bg-[var(--sidebar-accent)] hover:text-foreground group-hover:opacity-100"
+                className="flex h-9 w-9 shrink-0 items-center justify-center self-center rounded-sm text-muted-foreground opacity-80 transition-[background-color,color,opacity] hover:bg-accent hover:text-foreground group-hover:opacity-100"
                 onClick={() => onToggleSkill(skill.id)}
                 aria-label={expanded ? `Collapse ${skill.name}` : `Expand ${skill.name}`}
               >
@@ -560,7 +560,7 @@ function SkillPane({
       <div className="border-b border-border px-5 py-4">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
-            <h1 className="flex items-center gap-2 truncate text-2xl font-[var(--font-display)] uppercase tracking-[0.06em]">
+            <h1 className="flex items-center gap-2 truncate text-2xl font-semibold">
               <SourceIcon className="h-5 w-5 shrink-0 text-muted-foreground" />
               {detail.name}
             </h1>
@@ -919,7 +919,7 @@ export function CompanySkills() {
       pushToast({
         tone: "success",
         title: "Skill created",
-        body: `${skill.name} is now editable in the OH MY Company workspace.`,
+        body: `${skill.name} is now editable in the Paperclip workspace.`,
       });
     },
     onError: (error) => {
@@ -1139,7 +1139,7 @@ export function CompanySkills() {
               href="https://skills.sh"
               target="_blank"
               rel="noreferrer"
-              className="flex items-start justify-between rounded-[2px] border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-[var(--sidebar-accent)]"
+              className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-accent/40"
             >
               <span>
                 <span className="block font-medium">Browse skills.sh</span>
@@ -1153,7 +1153,7 @@ export function CompanySkills() {
               href="https://github.com/search?q=SKILL.md&type=code"
               target="_blank"
               rel="noreferrer"
-              className="flex items-start justify-between rounded-[2px] border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-[var(--sidebar-accent)]"
+              className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-accent/40"
             >
               <span>
                 <span className="block font-medium">Search GitHub</span>
@@ -1173,7 +1173,7 @@ export function CompanySkills() {
           <div className="border-b border-border px-4 py-3">
             <div className="flex items-center justify-between gap-2">
               <div>
-                <h1 className="text-base font-[var(--font-display)] uppercase tracking-[0.06em]">Skills</h1>
+                <h1 className="text-base font-semibold">Skills</h1>
                 <p className="text-xs text-muted-foreground">
                   {skillsQuery.data?.length ?? 0} available
                 </p>

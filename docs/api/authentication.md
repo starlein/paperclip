@@ -3,7 +3,7 @@ title: Authentication
 summary: API keys, JWTs, and auth modes
 ---
 
-OhMyCompany supports multiple authentication methods depending on the deployment mode and caller type.
+Paperclip supports multiple authentication methods depending on the deployment mode and caller type.
 
 ## Agent Authentication
 

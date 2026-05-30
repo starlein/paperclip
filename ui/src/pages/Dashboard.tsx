@@ -3,11 +3,11 @@ import { Link } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { dashboardApi } from "../api/dashboard";
 import { activityApi } from "../api/activity";
+import { accessApi } from "../api/access";
 import { issuesApi } from "../api/issues";
 import { agentsApi } from "../api/agents";
 import { projectsApi } from "../api/projects";
-import { heartbeatsApi } from "../api/heartbeats";
-import { deliverablesApi } from "../api/deliverables";
+import { buildCompanyUserProfileMap } from "../lib/company-members";
 import { useCompany } from "../context/CompanyContext";
 import { useDialog } from "../context/DialogContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -20,12 +20,14 @@ import { ActivityRow } from "../components/ActivityRow";
 import { Identity } from "../components/Identity";
 import { timeAgo } from "../lib/timeAgo";
 import { cn, formatCents } from "../lib/utils";
-import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle, PackageCheck } from "lucide-react";
+import { Bot, CircleDot, DollarSign, ShieldCheck, LayoutDashboard, PauseCircle } from "lucide-react";
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { PageSkeleton } from "../components/PageSkeleton";
 import type { Agent, Issue } from "@paperclipai/shared";
 import { PluginSlotOutlet } from "@/plugins/slots";
+
+const DASHBOARD_ACTIVITY_LIMIT = 10;
 
 function getRecentIssues(issues: Issue[]): Issue[] {
   return [...issues]
@@ -58,8 +60,8 @@ export function Dashboard() {
   });
 
   const { data: activity } = useQuery({
-    queryKey: queryKeys.activity(selectedCompanyId!),
-    queryFn: () => activityApi.list(selectedCompanyId!),
+    queryKey: [...queryKeys.activity(selectedCompanyId!), { limit: DASHBOARD_ACTIVITY_LIMIT }],
+    queryFn: () => activityApi.list(selectedCompanyId!, { limit: DASHBOARD_ACTIVITY_LIMIT }),
     enabled: !!selectedCompanyId,
   });
 
@@ -75,21 +77,15 @@ export function Dashboard() {
     enabled: !!selectedCompanyId,
   });
 
-  const { data: runs } = useQuery({
-    queryKey: queryKeys.heartbeats(selectedCompanyId!),
-    queryFn: () => heartbeatsApi.list(selectedCompanyId!),
+  const { data: companyMembers } = useQuery({
+    queryKey: queryKeys.access.companyUserDirectory(selectedCompanyId!),
+    queryFn: () => accessApi.listUserDirectory(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
 
-  const { data: deliverables } = useQuery({
-    queryKey: queryKeys.deliverables.list(selectedCompanyId!),
-    queryFn: () => deliverablesApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
-  });
-
-  const pendingReviewCount = useMemo(
-    () => (deliverables ?? []).filter((d) => d.status === "in_review" || d.status === "changes_requested").length,
-    [deliverables],
+  const userProfileMap = useMemo(
+    () => buildCompanyUserProfileMap(companyMembers?.users),
+    [companyMembers?.users],
   );
 
   const recentIssues = issues ? getRecentIssues(issues) : [];
@@ -180,7 +176,7 @@ export function Dashboard() {
       return (
         <EmptyState
           icon={LayoutDashboard}
-          message="Welcome to OhMyCompany. Set up your first company and agent to get started."
+          message="Welcome to Paperclip. Set up your first company and agent to get started."
           action="Get Started"
           onAction={openOnboarding}
         />
@@ -202,16 +198,16 @@ export function Dashboard() {
       {error && <p className="text-sm text-destructive">{error.message}</p>}
 
       {hasNoAgents && (
-        <div className="flex items-center justify-between gap-3 rounded-[2px] border border-[var(--status-warning)]/25 bg-[var(--status-warning)]/[0.06] px-4 py-3 hud-panel">
+        <div className="flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-500/25 dark:bg-amber-950/60">
           <div className="flex items-center gap-2.5">
-            <Bot className="h-4 w-4 text-[var(--status-warning)] shrink-0" />
-            <p className="text-sm font-[var(--font-mono)] text-[var(--status-warning)]">
+            <Bot className="h-4 w-4 text-amber-600 dark:text-amber-400 shrink-0" />
+            <p className="text-sm text-amber-900 dark:text-amber-100">
               You have no agents.
             </p>
           </div>
           <button
             onClick={() => openOnboarding({ initialStep: 2, companyId: selectedCompanyId! })}
-            className="text-[11px] font-semibold font-[var(--font-display)] uppercase tracking-[0.04em] text-[var(--status-warning)] hover:text-foreground underline underline-offset-2 shrink-0"
+            className="text-sm font-medium text-amber-700 hover:text-amber-900 dark:text-amber-300 dark:hover:text-amber-100 underline underline-offset-2 shrink-0"
           >
             Create one here
           </button>
@@ -223,25 +219,25 @@ export function Dashboard() {
       {data && (
         <>
           {data.budgets.activeIncidents > 0 ? (
-            <div className="flex items-start justify-between gap-3 rounded-[2px] border border-[var(--status-error)]/20 bg-[var(--status-error)]/[0.06] px-4 py-3 hud-panel">
+            <div className="flex items-start justify-between gap-3 rounded-xl border border-red-500/20 bg-[linear-gradient(180deg,rgba(255,80,80,0.12),rgba(255,255,255,0.02))] px-4 py-3">
               <div className="flex items-start gap-2.5">
-                <PauseCircle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--status-error)]" />
+                <PauseCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-300" />
                 <div>
-                  <p className="text-sm font-semibold font-[var(--font-display)] uppercase tracking-[0.04em] text-[var(--status-error)]">
+                  <p className="text-sm font-medium text-red-50">
                     {data.budgets.activeIncidents} active budget incident{data.budgets.activeIncidents === 1 ? "" : "s"}
                   </p>
-                  <p className="text-[11px] font-[var(--font-mono)] text-[var(--status-error)]/70">
+                  <p className="text-xs text-red-100/70">
                     {data.budgets.pausedAgents} agents paused · {data.budgets.pausedProjects} projects paused · {data.budgets.pendingApprovals} pending budget approvals
                   </p>
                 </div>
               </div>
-              <Link to="/costs" className="text-[11px] font-semibold font-[var(--font-display)] uppercase tracking-[0.04em] underline underline-offset-2 text-[var(--status-error)]">
+              <Link to="/costs" className="text-sm underline underline-offset-2 text-red-100">
                 Open budgets
               </Link>
             </div>
           ) : null}
 
-          <div className="grid grid-cols-2 xl:grid-cols-5 gap-1 sm:gap-2" style={{ containerType: "inline-size" }}>
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-1 sm:gap-2">
             <MetricCard
               icon={Bot}
               value={data.agents.active + data.agents.running + data.agents.paused + data.agents.error}
@@ -293,20 +289,11 @@ export function Dashboard() {
                 </span>
               }
             />
-            <MetricCard
-              icon={PackageCheck}
-              value={pendingReviewCount}
-              label="Pending Reviews"
-              to="/deliverables"
-              description={
-                <span>Deliverables awaiting your review</span>
-              }
-            />
           </div>
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <ChartCard title="Run Activity" subtitle="Last 14 days">
-              <RunActivityChart runs={runs ?? []} />
+              <RunActivityChart activity={data.runActivity} />
             </ChartCard>
             <ChartCard title="Issues by Priority" subtitle="Last 14 days">
               <PriorityChart issues={issues ?? []} />
@@ -315,7 +302,7 @@ export function Dashboard() {
               <IssueStatusChart issues={issues ?? []} />
             </ChartCard>
             <ChartCard title="Success Rate" subtitle="Last 14 days">
-              <SuccessRateChart runs={runs ?? []} />
+              <SuccessRateChart activity={data.runActivity} />
             </ChartCard>
           </div>
 
@@ -323,22 +310,23 @@ export function Dashboard() {
             slotTypes={["dashboardWidget"]}
             context={{ companyId: selectedCompanyId }}
             className="grid gap-4 md:grid-cols-2"
-            itemClassName="rounded-[2px] border bg-card p-4 hud-panel hud-shimmer"
+            itemClassName="rounded-lg border bg-card p-4 shadow-sm"
           />
 
           <div className="grid md:grid-cols-2 gap-4">
             {/* Recent Activity */}
             {recentActivity.length > 0 && (
               <div className="min-w-0">
-                <h3 className="hud-section-header mb-3">
+                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
                   Recent Activity
                 </h3>
-                <div className="border border-border divide-y divide-border overflow-hidden rounded-[2px]">
+                <div className="border border-border divide-y divide-border overflow-hidden">
                   {recentActivity.map((event) => (
                     <ActivityRow
                       key={event.id}
                       event={event}
                       agentMap={agentMap}
+                      userProfileMap={userProfileMap}
                       entityNameMap={entityNameMap}
                       entityTitleMap={entityTitleMap}
                       className={animatedActivityIds.has(event.id) ? "activity-row-enter" : undefined}
@@ -350,20 +338,20 @@ export function Dashboard() {
 
             {/* Recent Tasks */}
             <div className="min-w-0">
-              <h3 className="hud-section-header mb-3">
+              <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">
                 Recent Tasks
               </h3>
               {recentIssues.length === 0 ? (
-                <div className="border border-border rounded-[2px] p-4 hud-panel">
-                  <p className="text-sm font-[var(--font-mono)] text-muted-foreground">No tasks yet.</p>
+                <div className="border border-border p-4">
+                  <p className="text-sm text-muted-foreground">No tasks yet.</p>
                 </div>
               ) : (
-                <div className="border border-border divide-y divide-border overflow-hidden rounded-[2px]">
+                <div className="border border-border divide-y divide-border overflow-hidden">
                   {recentIssues.slice(0, 10).map((issue) => (
                     <Link
                       key={issue.id}
                       to={`/issues/${issue.identifier ?? issue.id}`}
-                      className="px-4 py-3 text-sm cursor-pointer hover:bg-[var(--sidebar-accent)] transition-colors no-underline text-inherit block"
+                      className="px-4 py-3 text-sm cursor-pointer hover:bg-accent/50 transition-colors no-underline text-inherit block"
                     >
                       <div className="flex items-start gap-2 sm:items-center sm:gap-3">
                         {/* Status icon - left column on mobile */}
@@ -378,7 +366,7 @@ export function Dashboard() {
                           </span>
                           <span className="flex items-center gap-2 sm:order-1 sm:shrink-0">
                             <span className="hidden sm:inline-flex"><StatusIcon status={issue.status} /></span>
-                            <span className="text-[10px] font-[var(--font-mono)] text-muted-foreground">
+                            <span className="text-xs font-mono text-muted-foreground">
                               {issue.identifier ?? issue.id.slice(0, 8)}
                             </span>
                             {issue.assigneeAgentId && (() => {
