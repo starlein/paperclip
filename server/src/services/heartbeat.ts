@@ -110,6 +110,7 @@ import {
   resolveSessionCompactionPolicy,
   type SessionCompactionPolicy,
 } from "@paperclipai/adapter-utils";
+import { getCodexModelCompactionPolicy } from "@paperclipai/adapter-codex-local";
 import {
   readPaperclipSkillSyncPreference,
   writePaperclipSkillSyncPreference,
@@ -1133,7 +1134,13 @@ function formatCount(value: number | null | undefined) {
 }
 
 export function parseSessionCompactionPolicy(agent: typeof agents.$inferSelect): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig).policy;
+  let modelCompactionPolicy = null;
+  if (agent.adapterType === "codex_local") {
+    const config = typeof agent.runtimeConfig === "object" && agent.runtimeConfig !== null ? agent.runtimeConfig as Record<string, unknown> : {};
+    const model = typeof config.model === "string" ? config.model : null;
+    modelCompactionPolicy = getCodexModelCompactionPolicy(model);
+  }
+  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig, modelCompactionPolicy).policy;
 }
 
 export function resolveRuntimeSessionParamsForWorkspace(input: {

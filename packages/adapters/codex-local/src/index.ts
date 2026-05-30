@@ -26,6 +26,44 @@ export const models = [
   { id: "codex-mini-latest", label: "Codex Mini" },
 ];
 
+/**
+ * Known context window sizes (in tokens) for Codex models.
+ * Only models with notably smaller windows need entries here — larger flagship models
+ * are left to Codex's native context management. The threshold used for session
+ * compaction is set conservatively at 70% of the context window to leave headroom.
+ */
+export const CODEX_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  "gpt-5.3-codex-spark": 131_072,
+  "gpt-5-mini": 131_072,
+  "gpt-5-nano": 32_768,
+  "codex-mini-latest": 131_072,
+};
+
+export type CodexModelCompactionPolicy = {
+  enabled: boolean;
+  maxRawInputTokens: number;
+  maxSessionRuns: number;
+  maxSessionAgeHours: number;
+};
+
+/**
+ * Returns a session compaction policy for models with a known (smaller) context window,
+ * or null for models where Codex's native context management should be trusted.
+ */
+export function getCodexModelCompactionPolicy(
+  model: string | null | undefined,
+): CodexModelCompactionPolicy | null {
+  const normalizedModel = typeof model === "string" ? model.trim() : "";
+  const contextWindow = CODEX_MODEL_CONTEXT_WINDOWS[normalizedModel];
+  if (!contextWindow) return null;
+  return {
+    enabled: true,
+    maxRawInputTokens: Math.floor(contextWindow * 0.7),
+    maxSessionRuns: 0,
+    maxSessionAgeHours: 0,
+  };
+}
+
 export const agentConfigurationDoc = `# codex_local agent configuration
 
 Adapter: codex_local
