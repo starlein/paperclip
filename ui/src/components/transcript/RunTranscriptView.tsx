@@ -7,7 +7,6 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
-  GitCompare,
   TerminalSquare,
   User,
   Wrench,
@@ -94,12 +93,6 @@ type TranscriptBlock =
       lines: Array<{ ts: string; text: string }>;
     }
   | {
-      type: "system_group";
-      ts: string;
-      endTs?: string;
-      lines: Array<{ ts: string; text: string }>;
-    }
-  | {
       type: "stdout";
       ts: string;
       text: string;
@@ -111,16 +104,6 @@ type TranscriptBlock =
       tone: "info" | "warn" | "error" | "neutral";
       text: string;
       detail?: string;
-    }
-  | {
-      type: "diff_group";
-      ts: string;
-      endTs?: string;
-      filePath?: string;
-      hunks: Array<{
-        changeType: "add" | "remove" | "context" | "hunk" | "file_header" | "truncation";
-        text: string;
-      }>;
     };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -508,10 +491,6 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
         label: "result",
         tone: entry.isError ? "error" : "info",
         text: entry.text.trim() || entry.errors[0] || (entry.isError ? "Run failed" : "Completed"),
-        detail:
-          !entry.isError && entry.text.trim().length > 0
-            ? `${formatTokens(entry.inputTokens)} / ${formatTokens(entry.outputTokens)} / $${entry.costUsd.toFixed(6)}`
-            : undefined,
       });
       continue;
     }
@@ -564,19 +543,13 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
         }
         continue;
       }
-      // Batch consecutive system events into a single collapsible group
-      const prev = blocks[blocks.length - 1];
-      if (prev && prev.type === "system_group") {
-        prev.lines.push({ ts: entry.ts, text: entry.text });
-        prev.endTs = entry.ts;
-      } else {
-        blocks.push({
-          type: "system_group",
-          ts: entry.ts,
-          endTs: entry.ts,
-          lines: [{ ts: entry.ts, text: entry.text }],
-        });
-      }
+      blocks.push({
+        type: "event",
+        ts: entry.ts,
+        label: "system",
+        tone: "warn",
+        text: entry.text,
+      });
       continue;
     }
 
@@ -588,28 +561,6 @@ export function normalizeTranscript(entries: TranscriptEntry[], streaming: boole
       activeCommandBlock.result = activeCommandBlock.result
         ? `${activeCommandBlock.result}${activeCommandBlock.result.endsWith("\n") || entry.text.startsWith("\n") ? entry.text : `\n${entry.text}`}`
         : entry.text;
-      continue;
-    }
-
-    // ── Diff entries — accumulate into diff_group blocks ──────────
-    if (entry.kind === "diff") {
-      const prev = blocks[blocks.length - 1];
-      if (prev && prev.type === "diff_group") {
-        if (entry.changeType === "file_header") {
-          // New file in the same diff block — update filePath
-          prev.filePath = entry.text;
-        }
-        prev.hunks.push({ changeType: entry.changeType, text: entry.text });
-        prev.endTs = entry.ts;
-      } else {
-        blocks.push({
-          type: "diff_group",
-          ts: entry.ts,
-          endTs: entry.ts,
-          filePath: entry.changeType === "file_header" ? entry.text : undefined,
-          hunks: [{ changeType: entry.changeType, text: entry.text }],
-        });
-      }
       continue;
     }
 
@@ -647,7 +598,6 @@ function TranscriptMessageBlock({
         </div>
       )}
       <MarkdownBody
-        linkIssueReferences={false}
         className={cn(
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           compact ? "text-xs leading-5 text-foreground/85" : "text-sm",
@@ -679,7 +629,6 @@ function TranscriptThinkingBlock({
 }) {
   return (
     <MarkdownBody
-      linkIssueReferences={false}
       className={cn(
         "italic text-foreground/70 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
         density === "compact" ? "text-[11px] leading-5" : "text-sm leading-6",
@@ -709,21 +658,21 @@ function TranscriptToolCard({
         : "Completed";
   const statusTone =
     block.status === "running"
-      ? "text-cyan-700 dark:text-cyan-300"
+      ? "text-[var(--primary)]"
       : block.status === "error"
-        ? "text-red-700 dark:text-red-300"
-        : "text-emerald-700 dark:text-emerald-300";
+        ? "text-[var(--status-error)]"
+        : "text-[var(--status-active)]";
   const detailsClass = cn(
     "space-y-3",
-    block.status === "error" && "rounded-xl border border-red-500/20 bg-red-500/[0.06] p-3",
+    block.status === "error" && "rounded-[2px] border border-[var(--status-error)]/20 bg-[var(--status-error)]/[0.06] p-3",
   );
   const iconClass = cn(
     "mt-0.5 h-3.5 w-3.5 shrink-0",
     block.status === "error"
-      ? "text-red-600 dark:text-red-300"
+      ? "text-[var(--status-error)]"
       : block.status === "completed"
-        ? "text-emerald-600 dark:text-emerald-300"
-        : "text-cyan-600 dark:text-cyan-300",
+        ? "text-[var(--status-active)]"
+        : "text-[var(--primary)]",
   );
   const summary = block.status === "running"
     ? summarizeToolInput(block.name, block.input, density)
@@ -732,7 +681,7 @@ function TranscriptToolCard({
       : summarizeToolResult(block.result, block.isError, density);
 
   return (
-    <div className={cn(block.status === "error" && "rounded-xl border border-red-500/20 bg-red-500/[0.04] p-3")}>
+    <div className={cn(block.status === "error" && "rounded-[2px] border border-[var(--status-error)]/20 bg-[var(--status-error)]/[0.04] p-3")}>
       <div className="flex items-start gap-2">
         {block.status === "error" ? (
           <CircleAlert className={iconClass} />
@@ -781,7 +730,7 @@ function TranscriptToolCard({
                 </div>
                 <pre className={cn(
                   "overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px]",
-                  block.status === "error" ? "text-red-700 dark:text-red-300" : "text-foreground/80",
+                  block.status === "error" ? "text-[var(--status-error)]" : "text-foreground/80",
                 )}>
                   {block.result ? formatToolPayload(block.result) : "Waiting for result..."}
                 </pre>
@@ -822,11 +771,11 @@ function TranscriptCommandGroup({
     ? summarizeToolInput("command_execution", runningItem.input, density)
     : null;
   const statusTone = isRunning
-      ? "text-cyan-700 dark:text-cyan-300"
+      ? "text-[var(--primary)]"
       : "text-foreground/70";
 
   return (
-    <div className={cn(showExpandedErrorState && "rounded-xl border border-red-500/20 bg-red-500/[0.04] p-3")}>
+    <div className={cn(showExpandedErrorState && "rounded-[2px] border border-[var(--status-error)]/20 bg-[var(--status-error)]/[0.04] p-3")}>
       <div
         role="button"
         tabIndex={0}
@@ -850,7 +799,7 @@ function TranscriptCommandGroup({
                 "inline-flex h-6 w-6 items-center justify-center rounded-full border shadow-sm",
                 index > 0 && "-ml-1.5",
                 isRunning
-                  ? "border-cyan-500/25 bg-cyan-500/[0.08] text-cyan-600 dark:text-cyan-300"
+                  ? "border-[var(--primary)]/25 bg-[var(--primary)]/[0.08] text-[var(--primary)]"
                   : "border-border/70 bg-background text-foreground/55",
                 isRunning && "animate-pulse",
               )}
@@ -890,16 +839,16 @@ function TranscriptCommandGroup({
         </button>
       </div>
       {open && (
-        <div className={cn("mt-3 space-y-3", hasError && "rounded-xl border border-red-500/20 bg-red-500/[0.06] p-3")}>
+        <div className={cn("mt-3 space-y-3", hasError && "rounded-[2px] border border-[var(--status-error)]/20 bg-[var(--status-error)]/[0.06] p-3")}>
           {block.items.map((item, index) => (
             <div key={`${item.ts}-${index}`} className="space-y-2">
               <div className="flex items-center gap-2">
                 <span className={cn(
                   "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
                   item.status === "error"
-                    ? "border-red-500/25 bg-red-500/[0.08] text-red-600 dark:text-red-300"
+                    ? "border-[var(--status-error)]/25 bg-[var(--status-error)]/[0.08] text-[var(--status-error)]"
                     : item.status === "running"
-                      ? "border-cyan-500/25 bg-cyan-500/[0.08] text-cyan-600 dark:text-cyan-300"
+                      ? "border-[var(--primary)]/25 bg-[var(--primary)]/[0.08] text-[var(--primary)]"
                       : "border-border/70 bg-background text-foreground/55",
                 )}>
                   <TerminalSquare className="h-3 w-3" />
@@ -911,7 +860,7 @@ function TranscriptCommandGroup({
               {item.result && (
                 <pre className={cn(
                   "overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px]",
-                  item.status === "error" ? "text-red-700 dark:text-red-300" : "text-foreground/80",
+                  item.status === "error" ? "text-[var(--status-error)]" : "text-foreground/80",
                 )}>
                   {formatToolPayload(item.result)}
                 </pre>
@@ -950,11 +899,11 @@ function TranscriptToolGroup({
     ? summarizeToolInput(runningItem.name, runningItem.input, density)
     : null;
   const statusTone = isRunning
-    ? "text-cyan-700 dark:text-cyan-300"
+    ? "text-[var(--primary)]"
     : "text-foreground/70";
 
   return (
-    <div className="rounded-xl border border-border/40 bg-muted/[0.25]">
+    <div className="rounded-[2px] border border-border/40 bg-muted/[0.25]">
       <div
         role="button"
         tabIndex={0}
@@ -973,9 +922,9 @@ function TranscriptToolGroup({
                   "inline-flex h-6 w-6 items-center justify-center rounded-full border shadow-sm",
                   index > 0 && "-ml-1.5",
                   isItemRunning
-                    ? "border-cyan-500/25 bg-cyan-500/[0.08] text-cyan-600 dark:text-cyan-300"
+                    ? "border-[var(--primary)]/25 bg-[var(--primary)]/[0.08] text-[var(--primary)]"
                     : isItemError
-                      ? "border-red-500/25 bg-red-500/[0.08] text-red-600 dark:text-red-300"
+                      ? "border-[var(--status-error)]/25 bg-[var(--status-error)]/[0.08] text-[var(--status-error)]"
                       : "border-border/70 bg-background text-foreground/55",
                   isItemRunning && "animate-pulse",
                 )}
@@ -1005,16 +954,16 @@ function TranscriptToolGroup({
         </button>
       </div>
       {open && (
-        <div className={cn("space-y-2 border-t border-border/30 px-3 py-3", hasError && "rounded-b-xl")}>
+        <div className={cn("space-y-2 border-t border-border/30 px-3 py-3", hasError && "rounded-b-[2px]")}>
           {block.items.map((item, index) => (
             <div key={`${item.ts}-${index}`} className="space-y-1.5">
               <div className="flex items-center gap-2">
                 <span className={cn(
                   "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full border",
                   item.status === "error"
-                    ? "border-red-500/25 bg-red-500/[0.08] text-red-600 dark:text-red-300"
+                    ? "border-[var(--status-error)]/25 bg-[var(--status-error)]/[0.08] text-[var(--status-error)]"
                     : item.status === "running"
-                      ? "border-cyan-500/25 bg-cyan-500/[0.08] text-cyan-600 dark:text-cyan-300"
+                      ? "border-[var(--primary)]/25 bg-[var(--primary)]/[0.08] text-[var(--primary)]"
                       : "border-border/70 bg-background text-foreground/55",
                 )}>
                   <Wrench className="h-3 w-3" />
@@ -1023,9 +972,9 @@ function TranscriptToolGroup({
                   {humanizeLabel(item.name)}
                 </span>
                 <span className={cn("text-[10px] font-semibold uppercase tracking-[0.14em]",
-                  item.status === "running" ? "text-cyan-700 dark:text-cyan-300"
-                  : item.status === "error" ? "text-red-700 dark:text-red-300"
-                  : "text-emerald-700 dark:text-emerald-300"
+                  item.status === "running" ? "text-[var(--primary)]"
+                  : item.status === "error" ? "text-[var(--status-error)]"
+                  : "text-[var(--status-active)]"
                 )}>
                   {item.status === "running" ? "Running" : item.status === "error" ? "Errored" : "Completed"}
                 </span>
@@ -1042,7 +991,7 @@ function TranscriptToolGroup({
                     <div className="mb-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">Result</div>
                     <pre className={cn(
                       "overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px]",
-                      item.status === "error" ? "text-red-700 dark:text-red-300" : "text-foreground/80",
+                      item.status === "error" ? "text-[var(--status-error)]" : "text-foreground/80",
                     )}>
                       {formatToolPayload(item.result)}
                     </pre>
@@ -1067,11 +1016,11 @@ function TranscriptActivityRow({
   return (
     <div className="flex items-start gap-2">
       {block.status === "completed" ? (
-        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-300" />
+        <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--status-active)]" />
       ) : (
         <span className="relative mt-1 flex h-2.5 w-2.5 shrink-0">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-70" />
-          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-cyan-500" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--primary)] opacity-70" />
+          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-[var(--primary)]" />
         </span>
       )}
       <div className={cn(
@@ -1094,11 +1043,11 @@ function TranscriptEventRow({
   const compact = density === "compact";
   const toneClasses =
     block.tone === "error"
-      ? "rounded-xl border border-red-500/20 bg-red-500/[0.06] p-3 text-red-700 dark:text-red-300"
+      ? "rounded-[2px] border border-[var(--status-error)]/20 bg-[var(--status-error)]/[0.06] p-3 text-[var(--status-error)]"
       : block.tone === "warn"
-        ? "text-amber-700 dark:text-amber-300"
+        ? "text-[var(--status-warning)]"
         : block.tone === "info"
-          ? "text-sky-700 dark:text-sky-300"
+          ? "text-[var(--primary)]"
           : "text-foreground/75";
 
   return (
@@ -1113,15 +1062,9 @@ function TranscriptEventRow({
         )}
         <div className="min-w-0 flex-1">
           {block.label === "result" && block.tone !== "error" ? (
-            <MarkdownBody
-              linkIssueReferences={false}
-              className={cn(
-                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 text-sky-700 dark:text-sky-300",
-                compact ? "text-[11px] leading-5" : "text-xs leading-5",
-              )}
-            >
+            <div className={cn("whitespace-pre-wrap break-words text-[var(--primary)]", compact ? "text-[11px]" : "text-xs")}>
               {block.text}
-            </MarkdownBody>
+            </div>
           ) : (
             <div className={cn("whitespace-pre-wrap break-words", compact ? "text-[11px]" : "text-xs")}>
               <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-muted-foreground/70">
@@ -1141,103 +1084,6 @@ function TranscriptEventRow({
   );
 }
 
-function TranscriptDiffGroup({
-  block,
-  density,
-}: {
-  block: Extract<TranscriptBlock, { type: "diff_group" }>;
-  density: TranscriptDensity;
-}) {
-  const [open, setOpen] = useState(false);
-  const compact = density === "compact";
-
-  // Count add/remove lines (exclude context, hunk, file_header, truncation)
-  const addCount = block.hunks.filter((h) => h.changeType === "add").length;
-  const removeCount = block.hunks.filter((h) => h.changeType === "remove").length;
-  const hasChanges = addCount > 0 || removeCount > 0;
-
-  // Extract a short file name from the path
-  const shortFile = block.filePath
-    ? block.filePath.split("/").pop() ?? block.filePath
-    : "diff";
-
-  return (
-    <div className="rounded-xl border border-blue-500/20 bg-blue-500/[0.04] p-2">
-      <div
-        role="button"
-        tabIndex={0}
-        className="flex cursor-pointer items-center gap-2"
-        onClick={() => setOpen((v) => !v)}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((v) => !v); } }}
-      >
-        <GitCompare className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} />
-        <span className={cn("text-[11px] font-semibold uppercase tracking-[0.14em] text-blue-700 dark:text-blue-300")}>
-          {shortFile}
-        </span>
-        {hasChanges && (
-          <span className="text-[10px] tabular-nums">
-            <span className="text-emerald-600 dark:text-emerald-400">+{addCount}</span>
-            {" "}
-            <span className="text-red-600 dark:text-red-400">-{removeCount}</span>
-          </span>
-        )}
-        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-      </div>
-      {open && (
-        <pre className={cn(
-          "mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono pl-5",
-          compact ? "text-[11px]" : "text-xs",
-        )}>
-          {block.hunks.map((hunk, i) => {
-            const key = `${i}-${hunk.changeType}`;
-            switch (hunk.changeType) {
-              case "remove":
-                return (
-                  <span key={key} className="block bg-red-500/[0.10] text-red-700 dark:text-red-300 -mx-2 px-2">
-                    <span className="select-none mr-2 text-red-500/60 dark:text-red-400/50">-</span>
-                    {hunk.text}
-                    {"\n"}
-                  </span>
-                );
-              case "add":
-                return (
-                  <span key={key} className="block bg-emerald-500/[0.10] text-emerald-700 dark:text-emerald-300 -mx-2 px-2">
-                    <span className="select-none mr-2 text-emerald-500/60 dark:text-emerald-400/50">+</span>
-                    {hunk.text}
-                    {"\n"}
-                  </span>
-                );
-              case "file_header":
-                return (
-                  <span key={key} className="block font-semibold text-blue-600 dark:text-blue-300 mt-2 first:mt-0">
-                    {hunk.text}
-                    {"\n"}
-                  </span>
-                );
-              case "truncation":
-                return (
-                  <span key={key} className="block text-muted-foreground italic mt-1">
-                    {hunk.text}
-                    {"\n"}
-                  </span>
-                );
-              case "context":
-              default:
-                return (
-                  <span key={key} className="block text-muted-foreground/70">
-                    {" "}
-                    {hunk.text}
-                    {"\n"}
-                  </span>
-                );
-            }
-          })}
-        </pre>
-      )}
-    </div>
-  );
-}
-
 function TranscriptStderrGroup({
   block,
   density,
@@ -1248,7 +1094,7 @@ function TranscriptStderrGroup({
   const [open, setOpen] = useState(false);
   const compact = density === "compact";
   return (
-    <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] p-2 text-amber-700 dark:text-amber-300">
+    <div className="rounded-[2px] border border-[var(--status-warning)]/20 bg-[var(--status-warning)]/[0.06] p-2 text-[var(--status-warning)]">
       <div
         role="button"
         tabIndex={0}
@@ -1262,47 +1108,10 @@ function TranscriptStderrGroup({
         {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
       </div>
       {open && (
-        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] text-amber-700/80 dark:text-amber-300/80 pl-5">
+        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] text-[var(--status-warning)]/80 pl-5">
           {block.lines.map((line, i) => (
             <span key={`${line.ts}-${i}`}>
-              <span className="select-none text-amber-500/50 dark:text-amber-400/40">{i > 0 ? "\n" : ""}</span>
-              {line.text}
-            </span>
-          ))}
-        </pre>
-      )}
-    </div>
-  );
-}
-
-function TranscriptSystemGroup({
-  block,
-  density,
-}: {
-  block: Extract<TranscriptBlock, { type: "system_group" }>;
-  density: TranscriptDensity;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="rounded-xl border border-blue-500/20 bg-blue-500/[0.04] p-2 text-blue-700 dark:text-blue-300">
-      <div
-        role="button"
-        tabIndex={0}
-        className="flex cursor-pointer items-center gap-2"
-        onClick={() => setOpen((v) => !v)}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen((v) => !v); } }}
-      >
-        <TerminalSquare className="h-3.5 w-3.5 shrink-0" />
-        <span className="text-[10px] font-semibold uppercase tracking-[0.14em]">
-          {block.lines.length} system {block.lines.length === 1 ? "message" : "messages"}
-        </span>
-        {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-      </div>
-      {open && (
-        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-words font-mono text-[11px] text-blue-700/80 dark:text-blue-300/80 pl-5">
-          {block.lines.map((line, i) => (
-            <span key={`${line.ts}-${i}`}>
-              <span className="select-none text-blue-500/40 dark:text-blue-400/30">{i > 0 ? "\n" : ""}</span>
+              <span className="select-none text-[var(--status-warning)]/40">{i > 0 ? "\n" : ""}</span>
               {line.text}
             </span>
           ))}
@@ -1433,9 +1242,7 @@ export function RunTranscriptView({
           {block.type === "tool" && <TranscriptToolCard block={block} density={density} />}
           {block.type === "command_group" && <TranscriptCommandGroup block={block} density={density} />}
           {block.type === "tool_group" && <TranscriptToolGroup block={block} density={density} />}
-          {block.type === "diff_group" && <TranscriptDiffGroup block={block} density={density} />}
           {block.type === "stderr_group" && <TranscriptStderrGroup block={block} density={density} />}
-          {block.type === "system_group" && <TranscriptSystemGroup block={block} density={density} />}
           {block.type === "stdout" && (
             <TranscriptStdoutRow block={block} density={density} collapseByDefault={collapseStdout} />
           )}
