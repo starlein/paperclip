@@ -159,7 +159,7 @@ export function GoalDetail() {
           value={goal.title}
           onSave={(title) => updateGoal.mutate({ title })}
           as="h2"
-          className="text-xl font-bold font-[var(--font-display)] uppercase tracking-[0.06em]"
+          className="text-xl font-bold"
         />
 
         <InlineEditor

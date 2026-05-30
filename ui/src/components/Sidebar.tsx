@@ -10,18 +10,11 @@ import {
   Network,
   Boxes,
   Repeat,
+  GitBranch,
   Settings,
-  Users,
   MessageSquare,
-  FileBox,
-  Rocket,
-  Container,
-  Cloud,
-  PackageCheck,
-  ShieldCheck,
-  Mail,
-  Lock,
 } from "lucide-react";
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { SidebarSection } from "./SidebarSection";
 import { SidebarNavItem } from "./SidebarNavItem";
@@ -30,22 +23,48 @@ import { SidebarAgents } from "./SidebarAgents";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { heartbeatsApi } from "../api/heartbeats";
+import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
+import { issuesApi } from "../api/issues";
 import { useInboxBadge } from "../hooks/useInboxBadge";
+import { useConversationUnread } from "../hooks/useConversationUnread";
 import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
+import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
 
 export function Sidebar() {
   const { openNewIssue } = useDialog();
   const { selectedCompanyId, selectedCompany } = useCompany();
   const inboxBadge = useInboxBadge(selectedCompanyId);
+  const { data: experimentalSettings } = useQuery({
+    queryKey: queryKeys.instance.experimentalSettings,
+    queryFn: () => instanceSettingsApi.getExperimental(),
+  });
   const { data: liveRuns } = useQuery({
     queryKey: queryKeys.liveRuns(selectedCompanyId!),
     queryFn: () => heartbeatsApi.liveRunsForCompany(selectedCompanyId!),
     enabled: !!selectedCompanyId,
     refetchInterval: 10_000,
   });
-  const liveRunCount = liveRuns?.length ?? 0;
+  const showWorkspacesLink = experimentalSettings?.enableIsolatedWorkspaces === true;
+  const { data: convoIssues } = useQuery({
+    queryKey: queryKeys.conversations.ids(selectedCompanyId!),
+    queryFn: () => issuesApi.list(selectedCompanyId!, { kind: "conversation" }),
+    enabled: !!selectedCompanyId,
+  });
+  const convoIssueIds = useMemo(
+    () => new Set((convoIssues ?? []).map((i) => i.id)),
+    [convoIssues],
+  );
+  const taskLiveCount = useMemo(
+    () => (liveRuns ?? []).filter((r) => !r.issueId || !convoIssueIds.has(r.issueId)).length,
+    [liveRuns, convoIssueIds],
+  );
+  const convoLiveCount = useMemo(
+    () => (liveRuns ?? []).filter((r) => r.issueId && convoIssueIds.has(r.issueId)).length,
+    [liveRuns, convoIssueIds],
+  );
+  const { unreadCount: unreadConvoCount } = useConversationUnread(selectedCompanyId);
 
   function openSearch() {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
@@ -57,18 +76,10 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="w-60 h-full min-h-0 border-r border-[var(--sidebar-border)] bg-[var(--sidebar)] flex flex-col">
+    <aside className="w-60 h-full min-h-0 border-r border-border bg-background flex flex-col">
       {/* Top bar: Company name (bold) + Search — aligned with top sections (no visible border) */}
       <div className="flex items-center gap-1 px-3 h-12 shrink-0">
-        {selectedCompany?.brandColor && (
-          <div
-            className="w-4 h-4 rounded-sm shrink-0 ml-1"
-            style={{ backgroundColor: selectedCompany.brandColor }}
-          />
-        )}
-        <span className="flex-1 text-sm font-bold truncate pl-1 font-[var(--font-display)] uppercase tracking-[0.04em]">
-          {selectedCompany?.name ?? "Select company"}
-        </span>
+        <SidebarCompanyMenu />
         <Button
           variant="ghost"
           size="icon-sm"
@@ -89,7 +100,8 @@ export function Sidebar() {
             <SquarePen className="h-4 w-4 shrink-0" />
             <span className="truncate">New Issue</span>
           </button>
-          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={taskLiveCount} />
+          <SidebarNavItem to="/conversations" label="Conversations" icon={MessageSquare} badge={unreadConvoCount || undefined} liveCount={convoLiveCount} />
           <SidebarNavItem
             to="/inbox"
             label="Inbox"
@@ -98,7 +110,6 @@ export function Sidebar() {
             badgeTone={inboxBadge.failedRuns > 0 ? "danger" : "default"}
             alert={inboxBadge.failedRuns > 0}
           />
-          <SidebarNavItem to="/chat" label="CEO Chat" icon={MessageSquare} />
           <PluginSlotOutlet
             slotTypes={["sidebar"]}
             context={pluginContext}
@@ -110,14 +121,11 @@ export function Sidebar() {
 
         <SidebarSection label="Work">
           <SidebarNavItem to="/issues" label="Issues" icon={CircleDot} />
-          <SidebarNavItem to="/routines" label="Routines" icon={Repeat} textBadge="Beta" textBadgeTone="amber" />
+          <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
           <SidebarNavItem to="/goals" label="Goals" icon={Target} />
-          <SidebarNavItem to="/deliverables" label="Deliverables" icon={PackageCheck} />
-          <SidebarNavItem to="/approvals" label="Approvals" icon={ShieldCheck} />
-          <SidebarNavItem to="/artifacts" label="Artifacts" icon={FileBox} />
-          <SidebarNavItem to="/deployments" label="Deployments" icon={Rocket} />
-          <SidebarNavItem to="/cloud-deploy" label="Cloud Deploy" icon={Cloud} />
-          <SidebarNavItem to="/sandboxes" label="Sandboxes" icon={Container} />
+          {showWorkspacesLink ? (
+            <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
+          ) : null}
         </SidebarSection>
 
         <SidebarProjects />
@@ -128,10 +136,7 @@ export function Sidebar() {
           <SidebarNavItem to="/org" label="Org" icon={Network} />
           <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
-          <SidebarNavItem to="/communication" label="Communication" icon={Mail} />
-          <SidebarNavItem to="/vault" label="Vault" icon={Lock} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />
-          <SidebarNavItem to="/company/members" label="Members" icon={Users} />
           <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
         </SidebarSection>
 

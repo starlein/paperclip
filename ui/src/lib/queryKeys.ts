@@ -30,8 +30,8 @@ export const queryKeys = {
   },
   issues: {
     list: (companyId: string) => ["issues", companyId] as const,
-    search: (companyId: string, q: string, projectId?: string) =>
-      ["issues", companyId, "search", q, projectId ?? "__all-projects__"] as const,
+    search: (companyId: string, q: string, projectId?: string, limit?: number) =>
+      ["issues", companyId, "search", q, projectId ?? "__all-projects__", limit ?? "__no-limit__"] as const,
     listAssignedToMe: (companyId: string) => ["issues", companyId, "assigned-to-me"] as const,
     listMineByMe: (companyId: string) => ["issues", companyId, "mine-by-me"] as const,
     listTouchedByMe: (companyId: string) => ["issues", companyId, "touched-by-me"] as const,
@@ -39,13 +39,17 @@ export const queryKeys = {
     labels: (companyId: string) => ["issues", companyId, "labels"] as const,
     listByProject: (companyId: string, projectId: string) =>
       ["issues", companyId, "project", projectId] as const,
+    listByParent: (companyId: string, parentId: string) =>
+      ["issues", companyId, "parent", parentId] as const,
     listByExecutionWorkspace: (companyId: string, executionWorkspaceId: string) =>
       ["issues", companyId, "execution-workspace", executionWorkspaceId] as const,
     detail: (id: string) => ["issues", "detail", id] as const,
     comments: (issueId: string) => ["issues", "comments", issueId] as const,
+    interactions: (issueId: string) => ["issues", "interactions", issueId] as const,
     feedbackVotes: (issueId: string) => ["issues", "feedback-votes", issueId] as const,
     attachments: (issueId: string) => ["issues", "attachments", issueId] as const,
     documents: (issueId: string) => ["issues", "documents", issueId] as const,
+    document: (issueId: string, key: string) => ["issues", "document", issueId, key] as const,
     documentRevisions: (issueId: string, key: string) => ["issues", "document-revisions", issueId, key] as const,
     activity: (issueId: string) => ["issues", "activity", issueId] as const,
     runs: (issueId: string) => ["issues", "runs", issueId] as const,
@@ -63,6 +67,8 @@ export const queryKeys = {
   executionWorkspaces: {
     list: (companyId: string, filters?: Record<string, string | boolean | undefined>) =>
       ["execution-workspaces", companyId, filters ?? {}] as const,
+    summaryList: (companyId: string, filters?: Record<string, string | boolean | undefined>) =>
+      ["execution-workspaces", companyId, "summary", filters ?? {}] as const,
     detail: (id: string) => ["execution-workspaces", "detail", id] as const,
     closeReadiness: (id: string) => ["execution-workspaces", "close-readiness", id] as const,
     workspaceOperations: (id: string) => ["execution-workspaces", "workspace-operations", id] as const,
@@ -70,6 +76,13 @@ export const queryKeys = {
   projects: {
     list: (companyId: string) => ["projects", companyId] as const,
     detail: (id: string) => ["projects", "detail", id] as const,
+    workspaces: (projectId: string) => ["projects", projectId, "workspaces"] as const,
+  },
+  workspaceFiles: {
+    list: (workspaceId: string, dirPath: string) =>
+      ["workspace-files", workspaceId, "list", dirPath] as const,
+    read: (workspaceId: string, filePath: string) =>
+      ["workspace-files", workspaceId, "file", filePath] as const,
   },
   goals: {
     list: (companyId: string) => ["goals", companyId] as const,
@@ -86,15 +99,24 @@ export const queryKeys = {
     issues: (approvalId: string) => ["approvals", "issues", approvalId] as const,
   },
   access: {
+    invites: (companyId: string, state: string = "all", limit: number = 20) =>
+      ["access", "invites", "paginated-v1", companyId, state, limit] as const,
     joinRequests: (companyId: string, status: string = "pending_approval") =>
       ["access", "join-requests", companyId, status] as const,
+    companyMembers: (companyId: string) => ["access", "company-members", companyId] as const,
+    companyUserDirectory: (companyId: string) => ["access", "company-user-directory", companyId] as const,
+    adminUsers: (query: string) => ["access", "admin-users", query] as const,
+    userCompanyAccess: (userId: string) => ["access", "user-company-access", userId] as const,
     invite: (token: string) => ["access", "invite", token] as const,
-  },
-  members: {
-    list: (companyId: string) => ["members", companyId] as const,
+    currentBoardAccess: ["access", "current-board-access"] as const,
   },
   auth: {
     session: ["auth", "session"] as const,
+  },
+  sidebarPreferences: {
+    companyOrder: (userId: string) => ["sidebar-preferences", "company-order", userId] as const,
+    projectOrder: (companyId: string, userId: string) =>
+      ["sidebar-preferences", "project-order", companyId, userId] as const,
   },
   instance: {
     generalSettings: ["instance", "general-settings"] as const,
@@ -107,7 +129,10 @@ export const queryKeys = {
     providers: (companyId: string) => ["secret-providers", companyId] as const,
   },
   dashboard: (companyId: string) => ["dashboard", companyId] as const,
+  userProfile: (companyId: string, userSlug: string) =>
+    ["user-profile", companyId, userSlug] as const,
   sidebarBadges: (companyId: string) => ["sidebar-badges", companyId] as const,
+  inboxDismissals: (companyId: string) => ["inbox-dismissals", companyId] as const,
   activity: (companyId: string) => ["activity", companyId] as const,
   costs: (companyId: string, from?: string, to?: string) =>
     ["costs", companyId, from, to] as const,
@@ -134,34 +159,14 @@ export const queryKeys = {
   liveRuns: (companyId: string) => ["live-runs", companyId] as const,
   runIssues: (runId: string) => ["run-issues", runId] as const,
   org: (companyId: string) => ["org", companyId] as const,
+  conversations: {
+    list: (companyId: string) => ["conversations", companyId] as const,
+    ids: (companyId: string) => ["conversations", companyId, "ids"] as const,
+    unread: (companyId: string) => ["conversations", companyId, "unread"] as const,
+    liveRuns: (companyId: string) => ["conversations", companyId, "live-runs"] as const,
+  },
   skills: {
     available: ["skills", "available"] as const,
-  },
-  artifacts: {
-    list: (companyId: string, issueId?: string) =>
-      ["artifacts", companyId, issueId ?? "__all__"] as const,
-    detail: (companyId: string, id: string) => ["artifacts", companyId, id] as const,
-  },
-  deployments: {
-    list: (companyId: string) => ["deployments", companyId] as const,
-    detail: (companyId: string, id: string) => ["deployments", companyId, id] as const,
-  },
-  cloudDeployments: {
-    healthChecks: (companyId: string, deploymentId: string) =>
-      ["cloud-deployments", "health-checks", companyId, deploymentId] as const,
-    recipes: (companyId: string) =>
-      ["cloud-deployments", "recipes", companyId] as const,
-  },
-  sandboxes: {
-    list: (companyId: string, agentId?: string) =>
-      ["sandboxes", companyId, agentId ?? "__all__"] as const,
-    detail: (companyId: string, id: string) => ["sandboxes", companyId, id] as const,
-  },
-  llmApiKeys: {
-    list: (companyId: string) => ["llm-api-keys", companyId] as const,
-    detail: (companyId: string, keyId: string) => ["llm-api-keys", companyId, keyId] as const,
-    agentKeys: (companyId: string, agentId: string) =>
-      ["llm-api-keys", "agent", companyId, agentId] as const,
   },
   plugins: {
     all: ["plugins"] as const,
@@ -173,14 +178,7 @@ export const queryKeys = {
     dashboard: (pluginId: string) => ["plugins", pluginId, "dashboard"] as const,
     logs: (pluginId: string) => ["plugins", pluginId, "logs"] as const,
   },
-  deliverables: {
-    list: (companyId: string, filters?: { status?: string; projectId?: string; issueId?: string }) =>
-      ["deliverables", companyId, filters ?? {}] as const,
-    detail: (id: string) => ["deliverables", "detail", id] as const,
-    comments: (id: string) => ["deliverables", "comments", id] as const,
-  },
-  reviewTemplates: {
-    list: (companyId: string) => ["review-templates", companyId] as const,
-    projectDefault: (projectId: string) => ["review-templates", "project-default", projectId] as const,
+  adapters: {
+    all: ["adapters"] as const,
   },
 };

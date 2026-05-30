@@ -18,11 +18,9 @@ import {
   accessService,
   agentService,
   budgetService,
-  companyBootstrapService,
   companyPortabilityService,
   companyService,
   feedbackService,
-  heartbeatService,
   logActivity,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
@@ -36,8 +34,6 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const access = accessService(db);
   const budgets = budgetService(db);
   const feedback = feedbackService(db);
-  const heartbeat = heartbeatService(db);
-  const bootstrap = companyBootstrapService(db, heartbeat);
 
   function parseBooleanQuery(value: unknown) {
     return value === true || value === "true" || value === "1";
@@ -297,15 +293,6 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       );
     }
     res.status(201).json(company);
-
-    // Auto-bootstrap founding team if enabled (fire-and-forget, don't block response)
-    if ((company as Record<string, unknown>).autoBootstrapCeo !== false) {
-      void bootstrap.bootstrapCompany(company.id, {
-        actorUserId: req.actor.userId ?? undefined,
-      }).catch((err) => {
-        console.error(`[company-bootstrap] Failed to bootstrap founding team for ${company.id}:`, err);
-      });
-    }
   });
 
   router.patch("/:companyId", async (req, res) => {

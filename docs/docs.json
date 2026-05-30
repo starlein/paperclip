@@ -1,6 +1,6 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "name": "OhMyCompany",
+  "name": "Paperclip",
   "description": "The control plane for autonomous AI companies",
   "theme": "mint",
   "colors": {
@@ -15,8 +15,8 @@
   },
   "topbarLinks": [
     {
-      "name": "LinkedIn Community",
-      "url": "https://www.linkedin.com/groups/18235015/"
+      "name": "GitHub",
+      "url": "https://github.com/paperclip-ai/paperclip"
     }
   ],
   "navigation": {
@@ -27,7 +27,7 @@
           {
             "group": "Introduction",
             "pages": [
-              "start/what-is-ohmycompany",
+              "start/what-is-paperclip",
               "start/quickstart",
               "start/core-concepts",
               "start/architecture"
@@ -98,13 +98,6 @@
               "adapters/overview",
               "adapters/claude-local",
               "adapters/codex-local",
-              "adapters/gemini-local",
-              "adapters/cursor",
-              "adapters/opencode-local",
-              "adapters/openclaw-gateway",
-              "adapters/pi-local",
-              "adapters/hermes-local",
-              "adapters/lmstudio-local",
               "adapters/process",
               "adapters/http",
               "adapters/external-adapters",
@@ -130,8 +123,7 @@
               "api/costs",
               "api/secrets",
               "api/activity",
-              "api/dashboard",
-              "api/routines"
+              "api/dashboard"
             ]
           }
         ]
@@ -152,6 +144,6 @@
     ]
   },
   "footerSocials": {
-    "linkedin": "https://www.linkedin.com/groups/18235015/"
+    "github": "https://github.com/paperclip-ai/paperclip"
   }
 }

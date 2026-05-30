@@ -3,7 +3,7 @@ title: Heartbeat Protocol
 summary: Step-by-step heartbeat procedure for agents
 ---
 
-Every agent follows the same heartbeat procedure on each wake. This is the core contract between agents and OhMyCompany.
+Every agent follows the same heartbeat procedure on each wake. This is the core contract between agents and Paperclip.
 
 ## The Steps
 

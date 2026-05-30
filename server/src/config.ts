@@ -1,4 +1,5 @@
 import { readConfigFile } from "./config-file.js";
+import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { config as loadDotenv } from "dotenv";
@@ -6,15 +7,20 @@ import { resolvePaperclipEnvPath } from "./paths.js";
 import { maybeRepairLegacyWorktreeConfigAndEnvFiles } from "./worktree-config.js";
 import {
   AUTH_BASE_URL_MODES,
+  BIND_MODES,
   DEPLOYMENT_EXPOSURES,
   DEPLOYMENT_MODES,
   SECRET_PROVIDERS,
   STORAGE_PROVIDERS,
+  type BindMode,
   type AuthBaseUrlMode,
   type DeploymentExposure,
   type DeploymentMode,
   type SecretProvider,
   type StorageProvider,
+  inferBindModeFromHost,
+  resolveRuntimeBind,
+  validateConfiguredBindMode,
 } from "@paperclipai/shared";
 import {
   resolveDefaultBackupDir,
@@ -39,11 +45,18 @@ if (!isSameFile && existsSync(CWD_ENV_PATH)) {
 
 maybeRepairLegacyWorktreeConfigAndEnvFiles();
 
-// Propagate llm.apiKey from config file to ANTHROPIC_API_KEY env var if not already set.
-// This ensures the Claude adapter receives the API key without requiring a separate env var.
-const earlyConfig = readConfigFile();
-if (earlyConfig?.llm?.apiKey && !process.env.ANTHROPIC_API_KEY) {
-  process.env.ANTHROPIC_API_KEY = earlyConfig.llm.apiKey;
+const TAILSCALE_DETECT_TIMEOUT_MS = 3000;
+
+function resolveHeartbeatSchedulerIntervalMs(rawValue: string | undefined): number {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 30000;
+  }
+
+  // New semantics: HEARTBEAT_SCHEDULER_INTERVAL_MS is configured in seconds.
+  // Backward compatibility: values >= 1000 are treated as legacy millisecond values.
+  const intervalMs = parsed >= 1000 ? parsed : parsed * 1000;
+  return Math.max(10000, Math.floor(intervalMs));
 }
 
 type DatabaseMode = "embedded-postgres" | "postgres";
@@ -51,6 +64,8 @@ type DatabaseMode = "embedded-postgres" | "postgres";
 export interface Config {
   deploymentMode: DeploymentMode;
   deploymentExposure: DeploymentExposure;
+  bind: BindMode;
+  customBindHost: string | undefined;
   host: string;
   port: number;
   allowedHostnames: string[];
@@ -59,6 +74,7 @@ export interface Config {
   authDisableSignUp: boolean;
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
+  databaseMigrationUrl: string | undefined;
   embeddedPostgresDataDir: string;
   embeddedPostgresPort: number;
   databaseBackupEnabled: boolean;
@@ -82,10 +98,26 @@ export interface Config {
   heartbeatSchedulerEnabled: boolean;
   heartbeatSchedulerIntervalMs: number;
   companyDeletionEnabled: boolean;
-  llm: {
-    provider: "claude" | "openai";
-    apiKey: string | undefined;
-  };
+  telemetryEnabled: boolean;
+}
+
+function detectTailnetBindHost(): string | undefined {
+  const explicit = process.env.PAPERCLIP_TAILNET_BIND_HOST?.trim();
+  if (explicit) return explicit;
+
+  try {
+    const stdout = execFileSync("tailscale", ["ip", "-4"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: TAILSCALE_DETECT_TIMEOUT_MS,
+    });
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+  } catch {
+    return undefined;
+  }
 }
 
 export function loadConfig(): Config {
@@ -158,6 +190,18 @@ export function loadConfig(): Config {
     deploymentMode === "local_trusted"
       ? "private"
       : (deploymentExposureFromEnv ?? fileConfig?.server.exposure ?? "private");
+  const bindFromEnvRaw = process.env.PAPERCLIP_BIND;
+  const bindFromEnv =
+    bindFromEnvRaw && BIND_MODES.includes(bindFromEnvRaw as BindMode)
+      ? (bindFromEnvRaw as BindMode)
+      : null;
+  const configuredHost = process.env.HOST ?? fileConfig?.server.host ?? "127.0.0.1";
+  const tailnetBindHost = detectTailnetBindHost();
+  const bind =
+    bindFromEnv ??
+    fileConfig?.server.bind ??
+    inferBindModeFromHost(configuredHost, { tailnetBindHost });
+  const customBindHost = process.env.PAPERCLIP_BIND_HOST ?? fileConfig?.server.customBindHost;
   const authBaseUrlModeFromEnvRaw = process.env.PAPERCLIP_AUTH_BASE_URL_MODE;
   const authBaseUrlModeFromEnv =
     authBaseUrlModeFromEnvRaw &&
@@ -226,18 +270,39 @@ export function loadConfig(): Config {
     1,
     Number(process.env.PAPERCLIP_DB_BACKUP_RETENTION_DAYS) ||
       fileDatabaseBackup?.retentionDays ||
-      30,
+      7,
   );
   const databaseBackupDir = resolveHomeAwarePath(
     process.env.PAPERCLIP_DB_BACKUP_DIR ??
       fileDatabaseBackup?.dir ??
       resolveDefaultBackupDir(),
   );
+  const bindValidationErrors = validateConfiguredBindMode({
+    deploymentMode,
+    deploymentExposure,
+    bind,
+    host: configuredHost,
+    customBindHost,
+  });
+  if (bindValidationErrors.length > 0) {
+    throw new Error(bindValidationErrors[0]);
+  }
+  const resolvedBind = resolveRuntimeBind({
+    bind,
+    host: configuredHost,
+    customBindHost,
+    tailnetBindHost,
+  });
+  if (resolvedBind.errors.length > 0) {
+    throw new Error(resolvedBind.errors[0]);
+  }
 
   return {
     deploymentMode,
     deploymentExposure,
-    host: process.env.HOST ?? fileConfig?.server.host ?? "127.0.0.1",
+    bind: resolvedBind.bind,
+    customBindHost: resolvedBind.customBindHost,
+    host: resolvedBind.host,
     port: Number(process.env.PORT) || fileConfig?.server.port || 3100,
     allowedHostnames,
     authBaseUrlMode,
@@ -245,6 +310,7 @@ export function loadConfig(): Config {
     authDisableSignUp,
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
+    databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,
     embeddedPostgresDataDir: resolveHomeAwarePath(
       fileConfig?.database.embeddedPostgresDataDir ?? resolveDefaultEmbeddedPostgresDir(),
     ),
@@ -276,11 +342,8 @@ export function loadConfig(): Config {
     feedbackExportBackendUrl,
     feedbackExportBackendToken,
     heartbeatSchedulerEnabled: process.env.HEARTBEAT_SCHEDULER_ENABLED !== "false",
-    heartbeatSchedulerIntervalMs: Math.max(10000, Number(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS) || 30000),
+    heartbeatSchedulerIntervalMs: resolveHeartbeatSchedulerIntervalMs(process.env.HEARTBEAT_SCHEDULER_INTERVAL_MS),
     companyDeletionEnabled,
-    llm: {
-      provider: (fileConfig?.llm?.provider === "openai" ? "openai" : "claude") as "claude" | "openai",
-      apiKey: process.env.ANTHROPIC_API_KEY ?? fileConfig?.llm?.apiKey ?? undefined,
-    },
+    telemetryEnabled: fileConfig?.telemetry?.enabled ?? true,
   };
 }
