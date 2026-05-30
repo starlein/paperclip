@@ -1,15 +1,32 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ${OLLAMA_DATA_DIR}:/root/.ollama
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT}:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
   paperclip:
-#    build:
-#      context: .
-    image: paperclip:v2026.407.0
-#     dockerfile: Dockerfile
-#      target: production
-#      args:
-#        USER_UID: ${USER_UID}
-#        USER_GID: ${USER_GID}
+    build:
+      context: .
+#    image: paperclip:v2026.407.0
+#    image: ghcr.io/starlein/paperclip:v2026.407.0
+     dockerfile: Dockerfile
+      target: production
+      args:
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
     container_name: paperclip
     restart: unless-stopped
+    depends_on:
+      ollama:
+         condition: service_heatly
     ports:
       - "127.0.0.1:${PAPERCLIP_PORT}:3100"
     volumes:
@@ -32,5 +49,6 @@ services:
       PAPERCLIP_AUTH_DISABLE_SIGN_UP: "true"
       USER_UID: ${USER_UID}
       USER_GID: ${USER_GID}
+      OLLAMA_HOST: ${OLLAMA_HOST}
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${HOME}/.local/bin
 
