@@ -13,11 +13,11 @@ services:
       timeout: 5s
       retries: 20
   paperclip:
+    image: ghcr.io/starlein/paperclip:v2026.403.1-stable
     build:
       context: .
 #    image: paperclip:v2026.407.0
-#    image: ghcr.io/starlein/paperclip:v2026.407.0
-     dockerfile: Dockerfile
+      dockerfile: Dockerfile
       target: production
       args:
         USER_UID: ${USER_UID}
@@ -26,7 +26,7 @@ services:
     restart: unless-stopped
     depends_on:
       ollama:
-         condition: service_heatly
+         condition: service_healthy
     ports:
       - "127.0.0.1:${PAPERCLIP_PORT}:3100"
     volumes:
