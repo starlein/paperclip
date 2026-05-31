@@ -652,7 +652,9 @@ export function IssuesList({
     if (renderedIssueRowLimit >= filtered.length) return;
 
     const timeoutId = window.setTimeout(() => {
-      setRenderedIssueRowLimit((current) => Math.min(filtered.length, current + ISSUE_ROW_RENDER_BATCH_SIZE));
+      startTransition(() => {
+        setRenderedIssueRowLimit((current) => Math.min(filtered.length, current + ISSUE_ROW_RENDER_BATCH_SIZE));
+      });
     }, ISSUE_ROW_RENDER_BATCH_DELAY_MS);
 
     return () => window.clearTimeout(timeoutId);
