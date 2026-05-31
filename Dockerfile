@@ -66,6 +66,10 @@ RUN test -f cli/dist/index.js || (echo "ERROR: cli build output missing" && exit
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
+ARG APP_VERSION=v2026.403.13
+LABEL org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/starlein/paperclip"
+ENV PAPERCLIP_IMAGE_VERSION=${APP_VERSION}
 WORKDIR /app
 COPY --chown=node:node --from=build /app /app
 RUN chmod +x /app/cli/dist/index.js

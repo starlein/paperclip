@@ -820,6 +820,7 @@ export function issueRoutes(
         : undefined,
       assigneeAgentId: req.query.assigneeAgentId as string | undefined,
       participantAgentId: req.query.participantAgentId as string | undefined,
+      unassigned: parseBooleanQuery(req.query.unassigned),
       assigneeUserId,
       touchedByUserId,
       inboxArchivedByUserId,
