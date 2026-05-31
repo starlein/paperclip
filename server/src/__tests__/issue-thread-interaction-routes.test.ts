@@ -549,11 +549,12 @@ describe("issue thread interaction routes", () => {
   });
 
   it("allows agent-authored interaction creation and stamps the active run id", async () => {
+    const runId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
     const app = await createApp({
       type: "agent",
       agentId: CREATED_AGENT_ID,
       companyId: "company-1",
-      runId: "run-1",
+      runId,
     });
 
     const res = await request(app)
@@ -573,7 +574,7 @@ describe("issue thread interaction routes", () => {
       expect.objectContaining({
         kind: "suggest_tasks",
         idempotencyKey: "interaction:task-1",
-        sourceRunId: "run-1",
+        sourceRunId: runId,
       }),
       {
         agentId: CREATED_AGENT_ID,
