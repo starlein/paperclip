@@ -30,6 +30,7 @@ services:
       - "127.0.0.1:${PAPERCLIP_PORT}:3100"
     volumes:
       - ${PAPERCLIP_DATA_DIR}:/paperclip
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       HOST: 0.0.0.0
       PORT: 3100

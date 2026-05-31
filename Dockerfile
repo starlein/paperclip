@@ -19,6 +19,11 @@ RUN usermod -u $USER_UID --non-unique node \
   && groupmod -g $USER_GID --non-unique node \
   && usermod -g $USER_GID -d /paperclip node
 
+# Docker in Docker setup
+RUN curl -sSL https://get.docker.com/ | sh \
+  && groupadd -g 987 docker_host \
+  && usermod -aG 987 node
+
 FROM base AS deps
 WORKDIR /app
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
