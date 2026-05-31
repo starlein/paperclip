@@ -1,6 +1,6 @@
-# Paperclip Docker Release: v2026.403.11
+# Paperclip Docker Release: v2026.403.13
 
-**Image:** `ghcr.io/starlein/paperclip:v2026.403.11`
+**Image:** `ghcr.io/starlein/paperclip:v2026.403.13`
 
 Inside Docker Container you start setup:
 ```bash
@@ -23,7 +23,7 @@ docker run -d --name paperclip \
   -e PAPERCLIP_CONFIG=/paperclip/instances/default/config.json \
   -e BETTER_AUTH_SECRET="$(openssl rand -hex 32)" \
   -v "$(pwd)/data/docker-paperclip:/paperclip" \
-  ghcr.io/starlein/paperclip:v2026.403.11
+  ghcr.io/starlein/paperclip:v2026.403.13
 ```
 
 Open: `http://localhost:3100`
@@ -33,7 +33,7 @@ Open: `http://localhost:3100`
 ```yaml
 services:
   paperclip:
-    image: ghcr.io/starlein/paperclip:v2026.403.11
+    image: ghcr.io/starlein/paperclip:v2026.403.13
     environment:
       HOST: 0.0.0.0
       PORT: 3100
@@ -88,16 +88,16 @@ This README was created from the current working branch state for the Docker pat
 
 ## Release base and build metadata
 
-- Branch: `docs/v2026.403.11-docker-readme`
-- Built-on commit: `fc629891` (`docs: add docker v2026.403.11 release notes`)
+- Branch: `docs/v2026.403.13-docker-readme`
+- Built-on commit: `fc629891` (`docs: add docker v2026.403.13 release notes`)
 - OCI tag label used in build:
-  - `org.opencontainers.image.description=v2026.403.11 - including companies-create-plugin - stable version`
+  - `org.opencontainers.image.description=v2026.403.13 - including companies-create-plugin - stable version`
 
 ## Included patches / release ingredients
 
 From recent commits on this branch:
 
-- `fc629891` — docs: add docker v2026.403.11 release notes
+- `fc629891` — docs: add docker v2026.403.13 release notes
 - `2a97d155` — Docker helpers
 - `9f3ac37b` — paperclip-startup-template
 - `d9fb1fe7` — docker-compose
@@ -105,7 +105,7 @@ From recent commits on this branch:
 - `b4acba70` — paperclip-startup-template
 - `6da27f81` — dockerfile & `gpt 5.5 update to codex`
 
-### What that means for v2026.403.11
+### What that means for v2026.403.13
 
 - Runtime image has Docker helper tooling and shell helpers wired for container workflows.
 - Template/workspace bootstrap assets for a company starter kit are included.
@@ -121,10 +121,10 @@ See [doc/DEVELOPING.md](doc/DEVELOPING.md) for the full development guide.
 # Build
 docker-compose up -d --build
 or
-docker build -t ghcr.io/starlein/paperclip:v2026.403.11 \
-  --label "org.opencontainers.image.description=v2026.403.11 - including companies-create-plugin - stable version" .
+docker build -t ghcr.io/starlein/paperclip:v2026.403.13 \
+  --label "org.opencontainers.image.description=v2026.403.13 - including companies-create-plugin - stable version" .
 
 # Publish
 
-docker push ghcr.io/starlein/paperclip:v2026.403.11
+docker push ghcr.io/starlein/paperclip:v2026.403.13
 ```
