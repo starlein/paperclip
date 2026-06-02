@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectSecretRefValuesFromConfig,
   createPluginSecretsHandler,
   PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
 } from "../services/plugin-secrets-handler.js";
@@ -7,6 +8,33 @@ import {
 const VALID_UUID = "77777777-7777-4777-8777-777777777777";
 
 describe("createPluginSecretsHandler", () => {
+  it("collects raw and UUID values from schema-declared secret-ref fields", () => {
+    const schema = {
+      type: "object",
+      properties: {
+        apiKey: { type: "string", format: "secret-ref" },
+        nested: {
+          type: "object",
+          properties: {
+            token: { type: "string", format: "secret-ref" },
+          },
+        },
+        normalText: { type: "string" },
+      },
+    };
+
+    const refs = collectSecretRefValuesFromConfig({
+      apiKey: "hsk_fc23abbba481f9418485c5cabcf458fd_f2089e529af404d2",
+      nested: { token: VALID_UUID },
+      normalText: "hsk_not_a_secret_ref_field",
+    }, schema);
+
+    expect(refs).toEqual(new Map([
+      ["apiKey", "hsk_fc23abbba481f9418485c5cabcf458fd_f2089e529af404d2"],
+      ["nested.token", VALID_UUID],
+    ]));
+  });
+
   it("rejects malformed (non-UUID) secret refs", async () => {
     const handler = createPluginSecretsHandler({
       db: {} as never,

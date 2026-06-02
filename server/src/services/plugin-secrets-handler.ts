@@ -40,8 +40,8 @@
  */
 
 import type { Db } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
-import { companySecrets } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { companySecretBindings, companySecrets } from "@paperclipai/db";
 import {
   collectSecretRefPaths,
   isUuidSecretRef,
@@ -100,6 +100,24 @@ export function extractSecretRefsFromConfig(
   schema?: Record<string, unknown> | null,
 ): Set<string> {
   return new Set(extractSecretRefPathsFromConfig(configJson, schema).keys());
+}
+
+export function collectSecretRefValuesFromConfig(
+  configJson: unknown,
+  schema?: Record<string, unknown> | null,
+): Map<string, string> {
+  const values = new Map<string, string>();
+  if (configJson == null || typeof configJson !== "object") return values;
+
+  for (const dotPath of collectSecretRefPaths(schema)) {
+    const current = readConfigValueAtPath(configJson as Record<string, unknown>, dotPath);
+    if (typeof current !== "string") continue;
+    const trimmed = current.trim();
+    if (trimmed.length === 0) continue;
+    values.set(dotPath, trimmed);
+  }
+
+  return values;
 }
 
 export function extractSecretRefPathsFromConfig(
@@ -290,17 +308,50 @@ export function createPluginSecretsHandler(
         throw secretNotOwnedByCompany(trimmedRef);
       }
 
+      const binding = await db
+        .select({
+          configPath: companySecretBindings.configPath,
+          versionSelector: companySecretBindings.versionSelector,
+        })
+        .from(companySecretBindings)
+        .where(
+          and(
+            eq(companySecretBindings.companyId, companyId),
+            eq(companySecretBindings.secretId, trimmedRef),
+            eq(companySecretBindings.targetType, "plugin"),
+            eq(companySecretBindings.targetId, pluginId),
+          ),
+        )
+        .then((rows) => rows[0] ?? null)
+        .catch(() => null);
+
+      const resolvedVersion: number | "latest" = binding?.versionSelector === "latest" || !binding?.versionSelector
+        ? "latest"
+        : Number.parseInt(binding.versionSelector, 10);
+      const safeResolvedVersion = typeof resolvedVersion === "number" && Number.isFinite(resolvedVersion)
+        ? resolvedVersion
+        : "latest";
+
       // ---------------------------------------------------------------
       // 4. Resolve the secret value through the provider
       // ---------------------------------------------------------------
       const { secretService } = await import("./secrets.js");
       const svc = secretService(db);
-      return svc.resolveSecretValue(companyId, trimmedRef, "latest", {
-        consumerType: "plugin",
-        consumerId: pluginId,
-        actorType: "system",
-        actorId: null,
-      });
+      return svc.resolveSecretValue(
+        companyId,
+        trimmedRef,
+        safeResolvedVersion,
+        binding
+          ? {
+              consumerType: "plugin",
+              consumerId: pluginId,
+              actorType: "system",
+              actorId: null,
+              configPath: binding.configPath,
+              pluginId,
+            }
+          : undefined,
+      );
     },
   };
 }

@@ -245,6 +245,7 @@ export function PluginSettings() {
               ) : hasConfigSchema ? (
                 <PluginConfigForm
                   pluginId={pluginId!}
+                  companyId={selectedCompanyId}
                   schema={configSchema!}
                   initialValues={configData?.configJson}
                   isLoading={configLoading}
@@ -919,6 +920,7 @@ function isLikelyAbsolutePath(pathValue: string) {
 
 interface PluginConfigFormProps {
   pluginId: string;
+  companyId?: string | null;
   schema: JsonSchemaNode;
   initialValues?: Record<string, unknown>;
   isLoading?: boolean;
@@ -935,7 +937,7 @@ interface PluginConfigFormProps {
  * Separated from PluginSettings to isolate re-render scope — only the form
  * re-renders on field changes, not the entire page.
  */
-function PluginConfigForm({ pluginId, schema, initialValues, isLoading, pluginStatus, supportsConfigTest }: PluginConfigFormProps) {
+function PluginConfigForm({ pluginId, companyId, schema, initialValues, isLoading, pluginStatus, supportsConfigTest }: PluginConfigFormProps) {
   const queryClient = useQueryClient();
 
   // Form values: start with saved values, fall back to schema defaults
@@ -971,7 +973,7 @@ function PluginConfigForm({ pluginId, schema, initialValues, isLoading, pluginSt
   // Save mutation
   const saveMutation = useMutation({
     mutationFn: (configJson: Record<string, unknown>) =>
-      pluginsApi.saveConfig(pluginId, configJson),
+      pluginsApi.saveConfig(pluginId, configJson, companyId),
     onSuccess: () => {
       setSaveMessage({ type: "success", text: "Configuration saved." });
       setTestResult(null);
