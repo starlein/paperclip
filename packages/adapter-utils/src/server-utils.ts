@@ -79,6 +79,8 @@ const PAPERCLIP_SKILL_ROOT_RELATIVE_CANDIDATES = [
 export const DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE = [
   "You are agent {{agent.id}} ({{agent.name}}). Continue your Paperclip work.",
   "",
+  "{{context.paperclipHindsightMemory}}",
+  "",
   "Execution contract:",
   "- Start actionable work in this heartbeat; do not stop at a plan unless the issue asks for planning.",
   "- Leave durable progress in comments, documents, or work products with a clear next action.",

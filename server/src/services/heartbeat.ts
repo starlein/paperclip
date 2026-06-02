@@ -116,6 +116,7 @@ import {
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
 import { extractSkillMentionIds } from "@paperclipai/shared";
+import { injectHindsightMemoryContextFromPluginState } from "./hindsight-memory.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 const MAX_PERSISTED_LOG_CHUNK_CHARS = 64 * 1024;
@@ -5616,6 +5617,22 @@ export function heartbeatService(db: Db) {
           payload: meta as unknown as Record<string, unknown>,
         });
       };
+
+      const hindsightMemoryInjected = await injectHindsightMemoryContextFromPluginState({
+        db,
+        runId: run.id,
+        context,
+        onLog,
+      });
+      if (hindsightMemoryInjected) {
+        await db
+          .update(heartbeatRuns)
+          .set({
+            contextSnapshot: context,
+            updatedAt: new Date(),
+          })
+          .where(eq(heartbeatRuns.id, run.id));
+      }
 
       const adapter = getServerAdapter(agent.adapterType);
       const authToken = adapter.supportsLocalAgentJwt
