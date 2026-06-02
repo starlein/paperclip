@@ -75,7 +75,6 @@ import {
 } from "../services/plugin-local-folders.js";
 import {
   extractSecretRefPathsFromConfig,
-  PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
 } from "../services/plugin-secrets-handler.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 
@@ -2172,10 +2171,25 @@ export function pluginRoutes(
     }
 
     try {
+      // Validate that any secret-ref values in the config are valid UUIDs
+      // referencing existing company secrets. We no longer block secret refs
+      // entirely — the handler resolves them at runtime with company-scope
+      // enforcement — but we still validate format here so operators get early
+      // feedback if they paste a non-UUID value (e.g. an external key like
+      // "hsk_...") into a secret-ref field.
       const secretRefsByPath = extractSecretRefPathsFromConfig(body.configJson, schema);
       if (secretRefsByPath.size > 0) {
-        res.status(422).json({ error: PLUGIN_SECRET_REFS_DISABLED_MESSAGE });
-        return;
+        for (const [secretRef, paths] of secretRefsByPath) {
+          // isUuidSecretRef already validated format in extractSecretRefPathsFromConfig,
+          // but double-check and surface a clear error for non-UUID values.
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(secretRef)) {
+            res.status(422).json({
+              error: `Invalid secret reference format: "${secretRef}". Secret references must be UUIDs pointing to company secrets.`,
+              paths: [...paths],
+            });
+            return;
+          }
+        }
       }
 
       const result = await registry.upsertConfig(plugin.id, {
