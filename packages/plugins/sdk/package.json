@@ -1,5 +1,5 @@
 {
-  "name": "@paperclipai/plugin-sdk",
+  "name": "@starlein/plugin-sdk",
   "version": "1.0.0",
   "description": "Stable public API for Paperclip plugins — worker-side context and UI bridge hooks",
   "license": "MIT",
