@@ -8,7 +8,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/paperclipai/paperclip",
+    "url": "https://github.com/starlein/paperclip",
     "directory": "packages/shared"
   },
   "type": "module",
@@ -18,7 +18,7 @@
     "./*": "./src/*.ts"
   },
   "publishConfig": {
-    "access": "public",
+    "access": "restricted",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
