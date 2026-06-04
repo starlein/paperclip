@@ -7,10 +7,12 @@
  * concrete `HostServices.secrets` adapter that:
  *
  * 1. Parses the `secretRef` string to identify the secret.
- * 2. Looks up the secret record and its latest version in the database.
- * 3. Delegates to the configured `SecretProviderModule` to decrypt /
+ * 2. Derives the company scope from the invocation context.
+ * 3. Validates that the secret belongs to the invoking company.
+ * 4. Looks up the secret record and its latest version in the database.
+ * 5. Delegates to the configured `SecretProviderModule` to decrypt /
  *    resolve the raw value.
- * 4. Returns the resolved plaintext value to the worker.
+ * 6. Returns the resolved plaintext value to the worker.
  *
  * ## Secret Reference Format
  *
@@ -25,6 +27,10 @@
  *   messages (per PLUGIN_SPEC.md §22).
  * - The handler is capability-gated: only plugins with `secrets.read-ref`
  *   declared in their manifest may call it (enforced by `host-client-factory`).
+ * - The handler requires an invocation scope with a `companyId`; calls
+ *   without a company scope fail closed.
+ * - The secret must belong to the invoking company; cross-company access
+ *   is rejected.
  * - The host handler itself does not cache resolved values. Each call goes
  *   through the secret provider to honour rotation.
  *
@@ -34,6 +40,8 @@
  */
 
 import type { Db } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
+import { companySecretBindings, companySecrets } from "@paperclipai/db";
 import {
   collectSecretRefPaths,
   isUuidSecretRef,
@@ -53,6 +61,29 @@ function invalidSecretRef(secretRef: string): Error {
   return err;
 }
 
+function missingCompanyScope(): Error {
+  const err = new Error(
+    "Plugin secret resolution requires a company-scoped invocation context. " +
+    "Ensure the plugin action runs within a company scope (e.g. an issue, heartbeat, or agent execution).",
+  );
+  err.name = "MissingCompanyScopeError";
+  return err;
+}
+
+function secretNotFound(secretRef: string): Error {
+  const err = new Error(`Secret not found: ${secretRef}`);
+  err.name = "SecretNotFoundError";
+  return err;
+}
+
+function secretNotOwnedByCompany(secretRef: string): Error {
+  const err = new Error(
+    `Secret ${secretRef} does not belong to the invoking company`,
+  );
+  err.name = "SecretCompanyMismatchError";
+  return err;
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -69,6 +100,24 @@ export function extractSecretRefsFromConfig(
   schema?: Record<string, unknown> | null,
 ): Set<string> {
   return new Set(extractSecretRefPathsFromConfig(configJson, schema).keys());
+}
+
+export function collectSecretRefValuesFromConfig(
+  configJson: unknown,
+  schema?: Record<string, unknown> | null,
+): Map<string, string> {
+  const values = new Map<string, string>();
+  if (configJson == null || typeof configJson !== "object") return values;
+
+  for (const dotPath of collectSecretRefPaths(schema)) {
+    const current = readConfigValueAtPath(configJson as Record<string, unknown>, dotPath);
+    if (typeof current !== "string") continue;
+    const trimmed = current.trim();
+    if (trimmed.length === 0) continue;
+    values.set(dotPath, trimmed);
+  }
+
+  return values;
 }
 
 export function extractSecretRefPathsFromConfig(
@@ -149,11 +198,13 @@ export interface PluginSecretsService {
    * Resolve a secret reference to its current plaintext value.
    *
    * @param params - Contains the `secretRef` (UUID of the secret)
+   * @param companyId - The company ID derived from the invocation scope.
+   *   Required for company-scoped secret access.
    * @returns The resolved secret value
    * @throws {Error} If the secret is not found, has no versions, or
    *   the provider fails to resolve
    */
-  resolve(params: PluginSecretsResolveParams): Promise<string>;
+  resolve(params: PluginSecretsResolveParams, companyId?: string): Promise<string>;
 }
 
 /**
@@ -199,13 +250,13 @@ function createRateLimiter(maxAttempts: number, windowMs: number) {
 export function createPluginSecretsHandler(
   options: PluginSecretsHandlerOptions,
 ): PluginSecretsService {
-  const { pluginId } = options;
+  const { db, pluginId } = options;
 
   // Rate limit: max 30 resolution attempts per plugin per minute
   const rateLimiter = createRateLimiter(30, 60_000);
 
   return {
-    async resolve(params: PluginSecretsResolveParams): Promise<string> {
+    async resolve(params: PluginSecretsResolveParams, companyId?: string): Promise<string> {
       const { secretRef } = params;
 
       // ---------------------------------------------------------------
@@ -230,9 +281,77 @@ export function createPluginSecretsHandler(
         throw invalidSecretRef(trimmedRef);
       }
 
-      // Fail closed until plugin config and worker runtime both carry an
-      // explicit company scope for secret bindings and resolution.
-      throw new Error(PLUGIN_SECRET_REFS_DISABLED_MESSAGE);
+      // ---------------------------------------------------------------
+      // 2. Require company scope
+      // ---------------------------------------------------------------
+      if (!companyId) {
+        throw missingCompanyScope();
+      }
+
+      // ---------------------------------------------------------------
+      // 3. Look up the secret and verify company ownership
+      // ---------------------------------------------------------------
+      const secret = await db
+        .select({
+          id: companySecrets.id,
+          companyId: companySecrets.companyId,
+        })
+        .from(companySecrets)
+        .where(eq(companySecrets.id, trimmedRef))
+        .then((rows) => rows[0] ?? null);
+
+      if (!secret) {
+        throw secretNotFound(trimmedRef);
+      }
+
+      if (secret.companyId !== companyId) {
+        throw secretNotOwnedByCompany(trimmedRef);
+      }
+
+      const binding = await db
+        .select({
+          configPath: companySecretBindings.configPath,
+          versionSelector: companySecretBindings.versionSelector,
+        })
+        .from(companySecretBindings)
+        .where(
+          and(
+            eq(companySecretBindings.companyId, companyId),
+            eq(companySecretBindings.secretId, trimmedRef),
+            eq(companySecretBindings.targetType, "plugin"),
+            eq(companySecretBindings.targetId, pluginId),
+          ),
+        )
+        .then((rows) => rows[0] ?? null)
+        .catch(() => null);
+
+      const resolvedVersion: number | "latest" = binding?.versionSelector === "latest" || !binding?.versionSelector
+        ? "latest"
+        : Number.parseInt(binding.versionSelector, 10);
+      const safeResolvedVersion = typeof resolvedVersion === "number" && Number.isFinite(resolvedVersion)
+        ? resolvedVersion
+        : "latest";
+
+      // ---------------------------------------------------------------
+      // 4. Resolve the secret value through the provider
+      // ---------------------------------------------------------------
+      const { secretService } = await import("./secrets.js");
+      const svc = secretService(db);
+      return svc.resolveSecretValue(
+        companyId,
+        trimmedRef,
+        safeResolvedVersion,
+        binding
+          ? {
+              consumerType: "plugin",
+              consumerId: pluginId,
+              actorType: "system",
+              actorId: null,
+              configPath: binding.configPath,
+              pluginId,
+            }
+          : undefined,
+      );
     },
   };
 }

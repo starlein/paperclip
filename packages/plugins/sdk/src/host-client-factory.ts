@@ -147,7 +147,7 @@ export interface HostServices {
 
   /** Provides `secrets.resolve`. */
   secrets: {
-    resolve(params: WorkerToHostMethods["secrets.resolve"][0]): Promise<string>;
+    resolve(params: WorkerToHostMethods["secrets.resolve"][0], companyId?: string): Promise<string>;
   };
 
   /** Provides `activity.log`. */
@@ -696,8 +696,9 @@ export function createHostClientHandlers(
     }),
 
     // Secrets
-    "secrets.resolve": gated("secrets.resolve", async (params) => {
-      return services.secrets.resolve(params);
+    "secrets.resolve": gated("secrets.resolve", async (params, context) => {
+      const companyId = context?.invocationScope?.companyId ?? undefined;
+      return services.secrets.resolve(params, companyId);
     }),
 
     // Activity

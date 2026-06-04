@@ -76,9 +76,11 @@ import {
   setStoredLocalFolder,
 } from "../services/plugin-local-folders.js";
 import {
-  extractSecretRefPathsFromConfig,
-  PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
+  collectSecretRefValuesFromConfig,
 } from "../services/plugin-secrets-handler.js";
+import { writeConfigValueAtPath } from "../services/json-schema-secret-refs.js";
+import { secretService } from "../services/secrets.js";
+import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 
 /** UI slot declaration extracted from plugin manifest */
@@ -483,6 +485,8 @@ export function pluginRoutes(
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
+  const secrets = secretService(db);
+  const defaultSecretProvider = getConfiguredSecretProvider();
   const lifecycle = pluginLifecycleManager(db, {
     loader,
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
@@ -550,6 +554,68 @@ export function pluginRoutes(
       }
     }
     return normalized;
+  }
+
+  function pluginSecretName(
+    plugin: NonNullable<Awaited<ReturnType<typeof resolvePlugin>>>,
+    pathName: string,
+  ) {
+    const pluginSlug = (plugin.pluginKey ?? plugin.packageName ?? "plugin")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "plugin";
+    const pathSlug = pathName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 48) || "secret";
+    return `${pluginSlug}-${pathSlug}-${randomUUID().slice(0, 8)}`;
+  }
+
+  async function normalizeAndBindPluginSecretRefs(input: {
+    req: Request;
+    plugin: NonNullable<Awaited<ReturnType<typeof resolvePlugin>>>;
+    configJson: Record<string, unknown>;
+    schema?: Record<string, unknown> | null;
+    companyId?: string | null;
+  }) {
+    let nextConfig = { ...input.configJson };
+    const refs: Array<{ secretId: string; configPath: string; versionSelector: "latest" }> = [];
+
+    for (const [pathName, value] of collectSecretRefValuesFromConfig(nextConfig, input.schema)) {
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+        refs.push({ secretId: value, configPath: pathName, versionSelector: "latest" });
+        continue;
+      }
+
+      if (!input.companyId) {
+        throw unprocessable(
+          `Raw secret value at ${pathName} cannot be saved without a companyId. Select an existing company secret or save from a company-scoped settings page.`,
+        );
+      }
+
+      assertCompanyAccess(input.req, input.companyId);
+      const created = await secrets.create(
+        input.companyId,
+        {
+          name: pluginSecretName(input.plugin, pathName),
+          provider: defaultSecretProvider,
+          value,
+          description: `Secret for plugin ${input.plugin.pluginKey} config field ${pathName}.`,
+        },
+        { userId: input.req.actor.userId ?? "board", agentId: null },
+      );
+      nextConfig = writeConfigValueAtPath(nextConfig, pathName, created.id);
+      refs.push({ secretId: created.id, configPath: pathName, versionSelector: "latest" });
+    }
+
+    if (input.companyId) {
+      assertCompanyAccess(input.req, input.companyId);
+      await secrets.syncSecretRefsForTarget(input.companyId, { targetType: "plugin", targetId: input.plugin.id }, refs);
+    }
+
+    return nextConfig;
   }
 
   async function resolveScopedApiCompanyId(
@@ -2143,11 +2209,14 @@ export function pluginRoutes(
       return;
     }
 
-    const body = req.body as { configJson?: Record<string, unknown> } | undefined;
+    const body = req.body as { configJson?: Record<string, unknown>; companyId?: string } | undefined;
     if (!body?.configJson || typeof body.configJson !== "object") {
       res.status(400).json({ error: '"configJson" is required and must be an object' });
       return;
     }
+    const companyId = typeof body.companyId === "string" && body.companyId.trim().length > 0
+      ? body.companyId.trim()
+      : null;
 
     // Strip devUiUrl unless the caller is an instance admin. devUiUrl activates
     // a dev-proxy in the static file route that could be abused for SSRF if any
@@ -2174,19 +2243,21 @@ export function pluginRoutes(
     }
 
     try {
-      const secretRefsByPath = extractSecretRefPathsFromConfig(body.configJson, schema);
-      if (secretRefsByPath.size > 0) {
-        res.status(422).json({ error: PLUGIN_SECRET_REFS_DISABLED_MESSAGE });
-        return;
-      }
+      const normalizedConfigJson = await normalizeAndBindPluginSecretRefs({
+        req,
+        plugin,
+        configJson: body.configJson,
+        schema,
+        companyId,
+      });
 
       const result = await registry.upsertConfig(plugin.id, {
-        configJson: body.configJson,
+        configJson: normalizedConfigJson,
       });
       await logPluginMutationActivity(req, "plugin.config.updated", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
-        configKeyCount: Object.keys(body.configJson).length,
+        configKeyCount: Object.keys(normalizedConfigJson).length,
       });
 
       // Notify the running worker about the config change (PLUGIN_SPEC §25.4.4).
@@ -2198,7 +2269,7 @@ export function pluginRoutes(
           await bridgeDeps.workerManager.call(
             plugin.id,
             "configChanged",
-            { config: body.configJson },
+            { config: normalizedConfigJson },
           );
         } catch (rpcErr) {
           if (
