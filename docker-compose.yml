@@ -12,7 +12,39 @@ services:
 #      interval: 15s
 #      timeout: 5s
 #      retries: 20
+  postgres:
+    image: postgres:17-alpine
+    container_name: paperclip-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paperclip
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_DB: paperclip
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperclip -d paperclip"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Intentionally no host port mapping: PostgreSQL is only reachable on the Docker network.
+
+  redis:
+    image: redis:7-alpine
+    container_name: paperclip-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Intentionally no host port mapping: Redis is only reachable on the Docker network.
+
   paperclip:
+    image: ghcr.io/starlein/paperclip:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -22,18 +54,26 @@ services:
         USER_GID: ${USER_GID}
     container_name: paperclip
     restart: unless-stopped
-#    depends_on:
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 #      ollama:
 #        condition: service_healthy
     ports:
+      # Keep the app/API on localhost only. A TLS reverse proxy can connect locally,
+      # but the Paperclip port is not exposed directly to the internet.
       - "127.0.0.1:${PAPERCLIP_PORT}:3100"
     volumes:
       - ${PAPERCLIP_DATA_DIR}:/paperclip
     environment:
       HOST: 0.0.0.0
       PORT: 3100
-#      SERVE_UI: true
-#      DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
+      SERVE_UI: "true"
+      DATABASE_URL: "postgres://paperclip:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/paperclip"
+      REDIS_URL: redis://redis:6379
+      PAPERCLIP_REDIS_URL: redis://redis:6379
       NODE_ENV: production
       HOME: /paperclip
       PAPERCLIP_HOME: /paperclip
@@ -43,12 +83,15 @@ services:
       PAPERCLIP_DEPLOYMENT_EXPOSURE: private
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
       PAPERCLIP_AUTH_SECRET: ${PAPERCLIP_AUTH_SECRET}
-      PAPERCLIP_ALLOWED_HOST: ${PAPERCLIP_ALLOWED_HOST}
+      PAPERCLIP_ALLOWED_HOSTNAMES: ${PAPERCLIP_ALLOWED_HOSTNAMES}
       PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL}
       OPENCODE_ALLOW_ALL_MODELS: "true"
       PAPERCLIP_TELEMETRY_DISABLED: "true"
       USER_UID: ${USER_UID}
       USER_GID: ${USER_GID}
-      PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${HOME}/.local/bin
+      PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/paperclip/.local/bin
 #      OLLAMA_HOST: ${OLLAMA_HOST}
 
+volumes:
+  postgres-data:
+  redis-data:
