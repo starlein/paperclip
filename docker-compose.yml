@@ -50,8 +50,8 @@ services:
       dockerfile: Dockerfile
       target: production
       args:
-        USER_UID: ${USER_UID}
-        USER_GID: ${USER_GID}
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
     container_name: paperclip
     restart: unless-stopped
     depends_on:
@@ -66,7 +66,7 @@ services:
       # The app/API port is not published on the host.
       - "3100"
     volumes:
-      - ${PAPERCLIP_DATA_DIR}:/paperclip
+      - ${PAPERCLIP_DATA_DIR:-./data/docker-paperclip}:/paperclip
     environment:
       HOST: 0.0.0.0
       PORT: 3100
@@ -83,18 +83,21 @@ services:
       PAPERCLIP_DEPLOYMENT_EXPOSURE: private
       PAPERCLIP_AUTH_DISABLE_SIGN_UP: "true"
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
-      PAPERCLIP_AUTH_SECRET: ${PAPERCLIP_AUTH_SECRET}
-      PAPERCLIP_ALLOWED_HOSTNAMES: ${PAPERCLIP_ALLOWED_HOSTNAMES}
-      PAPERCLIP_PUBLIC_URL: ${PAPERCLIP_PUBLIC_URL}
+      PAPERCLIP_AUTH_SECRET: "${PAPERCLIP_AUTH_SECRET:-}"
+      PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
+      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-https://localhost}"
       OPENCODE_ALLOW_ALL_MODELS: "true"
       PAPERCLIP_TELEMETRY_DISABLED: "true"
-      USER_UID: ${USER_UID}
-      USER_GID: ${USER_GID}
+      USER_UID: ${USER_UID:-1000}
+      USER_GID: ${USER_GID:-1000}
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/paperclip/.local/bin
 #      OLLAMA_HOST: ${OLLAMA_HOST}
 
   proxy:
-    image: nginx:1.27-alpine
+    image: paperclip-nginx-selfsigned:local
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
     container_name: paperclip-proxy
     restart: unless-stopped
     depends_on:
@@ -103,11 +106,14 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      PAPERCLIP_TLS_SERVER_NAME: "${PAPERCLIP_TLS_SERVER_NAME:-localhost}"
+      PAPERCLIP_TLS_CERT_ALT_NAMES: "${PAPERCLIP_TLS_CERT_ALT_NAMES:-DNS:localhost,IP:127.0.0.1}"
     volumes:
       - ./docker/nginx/paperclip.conf:/etc/nginx/conf.d/default.conf:ro
-      - /root/ssl2026/fullchain.pem:/etc/nginx/certs/fullchain.pem:ro
-      - /root/ssl2026/dial24.pem:/etc/nginx/certs/dial24.pem:ro
+      - proxy-certs:/etc/nginx/certs
 
 volumes:
   postgres-data:
   redis-data:
+  proxy-certs:

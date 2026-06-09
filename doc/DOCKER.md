@@ -86,7 +86,23 @@ BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
   docker compose -f docker/docker-compose.yml up --build
 ```
 
-PostgreSQL data persists in a named Docker volume (`pgdata`). Paperclip data persists in `paperclip-data`.
+PostgreSQL data persists in named Docker volumes. Paperclip data defaults to `./data/docker-paperclip`.
+
+The root `docker-compose.yml` also includes an nginx TLS proxy. By default it generates a self-signed certificate for `localhost` into the `proxy-certs` Docker volume and publishes only ports `80` and `443`. Host-specific domains and real certificate mounts belong in ignored local override files such as `docker-compose.override.yml`, not in tracked git files.
+
+For a real certificate, create a local override similar to this:
+
+```yaml
+services:
+  paperclip:
+    environment:
+      PAPERCLIP_PUBLIC_URL: https://paperclip.example.com
+      PAPERCLIP_ALLOWED_HOSTNAMES: paperclip.example.com
+  proxy:
+    volumes:
+      - /path/to/fullchain.pem:/etc/nginx/certs/fullchain.pem:ro
+      - /path/to/key.pem:/etc/nginx/certs/key.pem:ro
+```
 
 ### Untrusted PR review
 
