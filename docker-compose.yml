@@ -52,6 +52,7 @@ services:
       args:
         USER_UID: ${USER_UID:-1000}
         USER_GID: ${USER_GID:-1000}
+        DOCKER_GID: ${DOCKER_GID:-992}
     container_name: paperclip
     restart: unless-stopped
     depends_on:
@@ -91,6 +92,7 @@ services:
       USER_UID: ${USER_UID:-1000}
       USER_GID: ${USER_GID:-1000}
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/paperclip/.local/bin
+      DOCKER_HOST: unix:///var/run/docker.sock
 #      OLLAMA_HOST: ${OLLAMA_HOST}
 
   proxy:
