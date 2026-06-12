@@ -2,6 +2,7 @@
 FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
+ARG DOCKER_GID=992
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 mc nano procps zstd tini net-tools \
   && rm -rf /var/lib/apt/lists/* \
@@ -11,6 +12,15 @@ RUN apt-get update \
 RUN usermod -u $USER_UID --non-unique node \
   && groupmod -g $USER_GID --non-unique node \
   && usermod -g $USER_GID -d /paperclip node
+
+# Docker CLI for controlled Docker-outside-of-Docker access via mounted /var/run/docker.sock.
+# DOCKER_GID must match the host docker.sock group so the non-root node user can manage
+# sibling containers, Docker networks, and published ports through the host daemon.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends docker.io docker-cli docker-compose \
+  && rm -rf /var/lib/apt/lists/* \
+  && groupmod -o -g "$DOCKER_GID" docker \
+  && usermod -a -G docker node
 
 FROM base AS deps
 WORKDIR /app
