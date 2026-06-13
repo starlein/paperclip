@@ -44,7 +44,7 @@ services:
     # Intentionally no host port mapping: Redis is only reachable on the Docker network.
 
   paperclip:
-    image: ghcr.io/starlein/paperclip:v2026.609.0
+    image: ghcr.io/starlein/paperclip:latest
     build:
       context: .
       dockerfile: Dockerfile
