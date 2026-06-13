@@ -111,11 +111,15 @@ Greift nur, wenn:
 
 Dann: `{ costCents, billingType: "metered_api", biller: "openai" }`, sonst `null`.
 
-Eingebaut in **beide** Cost-Event-Ingestion-Pfade:
-- `updateRuntimeState` (~Zeile 7625): überschreibt `additionalCostCents`,
-  `billingType`, `biller` vor `costs.createEvent`. Auch
-  `agentRuntimeState.totalCostCents` nutzt die korrigierten Cents.
-- den zweiten Pfad (~Zeile 9186), der das Cost-Event inline aufbaut.
+Eingebaut in `updateRuntimeState` — den **einzigen** Cost-Event-Pfad
+(`costs.createEvent`). Dort werden `additionalCostCents`, `billingType` und
+`biller` aus dem Override gesetzt, sodass auch `agentRuntimeState.totalCostCents`
+die korrigierten Cents nutzt und das Cost-Event als `metered_api` gebucht wird.
+
+Hinweis: Der `usageJson`-Block der `heartbeatRuns`-Zeile (~9186) ist reine
+Anzeige-Metadaten des Runs (nicht der Cost-Event) und bleibt bewusst beim echten
+Auth-Billing-Type (`subscription_included`) — das beschreibt korrekt, wie der Run
+authentifiziert war.
 
 ## Datenfluss
 

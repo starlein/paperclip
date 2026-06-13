@@ -67,6 +67,7 @@ import type {
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { priceOpenAiUsageCents } from "./openai-pricing.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
 import { companySkillService } from "./company-skills.js";
@@ -1714,6 +1715,41 @@ function normalizeBilledCostCents(costUsd: number | null | undefined, billingTyp
   if (billingType === "subscription_included") return 0;
   if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return 0;
   return Math.max(0, Math.round(costUsd * 100));
+}
+
+const OPENAI_SUBSCRIPTION_LEDGER_BILLING_TYPES: readonly BillingType[] = [
+  "subscription_included",
+  "subscription_overage",
+];
+
+/**
+ * OpenAI/Codex runs under OAuth/subscription auth report no `costUsd`, so they
+ * would otherwise land as zero-cost subscription runs. Price their tokens at
+ * the public OpenAI API rates and book them as metered API usage instead, so
+ * they show up in USD totals and API statistics. Only applies to OpenAI runs
+ * that have no adapter-reported cost; everything else is left untouched.
+ */
+export function resolveOpenAiSubscriptionBilling(input: {
+  provider: string | null | undefined;
+  model: string | null | undefined;
+  usage: UsageTotals | null;
+  billingType: BillingType;
+  baseCostCents: number;
+}): { costCents: number; billingType: BillingType; biller: string } | null {
+  if (input.baseCostCents > 0) return null;
+  if ((input.provider ?? "").trim().toLowerCase() !== "openai") return null;
+  if (!OPENAI_SUBSCRIPTION_LEDGER_BILLING_TYPES.includes(input.billingType)) return null;
+  if (!input.usage) return null;
+
+  const costCents = priceOpenAiUsageCents({
+    model: input.model,
+    inputTokens: input.usage.inputTokens,
+    cachedInputTokens: input.usage.cachedInputTokens,
+    outputTokens: input.usage.outputTokens,
+  });
+  if (costCents <= 0) return null;
+
+  return { costCents, billingType: "metered_api", biller: "openai" };
 }
 
 async function resolveLedgerScopeForRun(
@@ -7622,11 +7658,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const inputTokens = usage?.inputTokens ?? 0;
     const outputTokens = usage?.outputTokens ?? 0;
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
-    const billingType = normalizeLedgerBillingType(result.billingType);
-    const additionalCostCents = normalizeBilledCostCents(result.costUsd, billingType);
-    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
+    const baseBillingType = normalizeLedgerBillingType(result.billingType);
+    const baseCostCents = normalizeBilledCostCents(result.costUsd, baseBillingType);
     const provider = result.provider ?? "unknown";
-    const biller = resolveLedgerBiller(result);
+    const openAiSubscriptionBilling = resolveOpenAiSubscriptionBilling({
+      provider: result.provider,
+      model: result.model,
+      usage,
+      billingType: baseBillingType,
+      baseCostCents,
+    });
+    const billingType = openAiSubscriptionBilling?.billingType ?? baseBillingType;
+    const additionalCostCents = openAiSubscriptionBilling?.costCents ?? baseCostCents;
+    const biller = openAiSubscriptionBilling?.biller ?? resolveLedgerBiller(result);
+    const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const ledgerScope = await resolveLedgerScopeForRun(db, agent.companyId, run);
 
     await db
