@@ -59,11 +59,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Checkbox } from "@/components/ui/checkbox";
-<<<<<<< HEAD
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "../lib/utils";
-=======
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { buildLineDiff, type DiffRow } from "../lib/line-diff";
 import { cn, relativeTime } from "../lib/utils";
 import {
@@ -73,7 +69,6 @@ import {
   resolveSkillRouteToken,
   type CompanySkillRouteSubject,
 } from "../lib/company-skill-routes";
->>>>>>> paperclipai/master
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -99,11 +94,8 @@ import {
   HelpCircle,
   LayoutGrid,
   Link2,
-<<<<<<< HEAD
   Loader2,
-=======
   Lock,
->>>>>>> paperclipai/master
   ExternalLink,
   MessageSquare,
   Paperclip,
@@ -115,16 +107,11 @@ import {
   RefreshCw,
   Save,
   Search,
-<<<<<<< HEAD
+  Settings,
   Shield,
   ShieldCheck,
   Star,
   Sparkles,
-=======
-  Settings,
-  ShieldCheck,
-  Star,
->>>>>>> paperclipai/master
   Trash2,
   Users,
   History,
@@ -900,7 +887,7 @@ function classifySource(skill: {
     if (kind === "optional") return "optional";
     return "company";
   }
-  if (skill.sourceBadge === "github" || skill.sourceBadge === "skills_sh" || skill.sourceBadge === "url" || skill.sourceBadge === "local") {
+  if (skill.sourceBadge === "github" || skill.sourceBadge === "skills_sh" || skill.sourceBadge === "agentskill_sh" || skill.sourceBadge === "url" || skill.sourceBadge === "local") {
     return "external";
   }
   return "company";
@@ -4233,14 +4220,9 @@ export function CompanySkills() {
   const adapterCaps = useAdapterCapabilities();
   const [skillFilter, setSkillFilter] = useState("");
   const [source, setSource] = useState("");
-<<<<<<< HEAD
-  const [createOpen, setCreateOpen] = useState(false);
-  const [browseOpen, setBrowseOpen] = useState(false);
+  const [emptySourceHelpOpen, setEmptySourceHelpOpen] = useState(false);
   const [installingSlug, setInstallingSlug] = useState<string | null>(null);
   const [installingSkillset, setInstallingSkillset] = useState<string | null>(null);
-=======
-  const [emptySourceHelpOpen, setEmptySourceHelpOpen] = useState(false);
->>>>>>> paperclipai/master
   const [expandedSkillId, setExpandedSkillId] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Record<string, Set<string>>>({});
   const [viewMode, setViewMode] = useState<"preview" | "code">("preview");
@@ -4954,13 +4936,12 @@ export function CompanySkills() {
   function handleAddSkillSource() {
     const trimmedSource = source.trim();
     if (trimmedSource.length === 0) {
-      setBrowseOpen(true);
+      setEmptySourceHelpOpen(true);
       return;
     }
     importSkill.mutate(trimmedSource);
   }
 
-<<<<<<< HEAD
   async function handleAgentSkillInstall(slug: string) {
     if (!selectedCompanyId) return;
     setInstallingSlug(slug);
@@ -4986,9 +4967,9 @@ export function CompanySkills() {
     let installed = 0;
     let failed = 0;
     try {
-      const lowSecuritySkills = skillset.skillDetails?.filter((s) => s.securityScore < 50) ?? [];
+      const lowSecuritySkills = skillset.skillDetails?.filter((skill) => skill.securityScore < 50) ?? [];
       if (lowSecuritySkills.length > 0) {
-        const names = lowSecuritySkills.map((s) => `${s.name} (${s.securityScore}/100)`).join(", ");
+        const names = lowSecuritySkills.map((skill) => `${skill.name} (${skill.securityScore}/100)`).join(", ");
         if (!window.confirm(`${lowSecuritySkills.length} skill(s) have low security scores: ${names}. Install anyway?`)) {
           setInstallingSkillset(null);
           return;
@@ -4998,9 +4979,9 @@ export function CompanySkills() {
         try {
           const sourceUrl = `https://agentskill.sh/${slug}`;
           await companySkillsApi.importFromSource(selectedCompanyId, sourceUrl);
-          installed++;
+          installed += 1;
         } catch {
-          failed++;
+          failed += 1;
         }
       }
       await queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId) });
@@ -5013,13 +4994,13 @@ export function CompanySkills() {
       pushToast({
         tone: "error",
         title: "Install failed",
-        body: error instanceof Error ? error.message : `Failed to install skillset`,
+        body: error instanceof Error ? error.message : "Failed to install skillset",
       });
     } finally {
       setInstallingSkillset(null);
     }
   }
-=======
+
   // Opening a card stays inside the new store and always lands on a regular full
   // page: installed skills go to their detail route; catalog/bundled/optional
   // skills open the standalone catalog page (no modal, no legacy split view).
@@ -5045,7 +5026,6 @@ export function CompanySkills() {
   const catalogSourceForDetail = activeDetail
     ? (catalogListQuery.data ?? []).find((entry) => entry.key === activeDetail.key)?.source ?? null
     : null;
->>>>>>> paperclipai/master
 
   return (
     <>
@@ -5097,74 +5077,44 @@ export function CompanySkills() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={browseOpen} onOpenChange={setBrowseOpen}>
-        <DialogContent className="sm:max-w-2xl">
+      <Dialog open={emptySourceHelpOpen} onOpenChange={setEmptySourceHelpOpen}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Add a skill</DialogTitle>
+            <DialogTitle>Add a skill source</DialogTitle>
             <DialogDescription>
-              Browse skills from agentskill.sh, skills.sh, or paste a GitHub URL below.
+              Paste a local path, GitHub URL, or `skills.sh` command into the field first.
             </DialogDescription>
           </DialogHeader>
-          <Tabs defaultValue="agentskill">
-            <TabsList variant="line" className="w-full">
-              <TabsTrigger value="agentskill">
-                <Search className="h-4 w-4" />
-                Skills
-              </TabsTrigger>
-              <TabsTrigger value="skillsets">
-                <Boxes className="h-4 w-4" />
-                Skillsets
-              </TabsTrigger>
-              <TabsTrigger value="other">
-                <Github className="h-4 w-4" />
-                Other sources
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="agentskill" className="mt-3">
-              <AgentSkillBrowser
-                onInstall={handleAgentSkillInstall}
-                installing={installingSlug}
-              />
-            </TabsContent>
-            <TabsContent value="skillsets" className="mt-3">
-              <AgentSkillsetBrowser
-                onInstallSkillset={handleAgentSkillsetInstall}
-                installingSkillset={installingSkillset}
-              />
-            </TabsContent>
-            <TabsContent value="other" className="mt-3">
-              <div className="space-y-3 text-sm">
-                <a
-                  href="https://skills.sh"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-accent/40"
-                >
-                  <span>
-                    <span className="block font-medium">Browse skills.sh</span>
-                    <span className="mt-1 block text-muted-foreground">
-                      Find install commands and paste one here.
-                    </span>
-                  </span>
-                  <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                </a>
-                <a
-                  href="https://github.com/search?q=SKILL.md&type=code"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-accent/40"
-                >
-                  <span>
-                    <span className="block font-medium">Search GitHub</span>
-                    <span className="mt-1 block text-muted-foreground">
-                      Look for repositories with `SKILL.md`, then paste the repo URL here.
-                    </span>
-                  </span>
-                  <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-                </a>
-              </div>
-            </TabsContent>
-          </Tabs>
+          <div className="space-y-3 text-sm">
+            <a
+              href="https://skills.sh"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-accent/40"
+            >
+              <span>
+                <span className="block font-medium">Browse skills.sh</span>
+                <span className="mt-1 block text-muted-foreground">
+                  Find install commands and paste one here.
+                </span>
+              </span>
+              <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            </a>
+            <a
+              href="https://github.com/search?q=SKILL.md&type=code"
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-foreground no-underline transition-colors hover:bg-accent/40"
+            >
+              <span>
+                <span className="block font-medium">Search GitHub</span>
+                <span className="mt-1 block text-muted-foreground">
+                  Look for repositories with `SKILL.md`, then paste the repo URL here.
+                </span>
+              </span>
+              <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            </a>
+          </div>
           <DialogFooter showCloseButton />
         </DialogContent>
       </Dialog>
@@ -5212,210 +5162,81 @@ export function CompanySkills() {
       </Dialog>
 
       <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
             <DialogTitle>Import a skill</DialogTitle>
             <DialogDescription>
-              Paste a local path, GitHub URL, or `skills.sh` command to import a skill into this company.
+              Browse agentskill.sh, install a curated skillset, or paste a local path, GitHub URL, or `skills.sh` command.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 border-b border-border pb-2">
-              <Input
-                value={source}
-                onChange={(event) => setSource(event.target.value)}
-                placeholder="Paste path, GitHub URL, or skills.sh command"
-                className="h-9 rounded-none border-0 px-0 shadow-none focus-visible:ring-0"
+          <Tabs defaultValue="agentskill">
+            <TabsList variant="line" className="w-full">
+              <TabsTrigger value="agentskill">
+                <Search className="h-4 w-4" />
+                Skills
+              </TabsTrigger>
+              <TabsTrigger value="skillsets">
+                <Boxes className="h-4 w-4" />
+                Skillsets
+              </TabsTrigger>
+              <TabsTrigger value="other">
+                <Github className="h-4 w-4" />
+                Other sources
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="agentskill" className="mt-3">
+              <AgentSkillBrowser
+                onInstall={handleAgentSkillInstall}
+                installing={installingSlug}
               />
-              <Button size="sm" onClick={handleAddSkillSource} disabled={importSkill.isPending}>
-                {importSkill.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : "Import"}
-              </Button>
-<<<<<<< HEAD
-            ) : null}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="sm" variant="default">
-                  <Plus className="mr-1 h-3.5 w-3.5" />
-                  Add skill
-                  <ChevronDown className="ml-1 h-3.5 w-3.5" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem onSelect={() => setViewParam("catalog")}>
-                  <Boxes className="mr-2 h-4 w-4" />
-                  Browse catalog
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() => {
-                    setViewParam("installed");
-                    setBrowseOpen(true);
-                  }}
-                >
-                  <Globe className="mr-2 h-4 w-4" />
-                  Import from URL or path
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() => {
-                    setViewParam("installed");
-                    setCreateOpen(true);
-                  }}
-                >
-                  <Pencil className="mr-2 h-4 w-4" />
-                  Create blank skill
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
-
-        {activeView === "installed" ? (
-          <div className="grid flex-1 gap-0 xl:grid-cols-[19rem_minmax(0,1fr)]">
-            <aside className="border-r border-border">
-              <div className="border-b border-border px-4 py-3">
+            </TabsContent>
+            <TabsContent value="skillsets" className="mt-3">
+              <AgentSkillsetBrowser
+                onInstallSkillset={handleAgentSkillsetInstall}
+                installingSkillset={installingSkillset}
+              />
+            </TabsContent>
+            <TabsContent value="other" className="mt-3">
+              <div className="space-y-3">
                 <div className="flex items-center gap-2 border-b border-border pb-2">
-                  <Search className="h-4 w-4 text-muted-foreground" />
-                  <input
-                    value={skillFilter}
-                    onChange={(event) => setSkillFilter(event.target.value)}
-                    placeholder="Filter skills"
-                    className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
-                  />
-                  <SourceFilterMenu counts={sourceCounts} value={sourceFilter} onChange={setSourceFilter} />
-                </div>
-
-                <div className="mt-3 flex items-center gap-2 border-b border-border pb-2">
-                  <input
+                  <Input
                     value={source}
                     onChange={(event) => setSource(event.target.value)}
-                    placeholder="Paste path, GitHub URL, skills.sh, or agentskill.sh URL"
-                    className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                    placeholder="Paste path, GitHub URL, skills.sh command, or agentskill.sh URL"
+                    className="h-9 rounded-none border-0 px-0 shadow-none focus-visible:ring-0"
                   />
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={handleAddSkillSource}
-                    disabled={importSkill.isPending}
-                  >
-                    {importSkill.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : "Add"}
+                  <Button size="sm" onClick={handleAddSkillSource} disabled={importSkill.isPending}>
+                    {importSkill.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : "Import"}
                   </Button>
                 </div>
-                {scanStatusMessage && (
-                  <p className="mt-3 text-xs text-muted-foreground">{scanStatusMessage}</p>
-                )}
+                <a
+                  href="https://skills.sh"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-sm text-foreground no-underline transition-colors hover:bg-accent/40"
+                >
+                  <span>
+                    <span className="block font-medium">Browse skills.sh</span>
+                    <span className="mt-1 block text-muted-foreground">Find install commands and paste one here.</span>
+                  </span>
+                  <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                </a>
+                <a
+                  href="https://github.com/search?q=SKILL.md&type=code"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-sm text-foreground no-underline transition-colors hover:bg-accent/40"
+                >
+                  <span>
+                    <span className="block font-medium">Search GitHub</span>
+                    <span className="mt-1 block text-muted-foreground">Look for repositories with `SKILL.md`, then paste the repo URL.</span>
+                  </span>
+                  <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                </a>
               </div>
-
-              {createOpen && (
-                <NewSkillForm
-                  onCreate={(payload) => createSkill.mutate(payload)}
-                  isPending={createSkill.isPending}
-                  onCancel={() => setCreateOpen(false)}
-                />
-              )}
-
-              {skillsQuery.isLoading ? (
-                <PageSkeleton variant="list" />
-              ) : skillsQuery.error ? (
-                <div className="px-4 py-6 text-sm text-destructive">{skillsQuery.error.message}</div>
-              ) : installedSkills.length === 0 ? (
-                <div className="px-4 py-8">
-                  <EmptyState
-                    icon={Boxes}
-                    message="No skills installed yet."
-                  />
-                  <div className="mt-3 flex flex-col items-center gap-2">
-                    <Button size="sm" onClick={() => setViewParam("catalog")}>
-                      <Boxes className="mr-1.5 h-3.5 w-3.5" /> Browse catalog
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setBrowseOpen(true)}>
-                      Import from URL
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <SkillList
-                  skills={installedSkills}
-                  selectedSkillId={selectedSkillId}
-                  skillFilter={skillFilter}
-                  sourceFilter={sourceFilter}
-                  expandedSkillId={expandedSkillId}
-                  expandedDirs={expandedDirs}
-                  selectedPaths={selectedSkillId ? { [selectedSkillId]: selectedPath } : {}}
-                  onToggleSkill={(currentSkillId) =>
-                    setExpandedSkillId((current) => current === currentSkillId ? null : currentSkillId)
-                  }
-                  onToggleDir={(currentSkillId, path) => {
-                    setExpandedDirs((current) => {
-                      const next = new Set(current[currentSkillId] ?? []);
-                      if (next.has(path)) next.delete(path);
-                      else next.add(path);
-                      return { ...current, [currentSkillId]: next };
-                    });
-                  }}
-                  onSelectSkill={(currentSkillId) => setExpandedSkillId(currentSkillId)}
-                  onSelectPath={() => {}}
-                  onClearFilters={() => setSourceFilter("all")}
-                />
-              )}
-            </aside>
-
-            <div className="min-w-0 pl-6">
-              <SkillPane
-                loading={skillsQuery.isLoading || detailQuery.isLoading}
-                detail={activeDetail}
-                file={activeFile}
-                fileLoading={fileQuery.isLoading && !activeFile}
-                updateStatus={updateStatusQuery.data}
-                updateStatusLoading={updateStatusQuery.isLoading}
-                viewMode={viewMode}
-                editMode={editMode}
-                draft={draft}
-                setViewMode={setViewMode}
-                setEditMode={setEditMode}
-                setDraft={setDraft}
-                onCheckUpdates={() => {
-                  void updateStatusQuery.refetch();
-                }}
-                checkUpdatesPending={updateStatusQuery.isFetching}
-                onInstallUpdate={() => installUpdate.mutate()}
-                installUpdatePending={installUpdate.isPending}
-                onDelete={openDeleteDialog}
-                deletePending={deleteSkill.isPending}
-                onSave={() => saveFile.mutate()}
-                savePending={saveFile.isPending}
-                attachAgents={eligibleAgentsForAttach}
-                attachPopoverOpen={attachPopoverOpen}
-                setAttachPopoverOpen={setAttachPopoverOpen}
-                onSubmitAttach={handleAttachSubmit}
-                attachPending={attachAgentsMutation.isPending}
-              />
-=======
->>>>>>> paperclipai/master
-            </div>
-            <a
-              href="https://skills.sh"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-sm text-foreground no-underline transition-colors hover:bg-accent/40"
-            >
-              <span>
-                <span className="block font-medium">Browse skills.sh</span>
-                <span className="mt-1 block text-muted-foreground">Find install commands and paste one here.</span>
-              </span>
-              <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            </a>
-            <a
-              href="https://github.com/search?q=SKILL.md&type=code"
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-start justify-between rounded-md border border-border px-3 py-3 text-sm text-foreground no-underline transition-colors hover:bg-accent/40"
-            >
-              <span>
-                <span className="block font-medium">Search GitHub</span>
-                <span className="mt-1 block text-muted-foreground">Look for repositories with `SKILL.md`, then paste the repo URL.</span>
-              </span>
-              <ExternalLink className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-            </a>
-          </div>
+            </TabsContent>
+          </Tabs>
+          <DialogFooter showCloseButton />
         </DialogContent>
       </Dialog>
 
