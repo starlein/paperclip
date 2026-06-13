@@ -3,9 +3,10 @@ name: Docker
 on:
   push:
     branches:
-      - "master"
+      - "mymaster"
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -37,8 +38,11 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
+          # ghcr.io/${{ github.repository }} == ghcr.io/starlein/paperclip.
+          # Tag :latest only for the mymaster integration branch (the GitHub
+          # default branch is master-upstream, so is_default_branch is wrong here).
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/mymaster' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha
@@ -47,7 +51,8 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          target: production
+          platforms: linux/amd64
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
