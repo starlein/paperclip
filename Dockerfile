@@ -4,7 +4,7 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 ARG DOCKER_GID=992
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 mc nano procps zstd tini net-tools \
+  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 mc nano procps zstd tini net-tools libicu76 \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
