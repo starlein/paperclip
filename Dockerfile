@@ -44,30 +44,38 @@ COPY packages/adapters/grok-local/package.json packages/adapters/grok-local/
 COPY packages/adapters/openclaw-gateway/package.json packages/adapters/openclaw-gateway/
 COPY packages/adapters/opencode-local/package.json packages/adapters/opencode-local/
 COPY packages/adapters/pi-local/package.json packages/adapters/pi-local/
+COPY packages/plugins/create-paperclip-plugin/package.json packages/plugins/create-paperclip-plugin/
 COPY packages/plugins/sdk/package.json packages/plugins/sdk/
 COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plugins/sandbox-providers/
 COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
 COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-wiki/
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
+COPY packages/plugins/examples/plugin-authoring-smoke-example/package.json packages/plugins/examples/plugin-authoring-smoke-example/
 COPY packages/plugins/examples/plugin-file-browser-example/package.json packages/plugins/examples/plugin-file-browser-example/
+COPY packages/plugins/examples/plugin-hello-world-example/package.json packages/plugins/examples/plugin-hello-world-example/
+COPY packages/plugins/examples/plugin-kitchen-sink-example/package.json packages/plugins/examples/plugin-kitchen-sink-example/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
 RUN pnpm install --frozen-lockfile
+RUN for package_json in packages/plugins/sandbox-providers/*/package.json; do \
+    [ -f "$package_json" ] || continue; \
+    provider_dir="${package_json%/package.json}"; \
+    echo "Installing standalone sandbox provider deps: ${provider_dir}"; \
+    pnpm --dir "$provider_dir" install --ignore-workspace --no-lockfile; \
+  done
 
 FROM base AS build
 WORKDIR /app
 COPY --from=deps /app /app
 COPY . .
-RUN pnpm --filter @paperclipai/ui build
-RUN pnpm --filter @paperclipai/plugin-sdk build
-RUN pnpm --filter @paperclipai/plugin-workspace-diff build
-RUN pnpm --filter @paperclipai/examples/plugin-file-browser-example build
-RUN pnpm --filter @paperclipai/shared build
-RUN pnpm --filter @paperclipai/adapter-utils build
-RUN pnpm --filter @paperclipai/db build
-RUN pnpm --filter @paperclipai/server build
-RUN pnpm --filter paperclipai build
+RUN pnpm run build
+RUN for package_json in packages/plugins/sandbox-providers/*/package.json; do \
+    [ -f "$package_json" ] || continue; \
+    provider_dir="${package_json%/package.json}"; \
+    echo "Building bundled sandbox provider: ${provider_dir}"; \
+    pnpm --dir "$provider_dir" build; \
+  done
 
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN test -f cli/dist/index.js || (echo "ERROR: cli build output missing" && exit 1)
