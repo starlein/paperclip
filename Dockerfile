@@ -110,7 +110,6 @@ ENV NODE_ENV=production \
   OPENCODE_ALLOW_ALL_MODELS=true \
   GEMINI_SANDBOX=false
 
-VOLUME ["/paperclip"]
 EXPOSE 3100
 
 ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]
