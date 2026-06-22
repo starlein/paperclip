@@ -3,8 +3,13 @@ FROM node:lts-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG DOCKER_GID=992
+ARG APP_VERSION=v2026.618.0
+LABEL org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/starlein/paperclip"
+ENV PAPERCLIP_IMAGE_VERSION=${APP_VERSION}
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 mc nano procps zstd tini net-tools libicu76 \
+  && apt-get install -y --no-install-recommends ca-certificates gosu curl gh git wget ripgrep python3 mc nano procps zstd tini net-tools libicu76 inetutils-ping lynx \
+  && apt-get install -y php8.4 php8.4-pgsql php8.4-mysql php8.4-pdo php8.4-mbstring php8.4-sqlite3 php8.4-xsl composer mariadb-client node-playwright chromium-driver chromium-headless-shell \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable
 
@@ -110,7 +115,6 @@ ENV NODE_ENV=production \
   OPENCODE_ALLOW_ALL_MODELS=true \
   GEMINI_SANDBOX=false
 
-VOLUME ["/paperclip"]
 EXPOSE 3100
 
 ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]
