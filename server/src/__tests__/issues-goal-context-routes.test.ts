@@ -211,6 +211,7 @@ describe.sequential("issue goal context routes", () => {
     mockDocumentsService.getIssueDocumentPayload.mockResolvedValue({});
     mockDocumentsService.getIssueDocumentByKey.mockResolvedValue(null);
     mockExecutionWorkspaceService.getById.mockResolvedValue(null);
+/*
     mockDb.select.mockReturnValue({
       from: vi.fn(() => {
         let hasJoin = false;
@@ -228,6 +229,16 @@ describe.sequential("issue goal context routes", () => {
         return query;
       }),
     });
+*/
+    const emptyQuery: any = {};
+    emptyQuery.from = vi.fn(() => emptyQuery);
+    emptyQuery.innerJoin = vi.fn(() => emptyQuery);
+    emptyQuery.where = vi.fn(() => emptyQuery);
+    emptyQuery.orderBy = vi.fn(() => emptyQuery);
+    emptyQuery.limit = vi.fn(async () => []);
+    emptyQuery.then = (resolve: (rows: unknown[]) => unknown, reject?: (error: unknown) => unknown) =>
+      Promise.resolve([]).then(resolve, reject);
+    mockDb.select.mockReturnValue(emptyQuery);
     mockDb.execute.mockResolvedValue([]);
     mockProjectService.getById.mockResolvedValue({
       id: legacyProjectLinkedIssue.projectId,
