@@ -300,6 +300,8 @@ pnpm paperclipai agent instructions-file:put <agent-id> --path AGENTS.md --conte
 pnpm paperclipai agent instructions-file:delete <agent-id> --path AGENTS.md
 ```
 
+Agent config, instructions, skills, project env, environment, secret, and workspace edits affect the next run. Active runs finish with the config they started with. When a saved session, reused workspace, or sandbox lease no longer matches the effective next-run config, Paperclip may start fresh execution and records non-sensitive freshness categories in run result JSON and workspace operation logs.
+
 `agent local-cli` is the quickest way to run local Claude/Codex manually as a Paperclip agent:
 
 - creates a new long-lived agent API key
@@ -806,9 +808,9 @@ pnpm paperclipai plugin tool:execute --payload-json '{...}'
 pnpm paperclipai plugin health <plugin-id>
 pnpm paperclipai plugin logs <plugin-id>
 pnpm paperclipai plugin upgrade <plugin-id>
-pnpm paperclipai plugin config <plugin-id>
-pnpm paperclipai plugin config:set <plugin-id> --payload-json '{"configJson":{...}}'
-pnpm paperclipai plugin config:test <plugin-id> --payload-json '{"configJson":{...}}'
+pnpm paperclipai plugin config <plugin-id> --company-id <company-id>
+pnpm paperclipai plugin config:set <plugin-id> --company-id <company-id> --payload-json '{"configJson":{...}}'
+pnpm paperclipai plugin config:test <plugin-id> --company-id <company-id> --payload-json '{"configJson":{...}}'
 pnpm paperclipai plugin jobs <plugin-id>
 pnpm paperclipai plugin job:runs <plugin-id> <job-id>
 pnpm paperclipai plugin job:trigger <plugin-id> <job-id> [--payload-json '{...}']

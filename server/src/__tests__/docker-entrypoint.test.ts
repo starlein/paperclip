@@ -67,7 +67,7 @@ afterEach(() => {
 });
 
 describe("docker-entrypoint.sh", () => {
-  it("keeps the root-start gosu flow with default UID/GID (Docker Compose)", async () => {
+  it("keeps the root-start gosu flow and normalizes Paperclip home ownership with default UID/GID", async () => {
     installStubs({ uid: 0, gid: 0 });
 
     const { stdout, calls } = await runEntrypoint();
@@ -75,7 +75,7 @@ describe("docker-entrypoint.sh", () => {
     expect(stdout).toContain("ENTRYPOINT-CMD-RAN");
     expect(calls).toContain("gosu node echo ENTRYPOINT-CMD-RAN");
     expect(calls).not.toContain("usermod");
-    expect(calls).not.toContain("chown");
+    expect(calls).toContain("chown -R node:node /paperclip");
   });
 
   it("remaps the node user and chowns /paperclip before gosu when root requests a different UID/GID", async () => {
