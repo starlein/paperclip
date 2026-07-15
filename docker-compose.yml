@@ -1,24 +1,42 @@
+# Paperclip docker-compose
+#
+# By default only the `paperclip` service starts, using the built-in embedded
+# PostgreSQL.  Each optional service is gated behind a named profile so you
+# only start what you actually need.
+#
+# Profiles
+#   postgres  — external PostgreSQL container
+#               Also set DATABASE_URL in .env, e.g.:
+#               DATABASE_URL=postgres://paperclip:SECRET@postgres:5432/paperclip
+#   redis     — Redis container
+#               Also set REDIS_URL / PAPERCLIP_REDIS_URL in .env, e.g.:
+#               REDIS_URL=redis://redis:6379
+#   ollama    — Ollama local-LLM server
+#               Also set OLLAMA_HOST in .env, e.g.:
+#               OLLAMA_HOST=http://ollama:11434
+#   proxy     — Nginx reverse-proxy with TLS termination
+#
+# Examples
+#   docker compose up                                   # minimal (embedded postgres)
+#   docker compose --profile proxy up                   # add TLS proxy
+#   docker compose --profile postgres --profile proxy up
+#   docker compose --profile postgres --profile redis --profile ollama --profile proxy up
+
 services:
-#  ollama:
-#    image: ollama/ollama:latest
-#    container_name: ollama
-#    restart: unless-stopped
-#    volumes:
-#      - ${OLLAMA_DATA_DIR}:/root/.ollama
-#    ports:
-#      - "127.0.0.1:${OLLAMA_PORT}:11434"
-#    healthcheck:
-#      test: ["CMD", "ollama", "list"]
-#      interval: 15s
-#      timeout: 5s
-#      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Optional: external PostgreSQL
+  # Activate with: --profile postgres
+  # When this profile is off, Paperclip uses its built-in embedded PostgreSQL.
+  # ---------------------------------------------------------------------------
   postgres:
+    profiles: [postgres]
     image: postgres:17-alpine
     container_name: paperclip-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: paperclip
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set when using the postgres profile}"
       POSTGRES_DB: paperclip
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -29,7 +47,12 @@ services:
       retries: 20
     # Intentionally no host port mapping: PostgreSQL is only reachable on the Docker network.
 
+  # ---------------------------------------------------------------------------
+  # Optional: Redis
+  # Activate with: --profile redis
+  # ---------------------------------------------------------------------------
   redis:
+    profiles: [redis]
     image: redis:7-alpine
     container_name: paperclip-redis
     restart: unless-stopped
@@ -43,6 +66,29 @@ services:
       retries: 20
     # Intentionally no host port mapping: Redis is only reachable on the Docker network.
 
+  # ---------------------------------------------------------------------------
+  # Optional: Ollama local-LLM server
+  # Activate with: --profile ollama
+  # Also set OLLAMA_HOST=http://ollama:11434 in .env
+  # ---------------------------------------------------------------------------
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ${OLLAMA_DATA_DIR:-ollama-data}:/root/.ollama
+    ports:
+      - "127.0.0.1:${OLLAMA_PORT:-11434}:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  # ---------------------------------------------------------------------------
+  # Paperclip application (always started)
+  # ---------------------------------------------------------------------------
   paperclip:
     image: ghcr.io/starlein/paperclip:latest
     build:
@@ -58,23 +104,29 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+        required: false
       redis:
         condition: service_healthy
-#      ollama:
-#        condition: service_healthy
-    expose:
-      # Internal only: nginx reaches Paperclip over the Docker network.
-      # The app/API port is not published on the host.
-      - "3100"
+        required: false
+      ollama:
+        condition: service_healthy
+        required: false
+    ports:
+      # Published on the host so the app is accessible without the proxy.
+      # Set PAPERCLIP_PORT in .env to change the host port (default: 3100).
+      - "${PAPERCLIP_PORT:-3100}:3100"
     volumes:
       - ${PAPERCLIP_DATA_DIR:-./data/docker-paperclip}:/paperclip
     environment:
       HOST: 0.0.0.0
       PORT: 3100
       SERVE_UI: "true"
-      DATABASE_URL: "postgres://paperclip:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/paperclip"
-      REDIS_URL: redis://redis:6379
-      PAPERCLIP_REDIS_URL: redis://redis:6379
+      # Leave DATABASE_URL unset (or set it to empty) to use embedded PostgreSQL.
+      # Set it in .env when using the postgres profile.
+      DATABASE_URL: "${DATABASE_URL:-}"
+      # Leave REDIS_URL unset when not using the redis profile.
+      REDIS_URL: "${REDIS_URL:-}"
+      PAPERCLIP_REDIS_URL: "${PAPERCLIP_REDIS_URL:-}"
       NODE_ENV: production
       HOME: /paperclip
       PAPERCLIP_HOME: /paperclip
@@ -86,16 +138,22 @@ services:
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
       PAPERCLIP_AUTH_SECRET: "${PAPERCLIP_AUTH_SECRET:-}"
       PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
-      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-https://localhost}"
+      PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
       OPENCODE_ALLOW_ALL_MODELS: "true"
       PAPERCLIP_TELEMETRY_DISABLED: "true"
       USER_UID: ${USER_UID:-1000}
       USER_GID: ${USER_GID:-1000}
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/paperclip/.local/bin
       DOCKER_HOST: unix:///var/run/docker.sock
-#      OLLAMA_HOST: ${OLLAMA_HOST}
+      # Leave OLLAMA_HOST unset when not using the ollama profile.
+      OLLAMA_HOST: "${OLLAMA_HOST:-}"
 
+  # ---------------------------------------------------------------------------
+  # Optional: Nginx reverse-proxy with TLS termination
+  # Activate with: --profile proxy
+  # ---------------------------------------------------------------------------
   proxy:
+    profiles: [proxy]
     image: paperclip-nginx-selfsigned:local
     build:
       context: ./docker/nginx
@@ -118,4 +176,5 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  ollama-data:
   proxy-certs:
