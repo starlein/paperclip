@@ -37,6 +37,10 @@ import { AgentIcon } from "../components/AgentIconPicker";
 import { AgentMultiSelect } from "../components/AgentMultiSelect";
 import { useAdapterCapabilities } from "../adapters/use-adapter-capabilities";
 import {
+  SkillPolicyDenialNotice,
+  useSkillPolicyDenial,
+} from "@/components/skill-studio/SkillPolicySurfaces";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -81,6 +85,7 @@ import {
   type SkillCreateDraft,
 } from "../lib/skill-create";
 import { SkillCardIcon } from "../components/SkillCardIcon";
+import { ImportSkillsFromProjectDialog } from "./skills/ImportSkillsFromProjectDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -101,6 +106,7 @@ import {
   FileText,
   Folder,
   FolderOpen,
+  FolderSearch,
   GitFork,
   Github,
   Globe,
@@ -1456,6 +1462,7 @@ export function DiscoveryGrid({
   totalCount,
   onCreate,
   onImport,
+  onImportFromProject,
   onBrowseCatalog,
   onScan,
   scanPending,
@@ -1479,6 +1486,7 @@ export function DiscoveryGrid({
   totalCount: number;
   onCreate: () => void;
   onImport: () => void;
+  onImportFromProject: () => void;
   onBrowseCatalog: () => void;
   onScan: () => void;
   scanPending: boolean;
@@ -1616,6 +1624,10 @@ export function DiscoveryGrid({
               <DropdownMenuItem onSelect={onImport}>
                 <Globe className="mr-2 h-4 w-4" />
                 Import from path or URL
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onImportFromProject}>
+                <FolderSearch className="mr-2 h-4 w-4" />
+                Import skills from project
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -4085,6 +4097,19 @@ export function CompanySkills() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToastActions();
   const adapterCaps = useAdapterCapabilities();
+  const policyDenial = useSkillPolicyDenial();
+  // Route a failed skill mutation to the persistent policy banner when it is an
+  // explicit-policy (State B) or platform-safety (State C) denial; otherwise keep
+  // the existing transient error toast. This is the core "actionable denial only
+  // for real restrictions" behavior from §9.10 (PAP-13865).
+  const reportSkillError = (error: unknown, title: string, fallbackBody: string, actionLabel?: string) => {
+    if (policyDenial.capture(error, actionLabel)) return;
+    pushToast({
+      tone: "error",
+      title,
+      body: error instanceof Error && error.message ? error.message : fallbackBody,
+    });
+  };
   const [skillFilter, setSkillFilter] = useState("");
   const [source, setSource] = useState("");
   const [emptySourceHelpOpen, setEmptySourceHelpOpen] = useState(false);
@@ -4120,6 +4145,7 @@ export function CompanySkills() {
   const [discoverySort, setDiscoverySort] = useState<DiscoverySort>("agents");
   const [createError, setCreateError] = useState<string | null>(null);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [importFromProjectOpen, setImportFromProjectOpen] = useState(false);
   const parsedRoute = useMemo(() => parseSkillRoute(routePath), [routePath]);
   const isStudioNew = routePath === "studio/new";
   const routeSkillToken = isStudioNew ? null : parsedRoute.skillToken;
@@ -4378,11 +4404,7 @@ export function CompanySkills() {
       setSource("");
     },
     onError: (error) => {
-      pushToast({
-        tone: "error",
-        title: "Skill import failed",
-        body: error instanceof Error ? error.message : "Failed to import skill source.",
-      });
+      reportSkillError(error, "Skill import failed", "Failed to import skill source.", "Importing skills");
     },
   });
 
@@ -4417,11 +4439,7 @@ export function CompanySkills() {
     },
     onError: (error) => {
       setScanStatusMessage(null);
-      pushToast({
-        tone: "error",
-        title: "Project skill scan failed",
-        body: error instanceof Error ? error.message : "Failed to scan project workspaces.",
-      });
+      reportSkillError(error, "Project skill scan failed", "Failed to scan project workspaces.", "Scanning projects for skills");
     },
   });
 
@@ -4441,11 +4459,7 @@ export function CompanySkills() {
     onError: (error) => {
       const message = error instanceof Error ? error.message : "Failed to create skill.";
       setCreateError(message);
-      pushToast({
-        tone: "error",
-        title: "Skill creation failed",
-        body: message,
-      });
+      reportSkillError(error, "Skill creation failed", "Failed to create skill.", "Creating a skill");
     },
   });
 
@@ -4546,11 +4560,7 @@ export function CompanySkills() {
       });
     },
     onError: (error) => {
-      pushToast({
-        tone: "error",
-        title: "Update failed",
-        body: error instanceof Error ? error.message : "Failed to install skill update.",
-      });
+      reportSkillError(error, "Update failed", "Failed to install skill update.", "Updating this skill");
     },
   });
 
@@ -4686,6 +4696,9 @@ export function CompanySkills() {
     onError: (error) => {
       const message = error instanceof Error ? error.message : "Failed to install catalog skill.";
       setInstallDialogState((current) => ({ ...current, error: message }));
+      // Also surface explicit-policy / platform denials in the persistent banner
+      // so the reason stays visible after the dialog closes.
+      policyDenial.capture(error, "Installing this skill");
     },
   });
 
@@ -4808,11 +4821,7 @@ export function CompanySkills() {
       });
     },
     onError: (error) => {
-      pushToast({
-        tone: "error",
-        title: "Remove failed",
-        body: error instanceof Error ? error.message : "Failed to remove skill.",
-      });
+      reportSkillError(error, "Remove failed", "Failed to remove skill.", "Removing this skill");
     },
   });
 
@@ -4921,6 +4930,11 @@ export function CompanySkills() {
 
   return (
     <>
+      {policyDenial.denial ? (
+        <div className="px-4 pt-4">
+          <SkillPolicyDenialNotice denial={policyDenial.denial} onDismiss={policyDenial.reset} />
+        </div>
+      ) : null}
       <Dialog open={deleteOpen} onOpenChange={closeDeleteDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -5112,6 +5126,18 @@ export function CompanySkills() {
         </DialogContent>
       </Dialog>
 
+      {selectedCompanyId ? (
+        <ImportSkillsFromProjectDialog
+          open={importFromProjectOpen}
+          onOpenChange={setImportFromProjectOpen}
+          companyId={selectedCompanyId}
+          onImportFromPath={() => {
+            setImportFromProjectOpen(false);
+            setImportDialogOpen(true);
+          }}
+        />
+      ) : null}
+
       {isStudioNew ? (
         <div className="min-h-(--sz-calc-30)">
           <div className="border-b border-border px-4 py-5">
@@ -5163,6 +5189,7 @@ export function CompanySkills() {
           totalCount={discoveryCards.length}
           onCreate={() => navigate(skillStudioNewRoute())}
           onImport={() => setImportDialogOpen(true)}
+          onImportFromProject={() => setImportFromProjectOpen(true)}
           onBrowseCatalog={() => setDiscoveryTab("catalog")}
           onScan={() => scanProjects.mutate()}
           scanPending={scanProjects.isPending}
