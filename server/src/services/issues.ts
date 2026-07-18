@@ -107,6 +107,7 @@ import {
 } from "./recovery/origins.js";
 import { classifyIssueGraphLiveness, type IssueLivenessFinding } from "./recovery/issue-graph-liveness.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import { finalizeSummarySlotsForTerminalIssue } from "./summary-slot-finalization.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -134,6 +135,9 @@ const ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_LOG_BYTES = 2_000_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_CHUNK_BYTES = 256_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_END_SLACK_MS = 60_000;
 const ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_PARALLEL_READS = 8;
+export const ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_DAYS = 7;
+const ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_MS = ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+const ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE = 500;
 const DELETED_ISSUE_COMMENT_BODY = "";
 const ISSUE_WAKE_DIAGNOSTICS_ACTIVITY_ACTIONS = ["issue.tree_hold_wakeup_deferred"] as const;
 
@@ -1477,6 +1481,50 @@ function latestIssueActivityAt(...values: Array<Date | string | null | undefined
     .filter((value): value is Date => value instanceof Date)
     .sort((a, b) => b.getTime() - a.getTime());
   return normalized[0] ?? null;
+}
+
+type InboxArchiveAttributionRow = {
+  issueId: string;
+  archivedAt: Date;
+  archivedByActorType: "user" | "agent";
+  archivedByAgentId: string | null;
+  archivedByRunId: string | null;
+};
+
+async function inboxArchiveRowsForIssues(
+  dbOrTx: Db,
+  companyId: string,
+  userId: string,
+  issueIds: string[],
+): Promise<InboxArchiveAttributionRow[]> {
+  if (issueIds.length === 0) return [];
+  return dbOrTx
+    .select({
+      issueId: issueInboxArchives.issueId,
+      archivedAt: issueInboxArchives.archivedAt,
+      archivedByActorType: issueInboxArchives.archivedByActorType,
+      archivedByAgentId: issueInboxArchives.archivedByAgentId,
+      archivedByRunId: issueInboxArchives.archivedByRunId,
+    })
+    .from(issueInboxArchives)
+    .where(and(
+      eq(issueInboxArchives.companyId, companyId),
+      eq(issueInboxArchives.userId, userId),
+      inArray(issueInboxArchives.issueId, issueIds),
+    ));
+}
+
+function activeInboxArchiveFields(
+  archive: InboxArchiveAttributionRow | undefined,
+  lastActivityAt: Date,
+) {
+  if (!archive || archive.archivedAt.getTime() < lastActivityAt.getTime()) return {};
+  return {
+    archivedAt: archive.archivedAt,
+    archivedByActorType: archive.archivedByActorType,
+    archivedByAgentId: archive.archivedByAgentId,
+    archivedByRunId: archive.archivedByRunId,
+  };
 }
 
 function issueListOrderBy(
@@ -4816,7 +4864,7 @@ export function issueService(db: Db) {
       }
 
       const issueIds = withRuns.map((row) => row.id);
-      const [statsRows, readRows, lastActivityRows, blockedByMap, liveDescendantCountByIssueId] = await Promise.all([
+      const [statsRows, readRows, lastActivityRows, archiveRows, blockedByMap, liveDescendantCountByIssueId] = await Promise.all([
         contextUserId
           ? userCommentStatsForIssues(db, companyId, contextUserId, issueIds)
           : Promise.resolve([]),
@@ -4824,6 +4872,9 @@ export function issueService(db: Db) {
           ? userReadStatsForIssues(db, companyId, contextUserId, issueIds)
           : Promise.resolve([]),
         lastActivityStatsForIssues(db, companyId, issueIds),
+        contextUserId
+          ? inboxArchiveRowsForIssues(db, companyId, contextUserId, issueIds)
+          : Promise.resolve([]),
         includeBlockedBy
           ? blockedByMapForIssues(db, companyId, issueIds)
           : Promise.resolve(new Map<string, IssueRelationIssueSummary[]>()),
@@ -4833,6 +4884,7 @@ export function issueService(db: Db) {
       ]);
       const statsByIssueId = new Map(statsRows.map((row) => [row.issueId, row]));
       const lastActivityByIssueId = new Map(lastActivityRows.map((row) => [row.issueId, row]));
+      const archiveByIssueId = new Map(archiveRows.map((row) => [row.issueId, row]));
       const [
         blockerAttentionByIssueId,
         productivityReviewByIssueId,
@@ -4878,6 +4930,7 @@ export function issueService(db: Db) {
         ) ?? row.updatedAt;
         return {
           ...row,
+          ...activeInboxArchiveFields(archiveByIssueId.get(row.id), lastActivityAt),
           ...(includeBlockedBy ? { blockedBy: blockedByMap.get(row.id) ?? [] } : {}),
           lastActivityAt,
           ...(blockerAttentionByIssueId.has(row.id) ? { blockerAttention: blockerAttentionByIssueId.get(row.id) } : {}),
@@ -4995,7 +5048,17 @@ export function issueService(db: Db) {
       return deleted.length > 0;
     },
 
-    archiveInbox: async (companyId: string, issueId: string, userId: string, archivedAt: Date = new Date()) => {
+    archiveInbox: async (
+      companyId: string,
+      issueId: string,
+      userId: string,
+      archivedAt: Date = new Date(),
+      attribution?: {
+        archivedByActorType: "user" | "agent";
+        archivedByAgentId?: string | null;
+        archivedByRunId?: string | null;
+      },
+    ) => {
       const now = new Date();
       const [row] = await db
         .insert(issueInboxArchives)
@@ -5003,6 +5066,9 @@ export function issueService(db: Db) {
           companyId,
           issueId,
           userId,
+          archivedByActorType: attribution?.archivedByActorType ?? "user",
+          archivedByAgentId: attribution?.archivedByAgentId ?? null,
+          archivedByRunId: attribution?.archivedByRunId ?? null,
           archivedAt,
           updatedAt: now,
         })
@@ -5010,6 +5076,9 @@ export function issueService(db: Db) {
           target: [issueInboxArchives.companyId, issueInboxArchives.issueId, issueInboxArchives.userId],
           set: {
             archivedAt,
+            archivedByActorType: attribution?.archivedByActorType ?? "user",
+            archivedByAgentId: attribution?.archivedByAgentId ?? null,
+            archivedByRunId: attribution?.archivedByRunId ?? null,
             updatedAt: now,
           },
         })
@@ -5029,6 +5098,22 @@ export function issueService(db: Db) {
         )
         .returning();
       return row ?? null;
+    },
+
+    getActiveInboxArchiveFields: async (
+      issue: Pick<IssueRow, "id" | "companyId" | "updatedAt">,
+      userId: string,
+    ) => {
+      const [[activity], [archive]] = await Promise.all([
+        lastActivityStatsForIssues(db, issue.companyId, [issue.id]),
+        inboxArchiveRowsForIssues(db, issue.companyId, userId, [issue.id]),
+      ]);
+      const lastActivityAt = latestIssueActivityAt(
+        issue.updatedAt,
+        activity?.latestCommentAt ?? null,
+        activity?.latestLogAt ?? null,
+      ) ?? issue.updatedAt;
+      return activeInboxArchiveFields(archive, lastActivityAt);
     },
 
     getById: async (raw: string) => {
@@ -6071,6 +6156,19 @@ export function issueService(db: Db) {
         let existingIssue: typeof issues.$inferSelect | undefined;
         let deduplicationReason: "idempotency_key" | "recent_open_title" | null = null;
         if (idempotencyKey) {
+          const idempotencyKeyRetentionCutoff = new Date(Date.now() - ISSUE_CREATE_IDEMPOTENCY_KEY_RETENTION_MS);
+          await tx.execute(sql`
+            delete from ${issueCreateIdempotencyKeys}
+            where ${issueCreateIdempotencyKeys.id} in (
+              select ${issueCreateIdempotencyKeys.id}
+              from ${issueCreateIdempotencyKeys}
+              where ${issueCreateIdempotencyKeys.companyId} = ${companyId}
+                and ${issueCreateIdempotencyKeys.createdAt} < ${idempotencyKeyRetentionCutoff.toISOString()}::timestamptz
+              order by ${issueCreateIdempotencyKeys.createdAt} asc, ${issueCreateIdempotencyKeys.id} asc
+              limit ${ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE}
+            )
+          `);
+
           [existingIssue] = await tx
             .select()
             .from(issueCreateIdempotencyKeys)
@@ -6511,6 +6609,12 @@ export function issueService(db: Db) {
           .returning()
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!updated) return null;
+        if (
+          (updated.status === "done" || updated.status === "cancelled") &&
+          existing.status !== updated.status
+        ) {
+          await finalizeSummarySlotsForTerminalIssue(tx, updated);
+        }
         if (nextLabelIds !== undefined) {
           await syncIssueLabels(updated.id, existing.companyId, nextLabelIds, tx);
         }

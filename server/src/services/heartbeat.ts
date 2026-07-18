@@ -1428,10 +1428,10 @@ function isConfigurationIncompleteFailure(error: unknown): error is Configuratio
   return error instanceof ConfigurationIncompleteFailure;
 }
 
-function isConfigurationIncompleteFailedRun(
+export function isConfigurationIncompleteFailedRun(
   run: Pick<typeof heartbeatRuns.$inferSelect, "errorCode"> | null | undefined,
 ) {
-  return run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE;
+  return run?.errorCode === CONFIGURATION_INCOMPLETE_FAILURE_CODE || run?.errorCode === "model_not_found";
 }
 
 async function hasGitMetadata(cwd: string | null | undefined) {
@@ -5785,6 +5785,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       action: "company.skill_test_run_completed",
       entityType: "company_skill_test_run",
       entityId: completedRun.id,
+      issueId: input.issueId,
       details: {
         issueId: input.issueId,
         status: completedRun.status,
@@ -10718,6 +10719,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           action: "issue.tree_hold_run_interrupted",
           entityType: "heartbeat_run",
           entityId: run.id,
+          issueId: issueId,
           details: {
             issueId,
             holdId: activePauseHold.holdId,
@@ -12405,7 +12407,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
       hasTaskSession: taskSession != null,
       configuredModel,
-      taskSessionParams: taskSessionDecodedParams,
+      taskSessionParams: taskSession?.sessionParamsJson ?? taskSessionDecodedParams,
       configMetadata: sessionConfigMetadata,
       wakeResetReason: wakeSessionResetReason,
       preserveLegacySessionWithoutConfigMetadata: acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
