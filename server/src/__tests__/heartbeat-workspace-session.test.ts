@@ -1755,6 +1755,24 @@ describe("effective run execution workspace config freshness", () => {
     });
   });
 
+  it("does not automatically reuse when both project IDs are null", () => {
+    expect(resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: "workspace-shared",
+      issueExecutionWorkspacePreference: null,
+      resolvedExecutionWorkspaceMode: "shared_workspace",
+      resolvedProjectId: null,
+      existingExecutionWorkspaceStatus: "active",
+      existingExecutionWorkspaceClosedAt: null,
+      existingExecutionWorkspaceMode: "shared_workspace",
+      existingExecutionWorkspaceProjectId: null,
+    })).toMatchObject({
+      requestedShouldReuseExisting: false,
+      existingExecutionWorkspaceAvailable: false,
+      explicitReuseRequested: false,
+      automaticSharedReuseRequested: false,
+    });
+  });
+
   it("lets replacement-class drift replace an automatically reused shared workspace", async () => {
     const base = buildWorkspaceConfigMetadata({ mode: "shared_workspace" });
     const next = buildWorkspaceConfigMetadata({

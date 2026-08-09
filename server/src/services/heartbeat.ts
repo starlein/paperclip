@@ -4326,6 +4326,7 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
     input.existingExecutionWorkspaceMode === "shared_workspace" &&
     existingStatusSupportsAutomaticReuse &&
     !input.existingExecutionWorkspaceClosedAt &&
+    readNonEmptyString(input.resolvedProjectId) !== null &&
     readNonEmptyString(input.resolvedProjectId) ===
       readNonEmptyString(input.existingExecutionWorkspaceProjectId),
   );
