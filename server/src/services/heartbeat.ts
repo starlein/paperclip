@@ -4320,15 +4320,17 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
     input.existingExecutionWorkspaceStatus === "active" ||
     input.existingExecutionWorkspaceStatus === "idle" ||
     input.existingExecutionWorkspaceStatus === "in_review";
+  const resolvedProjectIdNonEmpty = readNonEmptyString(input.resolvedProjectId);
+  const existingProjectIdNonEmpty = readNonEmptyString(input.existingExecutionWorkspaceProjectId);
   const automaticSharedReuseRequested = Boolean(
     requestedExecutionWorkspaceId &&
     input.resolvedExecutionWorkspaceMode === "shared_workspace" &&
     input.existingExecutionWorkspaceMode === "shared_workspace" &&
     existingStatusSupportsAutomaticReuse &&
     !input.existingExecutionWorkspaceClosedAt &&
-    readNonEmptyString(input.resolvedProjectId) !== null &&
-    readNonEmptyString(input.resolvedProjectId) ===
-      readNonEmptyString(input.existingExecutionWorkspaceProjectId),
+    resolvedProjectIdNonEmpty !== null &&
+    existingProjectIdNonEmpty !== null &&
+    resolvedProjectIdNonEmpty === existingProjectIdNonEmpty,
   );
   const requestedShouldReuseExisting = explicitReuseRequested || automaticSharedReuseRequested;
 
