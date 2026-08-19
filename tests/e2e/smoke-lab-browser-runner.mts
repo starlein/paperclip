@@ -26,7 +26,7 @@
  *                                      the §D5 routine's file-on-failure wiring.
  */
 import { promises as fs } from "node:fs";
-import { chromium } from "playwright";
+import { chromium } from "@playwright/test";
 import { ciSmokeLabScenarios } from "./smoke-lab.catalog.ts";
 
 const BASE = (process.env.SMOKE_BASE ?? "http://127.0.0.1:3211").replace(/\/$/, "");
