@@ -99,6 +99,7 @@ RUN test -f packages/adapter-utils/dist/index.js \
   && test -f packages/google-sheets-mcp-server/dist/stdio.js \
   && test -f packages/kv-demo-mcp-server/dist/main.js \
   || (echo "ERROR: required package build output missing" && exit 1)
+RUN rm -rf packages/paperclip-runner/runner/target
 
 FROM base AS production
 ARG USER_UID=1000
