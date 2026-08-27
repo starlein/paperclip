@@ -5944,7 +5944,7 @@ export function CompanySkills() {
                 Skillsets
               </TabsTrigger>
               <TabsTrigger value="other">
-                <Github className="h-4 w-4" />
+                <GithubIcon className="h-4 w-4" />
                 Other sources
               </TabsTrigger>
             </TabsList>
