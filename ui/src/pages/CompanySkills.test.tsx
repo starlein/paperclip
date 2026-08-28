@@ -7,6 +7,7 @@ import type { CatalogSkill, CompanySkillDetail, CompanySkillVersion, FolderListR
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DiscoveryGrid,
+  ImportSkillSourceTabsHeader,
   InstallPreviewDialog,
   SkillDetailPage,
   defaultInstallAgentSelection,
@@ -557,6 +558,21 @@ describe("skills discovery tab routing", () => {
 
     const installedParams = withDiscoveryTab(new URLSearchParams("tab=all&folder=my"), "installed");
     expect(installedParams.toString()).toBe("folder=my");
+  });
+});
+
+describe("skills import source tabs", () => {
+  it("renders the GitHub-backed other-sources tab", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<ImportSkillSourceTabsHeader />);
+    });
+
+    expect(container.textContent).toContain("Other sources");
+    expect(buttonsNamed(container, "Other sources")[0]?.querySelector("svg")).not.toBeNull();
   });
 });
 
