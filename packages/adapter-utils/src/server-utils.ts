@@ -1564,6 +1564,20 @@ export function renderPaperclipWakePrompt(
         "",
       ]
       : [];
+  const pendingInteractionAddresseeContractLines =
+    normalized.reason === "interaction_pending" &&
+    ["request_confirmation", "request_checkbox_confirmation", "request_item_verdicts"].includes(
+      normalized.interactionKind ?? "",
+    )
+      ? [
+          "Pending-interaction addressee contract: this bounded review does not transfer issue ownership.",
+          "Fetch the named interaction first. Do not call issue checkout, even if generic heartbeat guidance says checkout is required.",
+          "Do not change the issue assignee or status. Review the exact target read-only.",
+          "Resolve the named interaction directly through its accept, reject, or verdict endpoint.",
+          "If the interaction is stale, mismatched, governed, or no longer pending, stop fail-closed.",
+          "",
+        ]
+      : [];
   const wakeSummaryLines = [
     `- reason: ${normalized.reason ?? "unknown"}`,
     `- issue: ${normalized.issue?.identifier ?? normalized.issue?.id ?? "unknown"}${normalized.issue?.title ? ` ${normalized.issue.title}` : ""}`,
@@ -1599,6 +1613,7 @@ export function renderPaperclipWakePrompt(
         "Focus on the new wake delta below and continue the current task without restating the full heartbeat boilerplate.",
         "Fetch the API thread only when `fallbackFetchNeeded` is true or you need broader history than this batch.",
         "",
+        ...pendingInteractionAddresseeContractLines,
         ...executionContractLines,
         ...wakeSummaryLines,
       ]
@@ -1615,6 +1630,7 @@ export function renderPaperclipWakePrompt(
           ? ["Only fetch the API thread when `fallbackFetchNeeded` is true or you need broader history than this batch."]
           : []),
         "",
+        ...pendingInteractionAddresseeContractLines,
         ...executionContractLines,
         ...wakeSummaryLines,
       ];
