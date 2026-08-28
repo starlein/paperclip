@@ -12768,6 +12768,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const issueId = readNonEmptyString(context.issueId);
+    let pendingInteractionAddresseeWake = false;
     if (issueId) {
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(run.companyId, issueId);
       const treeHoldInteractionWake = activePauseHold && await isVerifiedIssueTreeControlInteractionWake(db, {
@@ -12804,7 +12805,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const dependencyReadiness = await issuesSvc.listDependencyReadiness(run.companyId, [issueId]);
       const readiness = dependencyReadiness.get(issueId);
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
-      const pendingInteractionAddresseeWake = await isPendingInteractionAddresseeWake(run, issueId, context);
+      pendingInteractionAddresseeWake = await isPendingInteractionAddresseeWake(run, issueId, context);
       if (
         unresolvedBlockerCount > 0 &&
         !allowsIssueInteractionWake(context) &&
@@ -12838,7 +12839,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueContext: issueId ? await getIssueExecutionContext(run.companyId, issueId) : null,
       routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
     });
-    const claimed = await db
+    const claimRun = (client: Pick<Db, "update">) => client
       .update(heartbeatRuns)
       .set({
         status: "running",
@@ -12849,6 +12850,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
       .returning()
       .then((rows) => rows[0] ?? null);
+    const claimed = pendingInteractionAddresseeWake && issueId
+      ? await db.transaction(async (tx) => {
+          const stillAuthorized = await isPendingInteractionAddresseeWake(
+            run,
+            issueId,
+            context,
+            tx,
+            true,
+          );
+          return stillAuthorized ? claimRun(tx) : null;
+        })
+      : await claimRun(db);
     if (!claimed) return null;
 
     publishLiveEvent({
@@ -12978,12 +12991,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     run: typeof heartbeatRuns.$inferSelect,
     issueId: string,
     context: Record<string, unknown>,
+    client: Pick<Db, "select"> = db,
+    lockForClaim = false,
   ) {
     if (readNonEmptyString(context.wakeReason) !== "interaction_pending") return false;
     const interactionId = readNonEmptyString(context.interactionId);
     if (!interactionId) return false;
 
-    const interaction = await db
+    const interactionQuery = client
       .select()
       .from(issueThreadInteractions)
       .where(and(
@@ -12993,7 +13008,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         eq(issueThreadInteractions.addresseeAgentId, run.agentId),
         eq(issueThreadInteractions.status, "pending"),
       ))
-      .limit(1)
+      .limit(1);
+    const interaction = await (lockForClaim ? interactionQuery.for("update") : interactionQuery)
       .then((rows) => rows[0] ?? null);
     if (!interaction) return false;
 

@@ -572,7 +572,11 @@ describe("skills import source tabs", () => {
     });
 
     expect(container.textContent).toContain("Other sources");
-    expect(buttonsNamed(container, "Other sources")[0]?.querySelector("svg")).not.toBeNull();
+    expect(
+      buttonsNamed(container, "Other sources")[0]?.querySelector(
+        'svg path[d^="M15 22v-4a4.8 4.8"]',
+      ),
+    ).not.toBeNull();
   });
 });
 
