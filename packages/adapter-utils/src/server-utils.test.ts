@@ -785,6 +785,35 @@ describe("renderPaperclipWakePrompt", () => {
     );
   });
 
+  it("renders the pending-interaction no-checkout contract on fresh and resumed wakes", () => {
+    const payload = {
+      reason: "interaction_pending",
+      interactionId: "interaction-1",
+      interactionKind: "request_item_verdicts",
+      issue: {
+        id: "issue-1",
+        identifier: "PAP-16000",
+        title: "Review exact head",
+        description: null,
+        descriptionTruncated: false,
+        status: "in_review",
+      },
+      commentWindow: { requestedCount: 0, includedCount: 0, missingCount: 0 },
+      comments: [],
+      fallbackFetchNeeded: false,
+    };
+
+    for (const prompt of [
+      renderPaperclipWakePrompt(payload),
+      renderPaperclipWakePrompt(payload, { resumedSession: true }),
+    ]) {
+      expect(prompt).toContain("Pending-interaction addressee contract");
+      expect(prompt).toContain("Do not call issue checkout");
+      expect(prompt).toContain("Do not change the issue assignee or status");
+      expect(prompt).toContain("Resolve the named interaction directly");
+    }
+  });
+
   it("renders the simplified-english interaction directive only when the payload enables it", () => {
     const payload = {
       reason: "issue_commented",

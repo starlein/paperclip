@@ -8,6 +8,7 @@ import {
   createDb,
   heartbeatRuns,
   issueComments,
+  issueThreadInteractions,
   issueTreeHoldMembers,
   issueTreeHolds,
   issues,
@@ -16,7 +17,10 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { issueTreeControlService } from "../services/issue-tree-control.js";
+import {
+  isVerifiedIssueTreeControlInteractionWake,
+  issueTreeControlService,
+} from "../services/issue-tree-control.js";
 import { issueService } from "../services/issues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -40,6 +44,7 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
   afterEach(async () => {
     await db.delete(issueTreeHoldMembers);
     await db.delete(issueTreeHolds);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
@@ -50,6 +55,85 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("allows a pending interaction addressee through issue-tree pause checks without issue ownership", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const addresseeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const interactionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "SoftwareEngineer",
+        role: "engineer",
+        status: "running",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: addresseeAgentId,
+        companyId,
+        name: "SecurityEngineer",
+        role: "security_engineer",
+        status: "idle",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Security advisory",
+      status: "in_review",
+      priority: "high",
+      assigneeAgentId: ownerAgentId,
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId,
+      issueId,
+      kind: "request_item_verdicts",
+      status: "pending",
+      addresseeAgentId,
+      payload: {
+        version: 1,
+        prompt: "Review the exact PR head.",
+        items: [{ id: "security", label: "Security boundary" }],
+        verdicts: ["approve", "reject", "defer"],
+      },
+    });
+
+    await expect(isVerifiedIssueTreeControlInteractionWake(db, {
+      companyId,
+      issueId,
+      agentId: addresseeAgentId,
+      contextSnapshot: { wakeReason: "interaction_pending", interactionId },
+    })).resolves.toBe(true);
+
+    await db.update(issueThreadInteractions).set({
+      effectiveResolverPolicy: "human_only",
+    }).where(eq(issueThreadInteractions.id, interactionId));
+
+    await expect(isVerifiedIssueTreeControlInteractionWake(db, {
+      companyId,
+      issueId,
+      agentId: addresseeAgentId,
+      contextSnapshot: { wakeReason: "interaction_pending", interactionId },
+    })).resolves.toBe(false);
   });
 
   it("previews a subtree without changing issue statuses", async () => {

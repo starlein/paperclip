@@ -166,7 +166,6 @@ import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
-import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -175,6 +174,7 @@ import {
 } from "./issue-execution-policy.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
+  isPendingInteractionAddresseeWake,
   isVerifiedIssueTreeControlInteractionWake,
   issueTreeControlService,
 } from "./issue-tree-control.js";
@@ -12805,7 +12805,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const dependencyReadiness = await issuesSvc.listDependencyReadiness(run.companyId, [issueId]);
       const readiness = dependencyReadiness.get(issueId);
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
-      pendingInteractionAddresseeWake = await isPendingInteractionAddresseeWake(run, issueId, context);
+      pendingInteractionAddresseeWake = await isPendingInteractionAddresseeWake(db, {
+        companyId: run.companyId,
+        issueId,
+        agentId: run.agentId,
+        contextSnapshot: context,
+      });
       if (
         unresolvedBlockerCount > 0 &&
         !allowsIssueInteractionWake(context) &&
@@ -12852,14 +12857,39 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .then((rows) => rows[0] ?? null);
     const claimed = pendingInteractionAddresseeWake && issueId
       ? await db.transaction(async (tx) => {
-          const stillAuthorized = await isPendingInteractionAddresseeWake(
-            run,
+          const stillAuthorized = await isPendingInteractionAddresseeWake(tx, {
+            companyId: run.companyId,
             issueId,
-            context,
-            tx,
-            true,
-          );
-          return stillAuthorized ? claimRun(tx) : null;
+            agentId: run.agentId,
+            contextSnapshot: context,
+          }, true);
+          if (stillAuthorized) return claimRun(tx);
+
+          const cancelledAt = new Date();
+          const cancellationReason =
+            "Pending interaction addressee wake became stale before run claim";
+          await tx
+            .update(heartbeatRuns)
+            .set({
+              status: "cancelled",
+              finishedAt: cancelledAt,
+              error: cancellationReason,
+              errorCode: "interaction_pending_stale",
+              updatedAt: cancelledAt,
+            })
+            .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")));
+          if (run.wakeupRequestId) {
+            await tx
+              .update(agentWakeupRequests)
+              .set({
+                status: "skipped",
+                finishedAt: cancelledAt,
+                error: cancellationReason,
+                updatedAt: cancelledAt,
+              })
+              .where(eq(agentWakeupRequests.id, run.wakeupRequestId));
+          }
+          return null;
         })
       : await claimRun(db);
     if (!claimed) return null;
@@ -12986,42 +13016,6 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           | "issue_continuation_waiting_on_review";
         details: Record<string, unknown>;
       };
-
-  async function isPendingInteractionAddresseeWake(
-    run: typeof heartbeatRuns.$inferSelect,
-    issueId: string,
-    context: Record<string, unknown>,
-    client: Pick<Db, "select"> = db,
-    lockForClaim = false,
-  ) {
-    if (readNonEmptyString(context.wakeReason) !== "interaction_pending") return false;
-    const interactionId = readNonEmptyString(context.interactionId);
-    if (!interactionId) return false;
-
-    const interactionQuery = client
-      .select()
-      .from(issueThreadInteractions)
-      .where(and(
-        eq(issueThreadInteractions.id, interactionId),
-        eq(issueThreadInteractions.companyId, run.companyId),
-        eq(issueThreadInteractions.issueId, issueId),
-        eq(issueThreadInteractions.addresseeAgentId, run.agentId),
-        eq(issueThreadInteractions.status, "pending"),
-      ))
-      .limit(1);
-    const interaction = await (lockForClaim ? interactionQuery.for("update") : interactionQuery)
-      .then((rows) => rows[0] ?? null);
-    if (!interaction) return false;
-
-    const interactionPayload = parseObject(interaction.payload);
-    return issueThreadInteractionAttentionAgentAllowed({
-      agentId: run.agentId,
-      interaction,
-      governedAction: interaction.kind === "request_confirmation"
-        && "toolAction" in interactionPayload
-        && interactionPayload.toolAction !== undefined,
-    });
-  }
 
   async function evaluateQueuedRunStaleness(
     run: typeof heartbeatRuns.$inferSelect,
@@ -18619,12 +18613,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         ).then((rows) => rows.get(issue.id) ?? null);
 
         // Blocked descendants should stay idle until the final blocker resolves.
-        // Human comment/mention wakes are the exception: they may run in a
-        // bounded interaction mode so the assignee can answer or triage.
+        // Human comment/mention wakes and verified pending-interaction addressee
+        // wakes are exceptions: they may run in a bounded interaction mode
+        // without taking issue ownership or entering the blocked implementation.
+        const pendingInteractionAddresseeWake =
+          dependencyReadiness &&
+          !dependencyReadiness.isDependencyReady &&
+          await isPendingInteractionAddresseeWake(tx, {
+            companyId: issue.companyId,
+            issueId: issue.id,
+            agentId,
+            contextSnapshot: enrichedContextSnapshot,
+          });
         const blockedInteractionWake =
           dependencyReadiness &&
           !dependencyReadiness.isDependencyReady &&
-          allowsIssueInteractionWake(enrichedContextSnapshot);
+          (
+            allowsIssueInteractionWake(enrichedContextSnapshot)
+            || pendingInteractionAddresseeWake
+          );
 
         if (blockedInteractionWake) {
           enrichedContextSnapshot.dependencyBlockedInteraction = true;

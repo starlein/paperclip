@@ -19,6 +19,7 @@ import {
   issueComments,
   issueDocuments,
   issueRelations,
+  issueThreadInteractions,
   issueTreeHolds,
   issues,
   workspaceOperations,
@@ -138,6 +139,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueRelations);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueTreeHolds);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
@@ -305,6 +307,53 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
 
     expect(interactionRun?.status).toBe("succeeded");
     expect(interactionRun?.contextSnapshot).toMatchObject({
+      dependencyBlockedInteraction: true,
+      unresolvedBlockerIssueIds: [blockerId],
+    });
+
+    const pendingInteractionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: pendingInteractionId,
+      companyId,
+      issueId: blockedIssueId,
+      kind: "request_item_verdicts",
+      status: "pending",
+      addresseeAgentId: agentId,
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Review this blocked issue without taking ownership.",
+        items: [{ id: "security", label: "Security verdict" }],
+      },
+    });
+    const addresseeWake = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "interaction_pending",
+      payload: { issueId: blockedIssueId, interactionId: pendingInteractionId },
+      contextSnapshot: {
+        issueId: blockedIssueId,
+        interactionId: pendingInteractionId,
+        wakeReason: "interaction_pending",
+      },
+    });
+    expect(addresseeWake).not.toBeNull();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, addresseeWake!.id))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "succeeded";
+    });
+
+    const addresseeRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, addresseeWake!.id))
+      .then((rows) => rows[0] ?? null);
+    expect(addresseeRun?.contextSnapshot).toMatchObject({
       dependencyBlockedInteraction: true,
       unresolvedBlockerIssueIds: [blockerId],
     });

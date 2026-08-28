@@ -21,7 +21,7 @@ interface ReviewPolicyIssue {
 }
 
 export async function resolveIssueReviewRequester(
-  db: Db,
+  db: Pick<Db, "select">,
   issue: ReviewPolicyIssue,
 ): Promise<IssueReviewRequester | null> {
   const transition = await db
@@ -70,7 +70,7 @@ export async function resolveIssueReviewRequester(
 }
 
 export async function isIssueReviewVerdictInteraction(
-  db: Db,
+  db: Pick<Db, "select">,
   input: {
     issue: ReviewPolicyIssue;
     interaction: {
@@ -98,7 +98,7 @@ export async function isIssueReviewVerdictInteraction(
 }
 
 export async function assertIssueReviewVerdictActorAllowed(
-  db: Db,
+  db: Pick<Db, "select">,
   input: {
     issue: ReviewPolicyIssue;
     actor: IssueReviewVerdictActor;
