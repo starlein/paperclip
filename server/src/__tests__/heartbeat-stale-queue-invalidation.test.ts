@@ -12,6 +12,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
 import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
@@ -1156,6 +1157,211 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(wakeup?.error).toContain("assignee changed");
     expect(deferred?.status).not.toBe("deferred_issue_execution");
     expect(promotedRun?.agentId).toBe(replacementAgentId);
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
+  it("runs a pending interaction wake for its non-assignee addressee", async () => {
+    const { companyId, agentId: ownerAgentId } = await seedCompanyAndAgent({ agentName: "IssueOwner" });
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerAgentId,
+      companyId,
+      name: "SecurityReviewer",
+      role: "security",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+
+    const issueId = randomUUID();
+    const interactionId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Security review requested",
+      status: "in_review",
+      priority: "high",
+      assigneeAgentId: ownerAgentId,
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId,
+      issueId,
+      kind: "request_item_verdicts",
+      status: "pending",
+      addresseeAgentId: reviewerAgentId,
+      payload: { version: 1, prompt: "Review this change", items: [] },
+    });
+
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId: reviewerAgentId,
+      issueId,
+      wakeReason: "interaction_pending",
+      invocationSource: "automation",
+      contextExtras: {
+        interactionId,
+        interactionKind: "request_item_verdicts",
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "succeeded";
+    });
+
+    const run = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run?.status).toBe("succeeded");
+    expect(run?.errorCode).not.toBe("issue_assignee_changed");
+    expect(countExecuteCallsForRun(runId)).toBe(1);
+  });
+
+  it("rejects a non-assignee interaction wake that is not addressed to the run agent", async () => {
+    const { companyId, agentId: ownerAgentId } = await seedCompanyAndAgent({ agentName: "IssueOwner" });
+    const unrelatedAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: unrelatedAgentId,
+      companyId,
+      name: "UnrelatedReviewer",
+      role: "security",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+
+    const issueId = randomUUID();
+    const interactionId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Security review requested",
+      status: "in_review",
+      priority: "high",
+      assigneeAgentId: ownerAgentId,
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId,
+      issueId,
+      kind: "request_item_verdicts",
+      status: "pending",
+      addresseeAgentId: ownerAgentId,
+      payload: { version: 1, prompt: "Review this change", items: [] },
+    });
+
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId: unrelatedAgentId,
+      issueId,
+      wakeReason: "interaction_pending",
+      invocationSource: "automation",
+      contextExtras: {
+        interactionId,
+        interactionKind: "request_item_verdicts",
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "cancelled";
+    });
+
+    const run = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_assignee_changed");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
+  it("rejects an agent-addressed interaction wake when the resolver audience is human-only", async () => {
+    const { companyId, agentId: ownerAgentId } = await seedCompanyAndAgent({ agentName: "IssueOwner" });
+    const reviewerAgentId = randomUUID();
+    await db.insert(agents).values({
+      id: reviewerAgentId,
+      companyId,
+      name: "SecurityReviewer",
+      role: "security",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+
+    const issueId = randomUUID();
+    const interactionId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Board decision requested",
+      status: "in_review",
+      priority: "high",
+      assigneeAgentId: ownerAgentId,
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId,
+      issueId,
+      kind: "request_confirmation",
+      status: "pending",
+      requestedResolverPolicy: "human_only",
+      effectiveResolverPolicy: "human_only",
+      resolverPolicyProvenance: "explicit",
+      effectiveResolverPolicySource: "requested",
+      addresseeAgentId: reviewerAgentId,
+      payload: { version: 1, prompt: "Approve this board-only action" },
+    });
+
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId: reviewerAgentId,
+      issueId,
+      wakeReason: "interaction_pending",
+      invocationSource: "automation",
+      contextExtras: {
+        interactionId,
+        interactionKind: "request_confirmation",
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "cancelled";
+    });
+
+    const run = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("issue_assignee_changed");
     expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 

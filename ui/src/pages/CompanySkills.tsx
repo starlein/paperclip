@@ -4590,6 +4590,25 @@ function SkillPane({
   );
 }
 
+export function ImportSkillSourceTabsHeader() {
+  return (
+    <TabsList variant="line" className="w-full">
+      <TabsTrigger value="agentskill">
+        <Search className="h-4 w-4" />
+        Skills
+      </TabsTrigger>
+      <TabsTrigger value="skillsets">
+        <Boxes className="h-4 w-4" />
+        Skillsets
+      </TabsTrigger>
+      <TabsTrigger value="other">
+        <GithubIcon className="h-4 w-4" />
+        Other sources
+      </TabsTrigger>
+    </TabsList>
+  );
+}
+
 export function CompanySkills() {
   const { "*": routePath } = useParams<{ "*": string }>();
   const navigate = useNavigate();
@@ -5934,20 +5953,7 @@ export function CompanySkills() {
             </DialogDescription>
           </DialogHeader>
           <Tabs defaultValue="agentskill">
-            <TabsList variant="line" className="w-full">
-              <TabsTrigger value="agentskill">
-                <Search className="h-4 w-4" />
-                Skills
-              </TabsTrigger>
-              <TabsTrigger value="skillsets">
-                <Boxes className="h-4 w-4" />
-                Skillsets
-              </TabsTrigger>
-              <TabsTrigger value="other">
-                <GithubIcon className="h-4 w-4" />
-                Other sources
-              </TabsTrigger>
-            </TabsList>
+            <ImportSkillSourceTabsHeader />
             <TabsContent value="agentskill" className="mt-3">
               <AgentSkillBrowser
                 onInstall={handleAgentSkillInstall}

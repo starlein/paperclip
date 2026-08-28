@@ -166,6 +166,7 @@ import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
+import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -12767,6 +12768,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const issueId = readNonEmptyString(context.issueId);
+    let pendingInteractionAddresseeWake = false;
     if (issueId) {
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(run.companyId, issueId);
       const treeHoldInteractionWake = activePauseHold && await isVerifiedIssueTreeControlInteractionWake(db, {
@@ -12803,13 +12805,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const dependencyReadiness = await issuesSvc.listDependencyReadiness(run.companyId, [issueId]);
       const readiness = dependencyReadiness.get(issueId);
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
-      if (unresolvedBlockerCount > 0 && !allowsIssueInteractionWake(context)) {
+      pendingInteractionAddresseeWake = await isPendingInteractionAddresseeWake(run, issueId, context);
+      if (
+        unresolvedBlockerCount > 0 &&
+        !allowsIssueInteractionWake(context) &&
+        !pendingInteractionAddresseeWake
+      ) {
         await cancelQueuedRunForBlockedDependencies(run, issueId, readiness?.unresolvedBlockerIssueIds ?? []);
         logger.info({ runId: run.id, issueId, unresolvedBlockerCount }, "claimQueuedRun: cancelled blocked queued run");
         return null;
       }
 
-      const staleness = await evaluateQueuedRunStaleness(run, issueId, context);
+      const staleness = await evaluateQueuedRunStaleness(
+        run,
+        issueId,
+        context,
+        pendingInteractionAddresseeWake,
+      );
       if (staleness.stale) {
         await cancelQueuedRunForStaleIssue(run, staleness);
         logger.info(
@@ -12827,7 +12839,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueContext: issueId ? await getIssueExecutionContext(run.companyId, issueId) : null,
       routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
     });
-    const claimed = await db
+    const claimRun = (client: Pick<Db, "update">) => client
       .update(heartbeatRuns)
       .set({
         status: "running",
@@ -12838,6 +12850,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
       .returning()
       .then((rows) => rows[0] ?? null);
+    const claimed = pendingInteractionAddresseeWake && issueId
+      ? await db.transaction(async (tx) => {
+          const stillAuthorized = await isPendingInteractionAddresseeWake(
+            run,
+            issueId,
+            context,
+            tx,
+            true,
+          );
+          return stillAuthorized ? claimRun(tx) : null;
+        })
+      : await claimRun(db);
     if (!claimed) return null;
 
     publishLiveEvent({
@@ -12963,10 +12987,47 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         details: Record<string, unknown>;
       };
 
+  async function isPendingInteractionAddresseeWake(
+    run: typeof heartbeatRuns.$inferSelect,
+    issueId: string,
+    context: Record<string, unknown>,
+    client: Pick<Db, "select"> = db,
+    lockForClaim = false,
+  ) {
+    if (readNonEmptyString(context.wakeReason) !== "interaction_pending") return false;
+    const interactionId = readNonEmptyString(context.interactionId);
+    if (!interactionId) return false;
+
+    const interactionQuery = client
+      .select()
+      .from(issueThreadInteractions)
+      .where(and(
+        eq(issueThreadInteractions.id, interactionId),
+        eq(issueThreadInteractions.companyId, run.companyId),
+        eq(issueThreadInteractions.issueId, issueId),
+        eq(issueThreadInteractions.addresseeAgentId, run.agentId),
+        eq(issueThreadInteractions.status, "pending"),
+      ))
+      .limit(1);
+    const interaction = await (lockForClaim ? interactionQuery.for("update") : interactionQuery)
+      .then((rows) => rows[0] ?? null);
+    if (!interaction) return false;
+
+    const interactionPayload = parseObject(interaction.payload);
+    return issueThreadInteractionAttentionAgentAllowed({
+      agentId: run.agentId,
+      interaction,
+      governedAction: interaction.kind === "request_confirmation"
+        && "toolAction" in interactionPayload
+        && interactionPayload.toolAction !== undefined,
+    });
+  }
+
   async function evaluateQueuedRunStaleness(
     run: typeof heartbeatRuns.$inferSelect,
     issueId: string,
     context: Record<string, unknown>,
+    pendingInteractionAddresseeWake = false,
   ): Promise<QueuedRunStaleness> {
     const issue = await db
       .select({
@@ -12990,7 +13051,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
 
     const wakeCommentId = deriveCommentId(context, null);
-    const isInteractionWake = allowsIssueInteractionWake(context);
+    const isInteractionWake = allowsIssueInteractionWake(context) || pendingInteractionAddresseeWake;
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason = readNonEmptyString(context.retryReason) ?? run.scheduledRetryReason ?? null;
@@ -13109,7 +13170,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (currentParticipant) {
         const participantMatches =
           currentParticipant.type === "agent" && currentParticipant.agentId === run.agentId;
-        if (!participantMatches && !wakeCommentId) {
+        if (!participantMatches && !isInteractionWake) {
           return {
             stale: true,
             errorCode: "issue_review_participant_changed",
