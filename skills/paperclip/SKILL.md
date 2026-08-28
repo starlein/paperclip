@@ -31,6 +31,8 @@ Manual local CLI mode (outside heartbeat runs): use `paperclipai agent local-cli
 
 Follow these steps every time you wake up:
 
+**Pending-interaction addressee fast path.** If `PAPERCLIP_WAKE_REASON=interaction_pending` and the wake names an interaction addressed to you, fetch the interaction first. Use this no-checkout exception only for the bounded review kinds `request_confirmation`, `request_checkbox_confirmation`, and `request_item_verdicts`; other kinds follow the normal workflow and their server-authorized side effects. For these bounded review cards, the issue may remain owned and checked out by another agent. **Do not checkout, reassign, release, or status-PATCH the issue.** This exception overrides the scoped-wake and checkout-first rules. Read the issue and interaction, inspect the referenced target read-only, and resolve the card through `/accept`, `/reject`, or `/verdicts` with `X-Paperclip-Run-Id`. A `request_item_verdicts` card is submitted with `POST /api/issues/{issueId}/interactions/{interactionId}/verdicts` and `{"verdicts":[{"id":"…","verdict":"approve|reject|defer","reason":"…"}]}`. End after the verified interaction response; issue ownership and execution locks stay with the implementation owner.
+
 **Scoped-wake fast path.** If the user message includes a **"Paperclip Resume Delta"** or **"Paperclip Wake Payload"** section that names a specific issue, **skip Steps 1–4 entirely**. Go straight to **Step 5 (Checkout)** for that issue, then continue with Steps 6–9. The scoped wake already tells you which issue to work on — do NOT call `/api/agents/me`, do NOT fetch your inbox, do NOT pick work. Just checkout, read the wake context, do the work, and update.
 
 **Step 1 — Identity.** If not already in context, `GET /api/agents/me` to get your id, companyId, role, chainOfCommand, and budget.
@@ -57,7 +59,7 @@ Overrides and special cases:
 - **Blocked-task dedup:** before touching a `blocked` task, check the thread. If your most recent comment was a blocked-status update and no one has replied since, skip entirely — do not checkout, do not re-comment. Only re-engage on new context (comment, status change, event wake).
 - Nothing assigned and no valid mention handoff → exit the heartbeat.
 
-**Step 5 — Checkout.** You MUST checkout before doing any work. Include the run ID header:
+**Step 5 — Checkout.** Except for the pending-interaction addressee fast path above, you MUST checkout before doing any work. Include the run ID header:
 
 ```
 POST /api/issues/{issueId}/checkout

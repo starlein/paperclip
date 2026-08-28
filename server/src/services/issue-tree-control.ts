@@ -4,6 +4,7 @@ import {
   agentWakeupRequests,
   heartbeatRuns,
   issueComments,
+  issueThreadInteractions,
   issueTreeHoldMembers,
   issueTreeHolds,
   issues,
@@ -22,6 +23,11 @@ import {
   type IssueTreePreviewWarning,
 } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../errors.js";
+import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+import {
+  isIssueReviewVerdictInteraction,
+  resolveIssueReviewRequester,
+} from "./issue-review-policy.js";
 import { finalizeSummarySlotsForTerminalIssue } from "./summary-slot-finalization.js";
 
 type IssueRow = typeof issues.$inferSelect;
@@ -77,6 +83,7 @@ export const ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS: ReadonlySet<string> = 
   "issue_commented",
   "issue_reopened_via_comment",
   "issue_comment_mentioned",
+  "interaction_pending",
 ] as const);
 const ISSUE_TREE_CONTROL_INTERACTION_WAKE_SOURCES: Readonly<Record<string, ReadonlySet<string>>> = {
   issue_commented: new Set(["issue.comment"]),
@@ -123,6 +130,96 @@ function actorMatchesComment(
   if (actor.requestedByActorType === "agent") return comment.authorAgentId === actor.requestedByActorId;
   if (actor.requestedByActorType === "user") return comment.authorUserId === actor.requestedByActorId;
   return false;
+}
+
+export async function isPendingInteractionAddresseeWake(
+  dbOrTx: Pick<Db, "select">,
+  input: {
+    companyId: string;
+    issueId: string;
+    agentId?: string | null;
+    contextSnapshot: Record<string, unknown> | null | undefined;
+  },
+  lockForClaim = false,
+) {
+  if (!input.agentId) return false;
+  const contextSnapshot = input.contextSnapshot ?? null;
+  const wakeReason = readNonEmptyStringFromRecord(contextSnapshot, "wakeReason");
+  const interactionId = readNonEmptyStringFromRecord(contextSnapshot, "interactionId");
+  if (wakeReason !== "interaction_pending" || !interactionId) return false;
+
+  // Match the interaction-resolution lock order: issue first, then interaction.
+  // This keeps review policy stable through claim authorization without
+  // introducing a lock-order inversion with accept/reject/verdict mutations.
+  const issueQuery = dbOrTx
+    .select({
+      id: issues.id,
+      companyId: issues.companyId,
+      status: issues.status,
+      reviewPolicy: issues.reviewPolicy,
+      createdByAgentId: issues.createdByAgentId,
+      createdByUserId: issues.createdByUserId,
+    })
+    .from(issues)
+    .where(and(eq(issues.id, input.issueId), eq(issues.companyId, input.companyId)))
+    .limit(1);
+  const issue = await (lockForClaim ? issueQuery.for("update") : issueQuery)
+    .then((rows) => rows[0] ?? null);
+  if (!issue) return false;
+
+  const interactionQuery = dbOrTx
+    .select()
+    .from(issueThreadInteractions)
+    .where(and(
+      eq(issueThreadInteractions.id, interactionId),
+      eq(issueThreadInteractions.companyId, input.companyId),
+      eq(issueThreadInteractions.issueId, input.issueId),
+      eq(issueThreadInteractions.addresseeAgentId, input.agentId),
+      eq(issueThreadInteractions.status, "pending"),
+    ))
+    .limit(1);
+  const interaction = await (lockForClaim ? interactionQuery.for("update") : interactionQuery)
+    .then((rows) => rows[0] ?? null);
+  if (!interaction) return false;
+
+  let additionalRestriction: Parameters<
+    typeof issueThreadInteractionAttentionAgentAllowed
+  >[0]["additionalRestriction"];
+  if (
+    issue.status === "in_review"
+    && interaction.status === "pending"
+    && (
+      interaction.kind === "request_confirmation"
+      || interaction.kind === "request_checkbox_confirmation"
+    )
+    && await isIssueReviewVerdictInteraction(dbOrTx, { issue, interaction })
+  ) {
+    if (issue.reviewPolicy === "human_only") {
+      additionalRestriction = { policy: "human_only", source: "issue_review" };
+    } else if (issue.reviewPolicy === "not_creator") {
+      const requester = await resolveIssueReviewRequester(dbOrTx, issue);
+      if (!requester) return false;
+      additionalRestriction = {
+        policy: "not_creator",
+        source: "issue_review",
+        excludedActor: { type: requester.type, id: requester.id },
+      };
+    }
+  }
+
+  const payload = interaction.payload && typeof interaction.payload === "object"
+    ? interaction.payload as unknown as Record<string, unknown>
+    : {};
+  return issueThreadInteractionAttentionAgentAllowed({
+    agentId: input.agentId,
+    interaction,
+    additionalRestriction,
+    governedAction: interaction.kind === "request_confirmation"
+      && (
+        ("toolAction" in payload && payload.toolAction !== undefined)
+        || ("secretProposal" in payload && payload.secretProposal !== undefined)
+      ),
+  });
 }
 
 async function hasVerifiedInteractionWakeRequest(
@@ -185,6 +282,14 @@ export async function isVerifiedIssueTreeControlInteractionWake(
     readNonEmptyStringFromRecord(contextSnapshot, "wakeReason") ??
     readNonEmptyStringFromRecord(contextSnapshot, "reason");
   if (!wakeReason || !ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS.has(wakeReason)) return false;
+  if (wakeReason === "interaction_pending") {
+    return isPendingInteractionAddresseeWake(dbOrTx, {
+      companyId: input.companyId,
+      issueId: input.issueId,
+      agentId: input.agentId,
+      contextSnapshot,
+    });
+  }
   if (!contextSnapshot || !hasVerifiedInteractionSource(wakeReason, contextSnapshot)) return false;
 
   const commentId = readInteractionWakeCommentId(contextSnapshot);
