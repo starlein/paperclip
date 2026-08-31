@@ -70,6 +70,9 @@ tests/storybook-visual/playwright-report/
 .superpowers/
 .claude/worktrees/
 .herenow
+.vercel/
+.env.local
+test-results/
 
 # Local deployment overrides and TLS material
 docker-compose.override.yml

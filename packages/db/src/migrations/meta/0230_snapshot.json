@@ -1,5 +1,5 @@
 {
-  "id": "0bc03e34-aa96-48ef-961e-71c878757f2a",
+  "id": "1366d67d-ba52-463f-b04a-fab71aaab3ac",
   "prevId": "a67f8798-79bc-4628-8245-3b2b632233ce",
   "version": "7",
   "dialect": "postgresql",
@@ -2438,6 +2438,12 @@
           "primaryKey": true,
           "notNull": true
         },
+        "issuer": {
+          "name": "issuer",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "account_id": {
           "name": "account_id",
           "type": "text",
@@ -2446,12 +2452,6 @@
         },
         "provider_id": {
           "name": "provider_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "issuer": {
-          "name": "issuer",
           "type": "text",
           "primaryKey": false,
           "notNull": true
@@ -2517,7 +2517,29 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "account_issuer_account_id_uq": {
+          "name": "account_issuer_account_id_uq",
+          "columns": [
+            {
+              "expression": "issuer",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "account_user_id_user_id_fk": {
           "name": "account_user_id_user_id_fk",

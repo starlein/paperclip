@@ -1,0 +1,18 @@
+# Replace @starlein if a different maintainer or team should own release infrastructure.
+
+.github/** @starlein @devinfoley @nickyleach @forgottendev
+scripts/release*.sh @starlein @devinfoley @nickyleach @forgottendev
+scripts/release-*.mjs @starlein @devinfoley @nickyleach @forgottendev
+scripts/create-github-release.sh @starlein @devinfoley @nickyleach @forgottendev
+scripts/rollback-latest.sh @starlein @devinfoley @nickyleach @forgottendev
+doc/RELEASING.md @starlein @devinfoley @nickyleach @forgottendev
+doc/PUBLISHING.md @starlein @devinfoley @nickyleach @forgottendev
+doc/RELEASE-AUTOMATION-SETUP.md @starlein @devinfoley @nickyleach @forgottendev
+skills/** @starlein @devinfoley @nickyleach @forgottendev
+
+# Package files — dependency changes require review
+# package.json matches recursively at all depths (covers root + all workspaces)
+package.json @starlein @devinfoley @nickyleach @forgottendev
+pnpm-lock.yaml @starlein @devinfoley @nickyleach @forgottendev
+pnpm-workspace.yaml @starlein @devinfoley @nickyleach @forgottendev
+.npmrc @starlein @devinfoley @nickyleach @forgottendev
