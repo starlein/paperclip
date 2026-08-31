@@ -8,6 +8,9 @@ const runnerPackage = JSON.parse(
 const rootPackage = JSON.parse(
   await readFile(new URL("../../../package.json", import.meta.url), "utf8"),
 );
+const serverPackage = JSON.parse(
+  await readFile(new URL("../../../server/package.json", import.meta.url), "utf8"),
+);
 const workspace = await readFile(
   new URL("../../../pnpm-workspace.yaml", import.meta.url),
   "utf8",
@@ -34,6 +37,14 @@ test("the runner pins only the Codex ACPX production dependencies", () => {
   assert.equal(
     runnerPackage.dependencies["@agentclientprotocol/claude-agent-acp"],
     undefined,
+  );
+});
+
+test("the server can resolve the vendored runner production dependencies", () => {
+  assert.equal(serverPackage.dependencies.acpx, runnerPackage.dependencies.acpx);
+  assert.equal(
+    serverPackage.dependencies["@agentclientprotocol/codex-acp"],
+    runnerPackage.dependencies["@agentclientprotocol/codex-acp"],
   );
 });
 

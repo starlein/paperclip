@@ -61,11 +61,19 @@ COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
 RUN pnpm install --frozen-lockfile
 
+# Keep this image tag in sync with packages/paperclip-runner/rust-toolchain.toml.
+FROM rust:1.97.1-slim-trixie AS rust-toolchain
+
 FROM base AS build
 WORKDIR /app
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends cargo rustc \
+  && apt-get install -y --no-install-recommends build-essential \
   && rm -rf /var/lib/apt/lists/*
+COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
+COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo \
+  RUSTUP_HOME=/usr/local/rustup \
+  PATH=/usr/local/cargo/bin:$PATH
 COPY --from=deps /app /app
 COPY . .
 
