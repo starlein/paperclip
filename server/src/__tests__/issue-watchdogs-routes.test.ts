@@ -227,6 +227,66 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     return runId;
   }
 
+  async function seedWatchdogMutationWithStaleOwnership(input: {
+    sourceStatus: "in_progress" | "done";
+  }) {
+    const companyId = await seedCompany();
+    const ownerAgentId = await seedAgent(companyId, { name: "Stopped owner" });
+    const watchdogAgentId = await seedAgent(companyId, { name: "Recovery watchdog" });
+    const sourceIssueId = await seedIssue(companyId, {
+      title: "Stopped source",
+      identifier: input.sourceStatus === "done" ? "WDOG-HTTP-COMMENT" : "WDOG-HTTP-PATCH",
+      status: input.sourceStatus,
+      assigneeAgentId: ownerAgentId,
+    });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: sourceIssueId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: sourceIssueId,
+    });
+    const staleRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: staleRunId,
+      companyId,
+      agentId: ownerAgentId,
+      status: "failed",
+      invocationSource: "assignment",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId: sourceIssueId },
+    });
+    await db.update(issues).set({
+      checkoutRunId: staleRunId,
+      executionRunId: staleRunId,
+      executionAgentNameKey: "stopped-owner",
+      executionLockedAt: new Date(),
+    }).where(eq(issues.id, sourceIssueId));
+    const watchdogRunId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: sourceIssueId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId: watchdogRunId,
+      source: "agent_jwt",
+    });
+    return {
+      app,
+      companyId,
+      ownerAgentId,
+      sourceIssueId,
+      staleRunId,
+      watchdogAgentId,
+      watchdogIssueId,
+      watchdogRunId,
+    };
+  }
+
   async function waitForAssignmentWakeup(companyId: string) {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const rows = await db
@@ -517,6 +577,130 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(allowedChild.status, JSON.stringify(allowedChild.body)).toBe(201);
     expect(allowedChild.body.parentId).toBe(watchedChildId);
   });
+
+  it("lets a watchdog PATCH a stopped issue after clearing terminal stale ownership", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ status: "done" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "done",
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+    });
+    const [audit] = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, fixture.companyId),
+      eq(activityLog.entityId, fixture.sourceIssueId),
+      eq(activityLog.action, "issue.task_watchdog_stale_ownership_cleared"),
+    ));
+    expect(audit).toMatchObject({
+      actorType: "system",
+      actorId: "task_watchdog_recovery",
+      agentId: fixture.watchdogAgentId,
+      runId: fixture.watchdogRunId,
+      details: {
+        clearedCheckoutRunId: fixture.staleRunId,
+        clearedExecutionRunId: fixture.staleRunId,
+        referencedRunStatuses: { [fixture.staleRunId]: "failed" },
+      },
+    });
+  });
+
+  it("lets a watchdog add a disposition-only comment after clearing terminal stale ownership", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "done" });
+
+    const res = await request(fixture.app)
+      .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+      .send({ body: "Stopped disposition is verified; stale ownership was recovered." });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body).toMatchObject({
+      issueId: fixture.sourceIssueId,
+      body: "Stopped disposition is verified; stale ownership was recovered.",
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source).toMatchObject({
+      status: "done",
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+    });
+    const [audit] = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, fixture.companyId),
+      eq(activityLog.entityId, fixture.sourceIssueId),
+      eq(activityLog.action, "issue.task_watchdog_stale_ownership_cleared"),
+    ));
+    expect(audit).toMatchObject({
+      runId: fixture.watchdogRunId,
+      details: {
+        clearedCheckoutRunId: fixture.staleRunId,
+        clearedExecutionRunId: fixture.staleRunId,
+        referencedRunStatuses: { [fixture.staleRunId]: "failed" },
+      },
+    });
+  });
+
+  it.each([
+    ["checkoutRunId", "queued"],
+    ["checkoutRunId", "running"],
+    ["checkoutRunId", "scheduled_retry"],
+    ["executionRunId", "queued"],
+    ["executionRunId", "running"],
+    ["executionRunId", "scheduled_retry"],
+  ] as const)(
+    "keeps a cross-issue %s owned by a same-company %s run and denies the watchdog PATCH",
+    async (ownershipField, status) => {
+      const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "done" });
+      const contextIssueId = await seedIssue(fixture.companyId, {
+        title: "Live owner's original issue",
+        status: "in_progress",
+        assigneeAgentId: fixture.ownerAgentId,
+      });
+      const liveRunId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: liveRunId,
+        companyId: fixture.companyId,
+        agentId: fixture.ownerAgentId,
+        status,
+        invocationSource: "assignment",
+        startedAt: status === "running" ? new Date() : undefined,
+        scheduledRetryAt: status === "scheduled_retry" ? new Date(Date.now() + 60_000) : undefined,
+        contextSnapshot: { issueId: contextIssueId },
+      });
+      await db.update(issues).set({
+        checkoutRunId: ownershipField === "checkoutRunId" ? liveRunId : null,
+        executionRunId: ownershipField === "executionRunId" ? liveRunId : null,
+        executionAgentNameKey: "live-owner",
+        executionLockedAt: new Date(),
+      }).where(eq(issues.id, fixture.sourceIssueId));
+
+      const res = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ title: "Must remain unchanged" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.details).toMatchObject({ currentState: "live" });
+      const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+      expect(source).toMatchObject({
+        checkoutRunId: ownershipField === "checkoutRunId" ? liveRunId : null,
+        executionRunId: ownershipField === "executionRunId" ? liveRunId : null,
+        executionAgentNameKey: "live-owner",
+      });
+      const cleanupAudits = await db.select().from(activityLog).where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.entityId, fixture.sourceIssueId),
+        eq(activityLog.action, "issue.task_watchdog_stale_ownership_cleared"),
+      ));
+      expect(cleanupAudits).toHaveLength(0);
+    },
+  );
 
   it("routes watchdog-discovered product bugs outside the watched source tree with evidence links", async () => {
     const companyId = await seedCompany();

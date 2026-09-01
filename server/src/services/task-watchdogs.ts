@@ -18,7 +18,11 @@ import {
 import type { IssueWatchdog, IssueWatchdogSummary } from "@paperclipai/shared";
 import { conflict, notFound } from "../errors.js";
 import { parseObject } from "../adapters/utils.js";
-import { logActivity } from "./activity-log.js";
+import {
+  logActivity,
+  publishActivity,
+  type ActivityPublication,
+} from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService } from "./issues.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
@@ -976,9 +980,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           issueId: issues.id,
         })
         .from(issues)
-        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .innerJoin(heartbeatRuns, or(
+          eq(issues.checkoutRunId, heartbeatRuns.id),
+          eq(issues.executionRunId, heartbeatRuns.id),
+        ))
         .where(and(
           eq(issues.companyId, companyId),
+          eq(heartbeatRuns.companyId, companyId),
           inArray(issues.id, subtreeIssueIds),
           visibleIssueCondition(),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_LIVE_RUN_STATUSES]),
@@ -1134,7 +1142,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   async function collectCompletedRunIssueIds(companyId: string, issueIds: string[]) {
     if (issueIds.length === 0) return [];
     const candidates = new Set(issueIds);
-    const [contextRuns, executionRuns] = await Promise.all([
+    const [contextRuns, issueOwnedRuns] = await Promise.all([
       db
         .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
         .from(heartbeatRuns)
@@ -1149,9 +1157,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       db
         .select({ issueId: issues.id })
         .from(issues)
-        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .innerJoin(heartbeatRuns, or(
+          eq(issues.checkoutRunId, heartbeatRuns.id),
+          eq(issues.executionRunId, heartbeatRuns.id),
+        ))
         .where(and(
           eq(issues.companyId, companyId),
+          eq(heartbeatRuns.companyId, companyId),
           inArray(issues.id, issueIds),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_TERMINAL_RUN_STATUSES]),
         )),
@@ -1161,7 +1173,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       const issueId = issueIdFromRunContext(row.contextSnapshot);
       if (issueId && candidates.has(issueId)) completed.add(issueId);
     }
-    for (const row of executionRuns) {
+    for (const row of issueOwnedRuns) {
       completed.add(row.issueId);
     }
     return [...completed];
@@ -1198,9 +1210,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       db
         .select({ id: heartbeatRuns.id })
         .from(issues)
-        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .innerJoin(heartbeatRuns, or(
+          eq(issues.checkoutRunId, heartbeatRuns.id),
+          eq(issues.executionRunId, heartbeatRuns.id),
+        ))
         .where(and(
           eq(issues.companyId, companyId),
+          eq(heartbeatRuns.companyId, companyId),
           eq(issues.id, issueId),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_LIVE_RUN_STATUSES]),
         ))
@@ -1618,12 +1634,140 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       ));
   }
 
+  async function reconcileStaleSubtreeOwnershipForMutation(input: {
+    watchdog: IssueWatchdogRow;
+    stopFingerprint: string;
+    runId?: string | null;
+  }) {
+    // Mutation revalidation is the last safe point to repair ownership left by a
+    // finished/deleted run. Never force-release a queued or running owner: that
+    // remains a live path and must keep the watchdog mutation blocked.
+    const subtreeIssues = await loadWatchdogSubtreeIssues(input.watchdog.companyId, input.watchdog.issueId);
+    const candidateIds = subtreeIssues.map((issue) => issue.id);
+    if (candidateIds.length === 0) return [];
+
+    const candidates = await db
+      .select({
+        id: issues.id,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, input.watchdog.companyId),
+        inArray(issues.id, candidateIds),
+        or(sql`${issues.checkoutRunId} is not null`, sql`${issues.executionRunId} is not null`),
+      ));
+
+    const clearedIssueIds: string[] = [];
+    for (const candidate of candidates) {
+      const postCommitActivityPublications: ActivityPublication[] = [];
+      const cleared = await db.transaction(async (tx) => {
+        const lockedIssue = await tx
+          .select({
+            id: issues.id,
+            checkoutRunId: issues.checkoutRunId,
+            executionRunId: issues.executionRunId,
+          })
+          .from(issues)
+          .where(and(eq(issues.companyId, input.watchdog.companyId), eq(issues.id, candidate.id)))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!lockedIssue) return null;
+
+        const runIds = [...new Set(
+          [lockedIssue.checkoutRunId, lockedIssue.executionRunId]
+            .filter((runId): runId is string => runId !== null),
+        )];
+        if (runIds.length === 0) return null;
+
+        const runRows = await tx
+          .select({
+            id: heartbeatRuns.id,
+            status: heartbeatRuns.status,
+          })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.companyId, input.watchdog.companyId),
+            inArray(heartbeatRuns.id, runIds),
+          ));
+        // A live run may legitimately own more than the issue named in its
+        // original context snapshot (checkout and legacy wake paths can stamp
+        // the same run onto another issue). The issue pointer is authoritative;
+        // company scope prevents a foreign run from being treated as its owner.
+        const runStatusById = new Map(runRows.map((run) => [run.id, run.status]));
+        const allOwnershipIsStale = runIds.every((runId) => {
+          const status = runStatusById.get(runId);
+          return status === undefined || TASK_WATCHDOG_TERMINAL_RUN_STATUSES.includes(
+            status as (typeof TASK_WATCHDOG_TERMINAL_RUN_STATUSES)[number],
+          );
+        });
+        if (!allOwnershipIsStale) return null;
+
+        const updated = await tx
+          .update(issues)
+          .set({
+            checkoutRunId: null,
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+            updatedAt: new Date(),
+          })
+          .where(and(
+            eq(issues.companyId, input.watchdog.companyId),
+            eq(issues.id, lockedIssue.id),
+            lockedIssue.checkoutRunId
+              ? eq(issues.checkoutRunId, lockedIssue.checkoutRunId)
+              : isNull(issues.checkoutRunId),
+            lockedIssue.executionRunId
+              ? eq(issues.executionRunId, lockedIssue.executionRunId)
+              : isNull(issues.executionRunId),
+          ))
+          .returning({ id: issues.id })
+          .then((rows) => rows[0] ?? null);
+        if (!updated) return null;
+
+        await logActivity(
+          tx as unknown as Db,
+          {
+            companyId: input.watchdog.companyId,
+            actorType: "system",
+            actorId: "task_watchdog_recovery",
+            agentId: input.watchdog.watchdogAgentId,
+            runId: input.runId ?? null,
+            action: "issue.task_watchdog_stale_ownership_cleared",
+            entityType: "issue",
+            entityId: updated.id,
+            details: {
+              source: "task_watchdogs.revalidate_mutation_scope",
+              watchdogId: input.watchdog.id,
+              watchedIssueId: input.watchdog.issueId,
+              watchdogIssueId: input.watchdog.watchdogIssueId,
+              stopFingerprint: input.stopFingerprint,
+              clearedCheckoutRunId: lockedIssue.checkoutRunId,
+              clearedExecutionRunId: lockedIssue.executionRunId,
+              referencedRunStatuses: Object.fromEntries(
+                runIds.map((runId) => [runId, runStatusById.get(runId) ?? "missing"]),
+              ),
+            },
+          },
+          postCommitActivityPublications,
+        );
+        return updated.id;
+      });
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
+      if (cleared) clearedIssueIds.push(cleared);
+    }
+    return clearedIssueIds;
+  }
+
   async function revalidateMutationScope(scope: {
     kind: "watchdog";
     watchdogId: string;
     companyId: string;
     watchedIssueId: string;
     stopFingerprint: string | null;
+    runId?: string | null;
   }) {
     if (!scope.stopFingerprint) {
       return {
@@ -1648,6 +1792,12 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         reason: "Task-watchdog run context is not backed by an active persisted watchdog.",
       };
     }
+
+    await reconcileStaleSubtreeOwnershipForMutation({
+      watchdog,
+      stopFingerprint: scope.stopFingerprint,
+      runId: scope.runId,
+    });
 
     const input = await collectClassifierInput(watchdog.companyId, watchdog);
     const classification = classifyTaskWatchdogSubtree(input);
