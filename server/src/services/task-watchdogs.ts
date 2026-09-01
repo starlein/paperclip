@@ -18,7 +18,11 @@ import {
 import type { IssueWatchdog, IssueWatchdogSummary } from "@paperclipai/shared";
 import { conflict, notFound } from "../errors.js";
 import { parseObject } from "../adapters/utils.js";
-import { logActivity } from "./activity-log.js";
+import {
+  logActivity,
+  publishActivity,
+  type ActivityPublication,
+} from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
 import { issueService } from "./issues.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
@@ -1645,6 +1649,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
 
     const clearedIssueIds: string[] = [];
     for (const candidate of candidates) {
+      const postCommitActivityPublications: ActivityPublication[] = [];
       const cleared = await db.transaction(async (tx) => {
         const lockedIssue = await tx
           .select({
@@ -1665,10 +1670,21 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         if (runIds.length === 0) return null;
 
         const runRows = await tx
-          .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
+          .select({
+            id: heartbeatRuns.id,
+            status: heartbeatRuns.status,
+            contextSnapshot: heartbeatRuns.contextSnapshot,
+          })
           .from(heartbeatRuns)
-          .where(inArray(heartbeatRuns.id, runIds));
-        const runStatusById = new Map(runRows.map((run) => [run.id, run.status]));
+          .where(and(
+            eq(heartbeatRuns.companyId, input.watchdog.companyId),
+            inArray(heartbeatRuns.id, runIds),
+          ));
+        const runStatusById = new Map(
+          runRows
+            .filter((run) => issueIdFromRunContext(run.contextSnapshot) === lockedIssue.id)
+            .map((run) => [run.id, run.status]),
+        );
         const allOwnershipIsStale = runIds.every((runId) => {
           const status = runStatusById.get(runId);
           return status === undefined || TASK_WATCHDOG_TERMINAL_RUN_STATUSES.includes(
@@ -1700,30 +1716,35 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           .then((rows) => rows[0] ?? null);
         if (!updated) return null;
 
-        await logActivity(tx as unknown as Db, {
-          companyId: input.watchdog.companyId,
-          actorType: "system",
-          actorId: "task_watchdog_recovery",
-          agentId: input.watchdog.watchdogAgentId,
-          runId: input.runId ?? null,
-          action: "issue.task_watchdog_stale_ownership_cleared",
-          entityType: "issue",
-          entityId: updated.id,
-          details: {
-            source: "task_watchdogs.revalidate_mutation_scope",
-            watchdogId: input.watchdog.id,
-            watchedIssueId: input.watchdog.issueId,
-            watchdogIssueId: input.watchdog.watchdogIssueId,
-            stopFingerprint: input.stopFingerprint,
-            clearedCheckoutRunId: lockedIssue.checkoutRunId,
-            clearedExecutionRunId: lockedIssue.executionRunId,
-            referencedRunStatuses: Object.fromEntries(
-              runIds.map((runId) => [runId, runStatusById.get(runId) ?? "missing"]),
-            ),
+        await logActivity(
+          tx as unknown as Db,
+          {
+            companyId: input.watchdog.companyId,
+            actorType: "system",
+            actorId: "task_watchdog_recovery",
+            agentId: input.watchdog.watchdogAgentId,
+            runId: input.runId ?? null,
+            action: "issue.task_watchdog_stale_ownership_cleared",
+            entityType: "issue",
+            entityId: updated.id,
+            details: {
+              source: "task_watchdogs.revalidate_mutation_scope",
+              watchdogId: input.watchdog.id,
+              watchedIssueId: input.watchdog.issueId,
+              watchdogIssueId: input.watchdog.watchdogIssueId,
+              stopFingerprint: input.stopFingerprint,
+              clearedCheckoutRunId: lockedIssue.checkoutRunId,
+              clearedExecutionRunId: lockedIssue.executionRunId,
+              referencedRunStatuses: Object.fromEntries(
+                runIds.map((runId) => [runId, runStatusById.get(runId) ?? "missing"]),
+              ),
+            },
           },
-        });
+          postCommitActivityPublications,
+        );
         return updated.id;
       });
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
       if (cleared) clearedIssueIds.push(cleared);
     }
     return clearedIssueIds;

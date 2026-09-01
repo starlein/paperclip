@@ -795,6 +795,11 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const ownerAgentId = await seedAgent(companyId, { name: "Stopped owner" });
     const watchdogAgentId = await seedAgent(companyId, { name: "Watchdog" });
     const staleRunId = randomUUID();
+    const sourceId = await seedIssue(companyId, {
+      identifier: "WDOG-STALE-OWNERSHIP",
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+    });
     await db.insert(heartbeatRuns).values({
       id: staleRunId,
       companyId,
@@ -802,11 +807,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       status: "failed",
       invocationSource: "assignment",
       finishedAt: new Date(),
-    });
-    const sourceId = await seedIssue(companyId, {
-      identifier: "WDOG-STALE-OWNERSHIP",
-      status: "in_progress",
-      assigneeAgentId: ownerAgentId,
+      contextSnapshot: { issueId: sourceId },
     });
     await db.update(issues).set({
       checkoutRunId: staleRunId,
@@ -883,6 +884,11 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const watchdogAgentId = await seedAgent(companyId, { name: "Watchdog" });
     const staleRunId = randomUUID();
     const liveRunId = randomUUID();
+    const sourceId = await seedIssue(companyId, {
+      identifier: "WDOG-LIVE-OWNERSHIP",
+      status: "in_progress",
+      assigneeAgentId: ownerAgentId,
+    });
     await db.insert(heartbeatRuns).values([
       {
         id: staleRunId,
@@ -891,6 +897,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
         status: "failed",
         invocationSource: "assignment",
         finishedAt: new Date(),
+        contextSnapshot: { issueId: sourceId },
       },
       {
         id: liveRunId,
@@ -899,13 +906,9 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
         status: "running",
         invocationSource: "assignment",
         startedAt: new Date(),
+        contextSnapshot: { issueId: sourceId },
       },
     ]);
-    const sourceId = await seedIssue(companyId, {
-      identifier: "WDOG-LIVE-OWNERSHIP",
-      status: "in_progress",
-      assigneeAgentId: ownerAgentId,
-    });
     await db.update(issues).set({
       checkoutRunId: staleRunId,
       executionRunId: liveRunId,
@@ -935,6 +938,104 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       "issue.task_watchdog_stale_ownership_cleared",
     ));
     expect(audits).toHaveLength(0);
+  });
+
+  it("treats foreign-company ownership pointers as missing without touching the foreign run or issue", async () => {
+    const watchedCompanyId = await seedCompany();
+    const foreignCompanyId = await seedCompany();
+    const watchedOwnerAgentId = await seedAgent(watchedCompanyId, { name: "Watched owner" });
+    const watchdogAgentId = await seedAgent(watchedCompanyId, { name: "Watchdog" });
+    const foreignOwnerAgentId = await seedAgent(foreignCompanyId, { name: "Foreign owner" });
+    const watchedIssueId = await seedIssue(watchedCompanyId, {
+      identifier: "WDOG-FOREIGN-POINTER",
+      status: "done",
+      assigneeAgentId: watchedOwnerAgentId,
+    });
+    const foreignIssueId = await seedIssue(foreignCompanyId, {
+      identifier: "WDOG-FOREIGN-OWNER",
+      status: "in_progress",
+      assigneeAgentId: foreignOwnerAgentId,
+    });
+    const foreignRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: foreignRunId,
+      companyId: foreignCompanyId,
+      agentId: foreignOwnerAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      startedAt: new Date(),
+      contextSnapshot: { issueId: foreignIssueId },
+    });
+    await db.update(issues).set({
+      checkoutRunId: foreignRunId,
+      executionRunId: foreignRunId,
+      executionAgentNameKey: "foreign-owner",
+      executionLockedAt: new Date(),
+    }).where(eq(issues.id, foreignIssueId));
+    await seedWatchdog(watchedCompanyId, watchedIssueId, watchdogAgentId);
+    const { service } = createService();
+
+    await service.reconcileTaskWatchdogs({ companyId: watchedCompanyId });
+    const [watchdog] = await db
+      .select()
+      .from(issueWatchdogs)
+      .where(eq(issueWatchdogs.issueId, watchedIssueId));
+    const stopFingerprint = watchdog!.lastObservedFingerprint!;
+    await db.update(issues).set({
+      checkoutRunId: foreignRunId,
+      executionRunId: foreignRunId,
+      executionAgentNameKey: "foreign-owner",
+      executionLockedAt: new Date(),
+    }).where(eq(issues.id, watchedIssueId));
+    const watchdogRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: watchdogRunId,
+      companyId: watchedCompanyId,
+      agentId: watchdogAgentId,
+      status: "running",
+      invocationSource: "assignment",
+      contextSnapshot: {
+        issueId: watchdog!.watchdogIssueId,
+        taskWatchdog: { watchedIssueId, stopFingerprint },
+      },
+    });
+
+    const revalidated = await service.revalidateMutationScope({
+      kind: "watchdog",
+      watchdogId: watchdog!.id,
+      companyId: watchedCompanyId,
+      watchedIssueId,
+      stopFingerprint,
+      runId: watchdogRunId,
+    });
+
+    expect(revalidated.allowed).toBe(true);
+    const [watchedIssue] = await db.select().from(issues).where(eq(issues.id, watchedIssueId));
+    expect(watchedIssue).toMatchObject({
+      checkoutRunId: null,
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
+    });
+    const [foreignIssue] = await db.select().from(issues).where(eq(issues.id, foreignIssueId));
+    expect(foreignIssue).toMatchObject({
+      checkoutRunId: foreignRunId,
+      executionRunId: foreignRunId,
+      executionAgentNameKey: "foreign-owner",
+    });
+    const [foreignRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, foreignRunId));
+    expect(foreignRun).toMatchObject({
+      companyId: foreignCompanyId,
+      status: "running",
+    });
+    const [audit] = await db.select().from(activityLog).where(and(
+      eq(activityLog.entityId, watchedIssueId),
+      eq(activityLog.action, "issue.task_watchdog_stale_ownership_cleared"),
+    ));
+    expect(audit?.companyId).toBe(watchedCompanyId);
+    expect(audit?.details).toMatchObject({
+      referencedRunStatuses: { [foreignRunId]: "missing" },
+    });
   });
 
   it("surfaces pending interaction kinds and approval ids in the wake and watchdog comment", async () => {
