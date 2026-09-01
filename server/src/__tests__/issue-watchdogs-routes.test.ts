@@ -647,10 +647,22 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     });
   });
 
-  it.each(["queued", "running"] as const)(
-    "keeps a bound %s owner and denies the stale watchdog PATCH",
-    async (status) => {
+  it.each([
+    ["checkoutRunId", "queued"],
+    ["checkoutRunId", "running"],
+    ["checkoutRunId", "scheduled_retry"],
+    ["executionRunId", "queued"],
+    ["executionRunId", "running"],
+    ["executionRunId", "scheduled_retry"],
+  ] as const)(
+    "keeps a cross-issue %s owned by a same-company %s run and denies the watchdog PATCH",
+    async (ownershipField, status) => {
       const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "done" });
+      const contextIssueId = await seedIssue(fixture.companyId, {
+        title: "Live owner's original issue",
+        status: "in_progress",
+        assigneeAgentId: fixture.ownerAgentId,
+      });
       const liveRunId = randomUUID();
       await db.insert(heartbeatRuns).values({
         id: liveRunId,
@@ -658,11 +670,13 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         agentId: fixture.ownerAgentId,
         status,
         invocationSource: "assignment",
-        contextSnapshot: { issueId: fixture.sourceIssueId },
+        startedAt: status === "running" ? new Date() : undefined,
+        scheduledRetryAt: status === "scheduled_retry" ? new Date(Date.now() + 60_000) : undefined,
+        contextSnapshot: { issueId: contextIssueId },
       });
       await db.update(issues).set({
-        checkoutRunId: liveRunId,
-        executionRunId: liveRunId,
+        checkoutRunId: ownershipField === "checkoutRunId" ? liveRunId : null,
+        executionRunId: ownershipField === "executionRunId" ? liveRunId : null,
         executionAgentNameKey: "live-owner",
         executionLockedAt: new Date(),
       }).where(eq(issues.id, fixture.sourceIssueId));
@@ -675,8 +689,8 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       expect(res.body.details).toMatchObject({ currentState: "live" });
       const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
       expect(source).toMatchObject({
-        checkoutRunId: liveRunId,
-        executionRunId: liveRunId,
+        checkoutRunId: ownershipField === "checkoutRunId" ? liveRunId : null,
+        executionRunId: ownershipField === "executionRunId" ? liveRunId : null,
         executionAgentNameKey: "live-owner",
       });
       const cleanupAudits = await db.select().from(activityLog).where(and(

@@ -878,67 +878,76 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     });
   });
 
-  it("preserves stale metadata when any referenced ownership run is still live", async () => {
-    const companyId = await seedCompany();
-    const ownerAgentId = await seedAgent(companyId, { name: "Live owner" });
-    const watchdogAgentId = await seedAgent(companyId, { name: "Watchdog" });
-    const staleRunId = randomUUID();
-    const liveRunId = randomUUID();
-    const sourceId = await seedIssue(companyId, {
-      identifier: "WDOG-LIVE-OWNERSHIP",
-      status: "in_progress",
-      assigneeAgentId: ownerAgentId,
-    });
-    await db.insert(heartbeatRuns).values([
-      {
-        id: staleRunId,
-        companyId,
-        agentId: ownerAgentId,
-        status: "failed",
-        invocationSource: "assignment",
-        finishedAt: new Date(),
-        contextSnapshot: { issueId: sourceId },
-      },
-      {
+  it.each([
+    ["checkoutRunId", "queued"],
+    ["checkoutRunId", "running"],
+    ["checkoutRunId", "scheduled_retry"],
+    ["executionRunId", "queued"],
+    ["executionRunId", "running"],
+    ["executionRunId", "scheduled_retry"],
+  ] as const)(
+    "preserves %s ownership when a same-company %s run names another issue",
+    async (ownershipField, status) => {
+      const companyId = await seedCompany();
+      const ownerAgentId = await seedAgent(companyId, { name: "Live owner" });
+      const watchdogAgentId = await seedAgent(companyId, { name: "Watchdog" });
+      const liveRunId = randomUUID();
+      const contextIssueId = await seedIssue(companyId, {
+        identifier: `WDOG-LIVE-CONTEXT-${ownershipField}-${status}`,
+        status: "in_progress",
+        assigneeAgentId: ownerAgentId,
+      });
+      const sourceId = await seedIssue(companyId, {
+        identifier: `WDOG-LIVE-OWNER-${ownershipField}-${status}`,
+        status: "in_progress",
+        assigneeAgentId: ownerAgentId,
+      });
+      await db.insert(heartbeatRuns).values({
         id: liveRunId,
         companyId,
         agentId: ownerAgentId,
-        status: "running",
+        status,
         invocationSource: "assignment",
-        startedAt: new Date(),
-        contextSnapshot: { issueId: sourceId },
-      },
-    ]);
-    await db.update(issues).set({
-      checkoutRunId: staleRunId,
-      executionRunId: liveRunId,
-      executionLockedAt: new Date(),
-    }).where(eq(issues.id, sourceId));
-    const watchdog = await seedWatchdog(companyId, sourceId, watchdogAgentId);
-    const { service } = createService();
+        startedAt: status === "running" ? new Date() : undefined,
+        scheduledRetryAt: status === "scheduled_retry" ? new Date(Date.now() + 60_000) : undefined,
+        contextSnapshot: { issueId: contextIssueId },
+      });
+      await db.update(issues).set({
+        [ownershipField]: liveRunId,
+        executionAgentNameKey: "live-owner",
+        executionLockedAt: new Date(),
+      }).where(eq(issues.id, sourceId));
+      const watchdog = await seedWatchdog(companyId, sourceId, watchdogAgentId);
+      const { service } = createService();
 
-    const revalidated = await service.revalidateMutationScope({
-      kind: "watchdog",
-      watchdogId: watchdog!.id,
-      companyId,
-      watchedIssueId: sourceId,
-      stopFingerprint: "task_watchdog_stop:stale",
-      runId: randomUUID(),
-    });
+      const revalidated = await service.revalidateMutationScope({
+        kind: "watchdog",
+        watchdogId: watchdog!.id,
+        companyId,
+        watchedIssueId: sourceId,
+        stopFingerprint: "task_watchdog_stop:stale",
+        runId: randomUUID(),
+      });
 
-    expect(revalidated.allowed).toBe(false);
-    expect(revalidated.classification?.state).toBe("live");
-    const [source] = await db.select({
-      checkoutRunId: issues.checkoutRunId,
-      executionRunId: issues.executionRunId,
-    }).from(issues).where(eq(issues.id, sourceId));
-    expect(source).toEqual({ checkoutRunId: staleRunId, executionRunId: liveRunId });
-    const audits = await db.select().from(activityLog).where(eq(
-      activityLog.action,
-      "issue.task_watchdog_stale_ownership_cleared",
-    ));
-    expect(audits).toHaveLength(0);
-  });
+      const [source] = await db.select({
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+        executionAgentNameKey: issues.executionAgentNameKey,
+      }).from(issues).where(eq(issues.id, sourceId));
+      expect(source).toEqual({
+        checkoutRunId: ownershipField === "checkoutRunId" ? liveRunId : null,
+        executionRunId: ownershipField === "executionRunId" ? liveRunId : null,
+        executionAgentNameKey: "live-owner",
+      });
+      expect(revalidated.allowed).toBe(false);
+      expect(revalidated.classification?.state).toBe("live");
+      const audits = await db.select().from(activityLog).where(eq(
+        activityLog.action,
+        "issue.task_watchdog_stale_ownership_cleared",
+      ));
+      expect(audits).toHaveLength(0);
+    },
+  );
 
   it("treats foreign-company ownership pointers as missing without touching the foreign run or issue", async () => {
     const watchedCompanyId = await seedCompany();

@@ -980,9 +980,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           issueId: issues.id,
         })
         .from(issues)
-        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .innerJoin(heartbeatRuns, or(
+          eq(issues.checkoutRunId, heartbeatRuns.id),
+          eq(issues.executionRunId, heartbeatRuns.id),
+        ))
         .where(and(
           eq(issues.companyId, companyId),
+          eq(heartbeatRuns.companyId, companyId),
           inArray(issues.id, subtreeIssueIds),
           visibleIssueCondition(),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_LIVE_RUN_STATUSES]),
@@ -1138,7 +1142,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   async function collectCompletedRunIssueIds(companyId: string, issueIds: string[]) {
     if (issueIds.length === 0) return [];
     const candidates = new Set(issueIds);
-    const [contextRuns, executionRuns] = await Promise.all([
+    const [contextRuns, issueOwnedRuns] = await Promise.all([
       db
         .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
         .from(heartbeatRuns)
@@ -1153,9 +1157,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       db
         .select({ issueId: issues.id })
         .from(issues)
-        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .innerJoin(heartbeatRuns, or(
+          eq(issues.checkoutRunId, heartbeatRuns.id),
+          eq(issues.executionRunId, heartbeatRuns.id),
+        ))
         .where(and(
           eq(issues.companyId, companyId),
+          eq(heartbeatRuns.companyId, companyId),
           inArray(issues.id, issueIds),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_TERMINAL_RUN_STATUSES]),
         )),
@@ -1165,7 +1173,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       const issueId = issueIdFromRunContext(row.contextSnapshot);
       if (issueId && candidates.has(issueId)) completed.add(issueId);
     }
-    for (const row of executionRuns) {
+    for (const row of issueOwnedRuns) {
       completed.add(row.issueId);
     }
     return [...completed];
@@ -1202,9 +1210,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       db
         .select({ id: heartbeatRuns.id })
         .from(issues)
-        .innerJoin(heartbeatRuns, eq(issues.executionRunId, heartbeatRuns.id))
+        .innerJoin(heartbeatRuns, or(
+          eq(issues.checkoutRunId, heartbeatRuns.id),
+          eq(issues.executionRunId, heartbeatRuns.id),
+        ))
         .where(and(
           eq(issues.companyId, companyId),
+          eq(heartbeatRuns.companyId, companyId),
           eq(issues.id, issueId),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_LIVE_RUN_STATUSES]),
         ))
@@ -1673,18 +1685,17 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           .select({
             id: heartbeatRuns.id,
             status: heartbeatRuns.status,
-            contextSnapshot: heartbeatRuns.contextSnapshot,
           })
           .from(heartbeatRuns)
           .where(and(
             eq(heartbeatRuns.companyId, input.watchdog.companyId),
             inArray(heartbeatRuns.id, runIds),
           ));
-        const runStatusById = new Map(
-          runRows
-            .filter((run) => issueIdFromRunContext(run.contextSnapshot) === lockedIssue.id)
-            .map((run) => [run.id, run.status]),
-        );
+        // A live run may legitimately own more than the issue named in its
+        // original context snapshot (checkout and legacy wake paths can stamp
+        // the same run onto another issue). The issue pointer is authoritative;
+        // company scope prevents a foreign run from being treated as its owner.
+        const runStatusById = new Map(runRows.map((run) => [run.id, run.status]));
         const allOwnershipIsStale = runIds.every((runId) => {
           const status = runStatusById.get(runId);
           return status === undefined || TASK_WATCHDOG_TERMINAL_RUN_STATUSES.includes(
