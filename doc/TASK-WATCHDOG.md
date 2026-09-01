@@ -129,7 +129,7 @@ What custom instructions cannot do: grant authority outside the watched subtree,
 
 ## Scope enforcement
 
-Every watchdog-originated mutation is gated by a server-side scope check derived from the agent run's `contextSnapshot.taskWatchdog` field. The check resolves to a `{ kind: "watchdog", watchdogId, companyId, watchedIssueId, watchdogIssueId }` envelope and rejects:
+Every watchdog-originated mutation is gated by a server-side scope check derived from the agent run's `contextSnapshot.taskWatchdog` field. The check resolves to a `{ kind: "watchdog", watchdogId, companyId, watchedIssueId, watchdogIssueId, runId }` envelope and rejects:
 
 - mutations on issues outside the watched subtree (parent-chain walk, depth-limited)
 - mutations on issues whose company id does not match the watchdog's company
@@ -138,6 +138,8 @@ Every watchdog-originated mutation is gated by a server-side scope check derived
 - direct edits to active-run output or execution-policy decisions that require a typed participant
 
 The check is wired into the issue update, status change, blocker, assignment, and interaction routes. Any disallowed mutation is rejected at the route layer; the watchdog agent must take a different path (comment, in-subtree follow-up issue, leave a valid waiting state, escalate to a human owner).
+
+Before it validates the stopped fingerprint, the check repairs stale checkout and execution ownership in the watched subtree when every referenced run is terminal or missing. Each repair is atomic and creates an activity record with the watchdog and run context. A queued or running owner is never released by this path; it keeps the subtree live and the mutation is rejected as stale.
 
 ---
 
