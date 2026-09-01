@@ -647,6 +647,55 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     });
   });
 
+  it("ignores the current watchdog checkout on the reusable watchdog issue during source recovery", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const recoveryAgentId = await seedAgent(fixture.companyId, { name: "Recovery owner" });
+    await db.insert(principalPermissionGrants).values({
+      companyId: fixture.companyId,
+      principalType: "agent",
+      principalId: fixture.watchdogAgentId,
+      permissionKey: "tasks:assign",
+    });
+    await db.update(issues).set({
+      status: "in_progress",
+      checkoutRunId: fixture.watchdogRunId,
+      executionRunId: fixture.watchdogRunId,
+      executionAgentNameKey: "recovery-watchdog",
+      executionLockedAt: new Date(),
+    }).where(eq(issues.id, fixture.watchdogIssueId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({
+        status: "todo",
+        assigneeAgentId: recoveryAgentId,
+        comment: "Recovered the source path and handed it back to an invokable owner.",
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "todo",
+      assigneeAgentId: recoveryAgentId,
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+    const [recoveryComment] = await db.select().from(issueComments).where(and(
+      eq(issueComments.issueId, fixture.sourceIssueId),
+      eq(issueComments.authorAgentId, fixture.watchdogAgentId),
+    ));
+    expect(recoveryComment).toMatchObject({
+      body: "Recovered the source path and handed it back to an invokable owner.",
+      authorAgentId: fixture.watchdogAgentId,
+    });
+    const [watchdogIssue] = await db.select().from(issues).where(eq(issues.id, fixture.watchdogIssueId));
+    expect(watchdogIssue).toMatchObject({
+      status: "in_progress",
+      checkoutRunId: fixture.watchdogRunId,
+      executionRunId: fixture.watchdogRunId,
+    });
+  });
+
   it.each([
     ["checkoutRunId", "queued"],
     ["checkoutRunId", "running"],
@@ -680,6 +729,13 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         executionAgentNameKey: "live-owner",
         executionLockedAt: new Date(),
       }).where(eq(issues.id, fixture.sourceIssueId));
+      await db.update(issues).set({
+        status: "in_progress",
+        checkoutRunId: fixture.watchdogRunId,
+        executionRunId: fixture.watchdogRunId,
+        executionAgentNameKey: "recovery-watchdog",
+        executionLockedAt: new Date(),
+      }).where(eq(issues.id, fixture.watchdogIssueId));
 
       const res = await request(fixture.app)
         .patch(`/api/issues/${fixture.sourceIssueId}`)
@@ -692,6 +748,12 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         checkoutRunId: ownershipField === "checkoutRunId" ? liveRunId : null,
         executionRunId: ownershipField === "executionRunId" ? liveRunId : null,
         executionAgentNameKey: "live-owner",
+      });
+      const [watchdogIssue] = await db.select().from(issues).where(eq(issues.id, fixture.watchdogIssueId));
+      expect(watchdogIssue).toMatchObject({
+        status: "in_progress",
+        checkoutRunId: fixture.watchdogRunId,
+        executionRunId: fixture.watchdogRunId,
       });
       const cleanupAudits = await db.select().from(activityLog).where(and(
         eq(activityLog.companyId, fixture.companyId),
