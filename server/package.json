@@ -86,6 +86,9 @@
     "ws": "^8.21.3",
     "zod": "^4.4.3"
   },
+  "bundleDependencies": [
+    "acpx"
+  ],
   "devDependencies": {
     "@paperclipai/paperclip-runner": "workspace:*",
     "@types/express": "^5.0.0",
