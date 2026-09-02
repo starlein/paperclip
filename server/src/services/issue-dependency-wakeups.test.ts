@@ -17,6 +17,8 @@ const secondCycle = new Date("2026-08-01T09:30:00.000Z");
 type WakeRow = {
   id: string;
   status: string;
+  runId?: string | null;
+  runStatus?: string | null;
   idempotencyKey: string | null;
   requestedAt: Date;
 };
@@ -26,11 +28,15 @@ function dbWithWakes(rows: WakeRow[]): Db {
     select() {
       return {
         from() {
-          return {
+          const query = {
+            leftJoin() {
+              return query;
+            },
             where() {
               return Promise.resolve(rows);
             },
           };
+          return query;
         },
       };
     },
@@ -232,6 +238,8 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
         {
           id: "wake-legacy-claimed",
           status: "claimed",
+          runId: "run-live",
+          runStatus: "running",
           idempotencyKey: legacyKey,
           requestedAt: firstCycle,
         },
@@ -253,4 +261,23 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
     );
     expect(completed).toBeNull();
   });
+
+  it.each(["queued", "claimed"])(
+    "does not treat a %s wake with a terminal linked run as in flight",
+    async (status) => {
+      const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+      const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+        dbWithWakes([{
+          id: `wake-${status}-terminal`,
+          status,
+          runId: "run-terminal",
+          runStatus: "succeeded",
+          idempotencyKey: cycleKey,
+          requestedAt: secondCycle,
+        }]),
+        readyState,
+      );
+      expect(existing).toBeNull();
+    },
+  );
 });

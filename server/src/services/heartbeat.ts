@@ -23339,6 +23339,7 @@ export function heartbeatService(
             executionWorkspacePreference: issues.executionWorkspacePreference,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
             assigneeAgentId: issues.assigneeAgentId,
+            unblockDescriptor: issues.unblockDescriptor,
             blockedTransitionAt: issues.blockedTransitionAt,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
@@ -23673,8 +23674,10 @@ export function heartbeatService(
                   .getActivePauseHoldGate(issue.companyId, issue.id),
               ])
             : [null, null, null];
-        const resolvedDependencySuppressionReason = pendingDependencyInteraction
-          ? "pending_interaction"
+        const resolvedDependencySuppressionReason = issue.unblockDescriptor !== null
+          ? "unblock_descriptor"
+          : pendingDependencyInteraction
+            ? "pending_interaction"
           : pendingDependencyApproval
             ? "pending_approval"
             : activeDependencyPauseHold
@@ -23776,8 +23779,17 @@ export function heartbeatService(
             .select({
               id: agentWakeupRequests.id,
               status: agentWakeupRequests.status,
+              runId: agentWakeupRequests.runId,
             })
             .from(agentWakeupRequests)
+            .leftJoin(
+              heartbeatRuns,
+              and(
+                eq(heartbeatRuns.id, agentWakeupRequests.runId),
+                eq(heartbeatRuns.companyId, issue.companyId),
+                eq(heartbeatRuns.agentId, agentId),
+              ),
+            )
             .where(
               and(
                 eq(agentWakeupRequests.companyId, issue.companyId),
@@ -23792,18 +23804,45 @@ export function heartbeatService(
               ),
             )
             .orderBy(
+              sql`case
+                when ${agentWakeupRequests.runId} is null
+                  and ${agentWakeupRequests.status} <> 'claimed' then 0
+                when ${heartbeatRuns.status} in ('queued', 'running', 'scheduled_retry') then 0
+                when ${agentWakeupRequests.status} = 'completed' then 2
+                else 1
+              end`,
               sql`case when ${agentWakeupRequests.status} = 'completed' then 1 else 0 end`,
               asc(agentWakeupRequests.requestedAt),
             )
             .limit(1)
-            .for("update")
+            .for("update", { of: agentWakeupRequests })
             .then((rows) => rows[0] ?? null);
           if (
             existingDependencyWake &&
             (existingDependencyWake.status !== "completed" || issue.status !== "blocked")
           ) {
-            await moveResolvedDependencyToRunnableDisposition();
-            return { kind: "deferred" as const };
+            const existingDependencyRun = existingDependencyWake.runId
+              ? await tx
+                  .select({ status: heartbeatRuns.status })
+                  .from(heartbeatRuns)
+                  .where(and(
+                    eq(heartbeatRuns.id, existingDependencyWake.runId),
+                    eq(heartbeatRuns.companyId, issue.companyId),
+                    eq(heartbeatRuns.agentId, agentId),
+                  ))
+                  .for("update")
+                  .then((rows) => rows[0] ?? null)
+              : null;
+            const wakeHasLiveDelivery = existingDependencyWake.runId
+              ? Boolean(
+                  existingDependencyRun &&
+                  !isHeartbeatRunTerminalStatus(existingDependencyRun.status),
+                )
+              : existingDependencyWake.status !== "claimed";
+            if (wakeHasLiveDelivery) {
+              await moveResolvedDependencyToRunnableDisposition();
+              return { kind: "deferred" as const };
+            }
           }
         }
 
