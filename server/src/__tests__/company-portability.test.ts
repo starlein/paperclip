@@ -4171,6 +4171,7 @@ describe("company portability", () => {
         issueId: alphaId,
         relatedIssueId: betaId,
         type: "blocks",
+        createdByActorType: "user",
         createdByAgentId: null,
         createdByUserId: "user-1",
       },
