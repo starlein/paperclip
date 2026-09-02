@@ -384,6 +384,9 @@ describe("issue execution policy routes", () => {
       ...issue,
       ...patch,
       updatedAt: new Date(),
+      changes: {
+        status: { from: "todo", to: "in_review" },
+      },
     }));
 
     const res = await request(await createApp({
@@ -438,6 +441,9 @@ describe("issue execution policy routes", () => {
       ...issue,
       ...patch,
       updatedAt: new Date(),
+      changes: {
+        status: { from: "todo", to: "in_review" },
+      },
     }));
 
     const res = await request(await createApp({
@@ -746,6 +752,9 @@ describe("issue execution policy routes", () => {
       ...issue,
       ...patch,
       updatedAt: new Date(),
+      changes: {
+        status: { from: "todo", to: "in_review" },
+      },
     }));
 
     const res = await request(await createApp())

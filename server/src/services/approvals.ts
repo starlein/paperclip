@@ -7,6 +7,17 @@ import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import {
+  logActivity,
+  publishActivity,
+  type ActivityPublication,
+  type LogActivityInput,
+} from "./activity-log.js";
+
+type ApprovalActivityActor = Pick<
+  LogActivityInput,
+  "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId"
+>;
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -253,13 +264,14 @@ export function approvalService(db: Db) {
     },
 
     requestRevision: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
-      return withLockedLinkedIssues(id, async (tx, existing) => {
+      const activityPublications: ActivityPublication[] = [];
+      const updated = await withLockedLinkedIssues(id, async (tx, existing) => {
         if (existing.status !== "pending") {
           throw unprocessable("Only pending approvals can request revision");
         }
 
         const now = new Date();
-        return tx
+        const approval = await tx
           .update(approvals)
           .set({
             status: "revision_requested",
@@ -271,17 +283,34 @@ export function approvalService(db: Db) {
           .where(eq(approvals.id, id))
           .returning()
           .then((rows: ApprovalRecord[]) => rows[0]);
+        await logActivity(tx as Db, {
+          companyId: approval.companyId,
+          actorType: "user",
+          actorId: decidedByUserId,
+          action: "approval.revision_requested",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { type: approval.type },
+        }, activityPublications);
+        return approval;
       });
+      for (const publication of activityPublications) publishActivity(publication);
+      return updated;
     },
 
-    resubmit: async (id: string, payload?: Record<string, unknown>) => {
-      return withLockedLinkedIssues(id, async (tx, existing) => {
+    resubmit: async (
+      id: string,
+      payload: Record<string, unknown> | undefined,
+      actor: ApprovalActivityActor,
+    ) => {
+      const activityPublications: ActivityPublication[] = [];
+      const updated = await withLockedLinkedIssues(id, async (tx, existing) => {
         if (existing.status !== "revision_requested") {
           throw unprocessable("Only revision requested approvals can be resubmitted");
         }
 
         const now = new Date();
-        return tx
+        const approval = await tx
           .update(approvals)
           .set({
             status: "pending",
@@ -294,7 +323,18 @@ export function approvalService(db: Db) {
           .where(eq(approvals.id, id))
           .returning()
           .then((rows: ApprovalRecord[]) => rows[0]);
+        await logActivity(tx as Db, {
+          companyId: approval.companyId,
+          ...actor,
+          action: "approval.resubmitted",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { type: approval.type },
+        }, activityPublications);
+        return approval;
       });
+      for (const publication of activityPublications) publishActivity(publication);
+      return updated;
     },
 
     listComments: async (approvalId: string) => {

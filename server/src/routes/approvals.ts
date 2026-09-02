@@ -447,16 +447,6 @@ export function approvalRoutes(
       const decidedByUserId = req.actor.userId ?? "board";
       const approval = await svc.requestRevision(id, decidedByUserId, req.body.decisionNote);
 
-      await logActivity(db, {
-        companyId: approval.companyId,
-        actorType: "user",
-        actorId: req.actor.userId ?? "board",
-        action: "approval.revision_requested",
-        entityType: "approval",
-        entityId: approval.id,
-        details: { type: approval.type },
-      });
-
       res.json(redactApprovalPayload(approval));
     },
   );
@@ -481,17 +471,13 @@ export function approvalRoutes(
           )
         : req.body.payload
       : undefined;
-    const approval = await svc.resubmit(id, normalizedPayload);
     const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId: approval.companyId,
+    const approval = await svc.resubmit(id, normalizedPayload, {
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
-      action: "approval.resubmitted",
-      entityType: "approval",
-      entityId: approval.id,
-      details: { type: approval.type },
+      runId: actor.runId,
+      agentApiKeyId: actor.agentApiKeyId,
     });
     res.json(redactApprovalPayload(approval));
   });

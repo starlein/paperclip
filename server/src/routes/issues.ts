@@ -10445,6 +10445,10 @@ export function issueRoutes(
     ) => {
       if (!persistReviewActivityTransactionally) return;
       const changes = updated.changes ?? {};
+      const hasExecutionPolicyChange = Object.prototype.hasOwnProperty.call(changes, "executionPolicy");
+      const hasReviewStatusChange =
+        enteringReviewRequested && Object.prototype.hasOwnProperty.call(changes, "status");
+      if (!hasExecutionPolicyChange && !hasReviewStatusChange && !reviewInteractionId) return;
       const previous = Object.fromEntries(
         Object.entries(changes).map(([key, change]) => [key, change.from]),
       );
@@ -10720,7 +10724,7 @@ export function issueRoutes(
         existing.assigneeAgentId !== issue.assigneeAgentId ||
         existing.assigneeUserId !== issue.assigneeUserId,
       blockersChanged: Array.isArray(req.body.blockedByIssueIds),
-      executionPolicyChanged: req.body.executionPolicy !== undefined,
+      executionPolicyChanged: Object.prototype.hasOwnProperty.call(issueChanges, "executionPolicy"),
       monitorChanged,
       resumeRequested: resumeRequested === true,
       reopened,

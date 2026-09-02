@@ -418,6 +418,40 @@ describe("approval routes idempotent retries", () => {
     expect(mockApprovalService.resubmit).not.toHaveBeenCalled();
   });
 
+  it("passes the authenticated agent context into approval resubmission", async () => {
+    const existing = {
+      id: "approval-9",
+      companyId: "company-1",
+      type: "request_board_approval",
+      status: "revision_requested",
+      payload: {},
+      requestedByAgentId: "agent-1",
+    };
+    mockApprovalService.getById.mockResolvedValue(existing);
+    mockApprovalService.resubmit.mockResolvedValue({
+      ...existing,
+      status: "pending",
+      payload: { title: "Retry" },
+    });
+
+    const res = await request(await createAgentApp())
+      .post("/api/approvals/approval-9/resubmit")
+      .send({ payload: { title: "Retry" } });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockApprovalService.resubmit).toHaveBeenCalledWith(
+      "approval-9",
+      { title: "Retry" },
+      {
+        actorType: "agent",
+        actorId: "agent-1",
+        agentId: "agent-1",
+        runId: "run-1",
+        agentApiKeyId: null,
+      },
+    );
+  });
+
   it("blocks status-only recovery runs from commenting on approvals", async () => {
     mockApprovalService.getById.mockResolvedValue({
       id: "approval-8",

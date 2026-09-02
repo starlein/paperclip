@@ -8,6 +8,8 @@ const mockAgentService = vi.hoisted(() => ({
 }));
 
 const mockNotifyHireApproved = vi.hoisted(() => vi.fn());
+const mockLogActivity = vi.hoisted(() => vi.fn());
+const mockPublishActivity = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/agents.js", () => ({
   agentService: vi.fn(() => mockAgentService),
@@ -15,6 +17,11 @@ vi.mock("../services/agents.js", () => ({
 
 vi.mock("../services/hire-hook.js", () => ({
   notifyHireApproved: mockNotifyHireApproved,
+}));
+
+vi.mock("../services/activity-log.js", () => ({
+  logActivity: mockLogActivity,
+  publishActivity: mockPublishActivity,
 }));
 
 type ApprovalRecord = {
@@ -39,6 +46,7 @@ function createApproval(status: string): ApprovalRecord {
 
 function createDbStub(selectResults: ApprovalRecord[][], updateResults: ApprovalRecord[]) {
   const pendingSelectResults = [...selectResults];
+  let transactionActive = false;
   const selectWhere = vi.fn();
   const select = vi.fn(() => {
     let linkedIssueLockQuery = false;
@@ -63,12 +71,20 @@ function createDbStub(selectResults: ApprovalRecord[][], updateResults: Approval
   const update = vi.fn(() => ({ set }));
 
   const db: any = { select, update };
-  db.transaction = vi.fn(async (callback: (tx: typeof db) => Promise<unknown>) => callback(db));
+  db.transaction = vi.fn(async (callback: (tx: typeof db) => Promise<unknown>) => {
+    transactionActive = true;
+    try {
+      return await callback(db);
+    } finally {
+      transactionActive = false;
+    }
+  });
 
   return {
     db,
     selectWhere,
     returning,
+    isTransactionActive: () => transactionActive,
   };
 }
 
@@ -79,6 +95,8 @@ describe("approvalService resolution idempotency", () => {
     mockAgentService.create.mockResolvedValue({ id: "agent-1" });
     mockAgentService.terminate.mockResolvedValue(undefined);
     mockNotifyHireApproved.mockResolvedValue(undefined);
+    mockLogActivity.mockResolvedValue(undefined);
+    mockPublishActivity.mockReturnValue(undefined);
   });
 
   it("treats repeated approve retries as no-ops after another worker resolves the approval", async () => {
@@ -150,6 +168,70 @@ describe("approvalService resolution idempotency", () => {
         adapterConfig: approved.payload.adapterConfig,
       }),
     );
+  });
+
+  it("persists request-revision activity before the locked transaction commits", async () => {
+    const revised = createApproval("revision_requested");
+    const dbStub = createDbStub([[createApproval("pending")]], [revised]);
+    mockLogActivity.mockImplementation(async (_tx, _input, publications) => {
+      expect(dbStub.isTransactionActive()).toBe(true);
+      publications.push({ companyId: "company-1", payload: {}, pluginEvent: null });
+    });
+    mockPublishActivity.mockImplementation(() => {
+      expect(dbStub.isTransactionActive()).toBe(false);
+    });
+
+    const result = await approvalService(dbStub.db as any)
+      .requestRevision("approval-1", "board-user", "Please revise");
+
+    expect(result.status).toBe("revision_requested");
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      dbStub.db,
+      expect.objectContaining({
+        actorType: "user",
+        actorId: "board-user",
+        action: "approval.revision_requested",
+        entityId: "approval-1",
+      }),
+      expect.any(Array),
+    );
+    expect(mockPublishActivity).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists resubmission activity before the locked transaction commits", async () => {
+    const resubmitted = createApproval("pending");
+    const dbStub = createDbStub([[createApproval("revision_requested")]], [resubmitted]);
+    mockLogActivity.mockImplementation(async (_tx, _input, publications) => {
+      expect(dbStub.isTransactionActive()).toBe(true);
+      publications.push({ companyId: "company-1", payload: {}, pluginEvent: null });
+    });
+
+    const result = await approvalService(dbStub.db as any).resubmit(
+      "approval-1",
+      { revised: true },
+      {
+        actorType: "agent",
+        actorId: "agent-1",
+        agentId: "agent-1",
+        runId: "run-1",
+        agentApiKeyId: "key-1",
+      },
+    );
+
+    expect(result.status).toBe("pending");
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      dbStub.db,
+      expect.objectContaining({
+        actorType: "agent",
+        actorId: "agent-1",
+        agentId: "agent-1",
+        runId: "run-1",
+        action: "approval.resubmitted",
+        entityId: "approval-1",
+      }),
+      expect.any(Array),
+    );
+    expect(mockPublishActivity).toHaveBeenCalledTimes(1);
   });
 });
 
