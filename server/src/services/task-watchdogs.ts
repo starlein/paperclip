@@ -650,22 +650,37 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     blockerEdge.blockerOriginId !== input.watchedIssueId
   ) return false;
 
-  return recoveryActivities.some((activity) => {
-    const details = parseObject(activity.details);
-    const blockerIssueIds = Array.isArray(details.blockedByIssueIds)
-      ? details.blockedByIssueIds.filter((id): id is string => typeof id === "string").sort()
-      : null;
-    return activity.actorType === "system" &&
-      activity.actorId === "system" &&
-      activity.agentId === null &&
-      activity.runId === null &&
-      activity.createdAt >= blockerEdge.createdAt &&
-      details.source === "recovery.reconcile_continuation_waiting_on_review" &&
-      details.status === "blocked" &&
-      details.previousStatus === input.observedWatchedSource.status &&
-      blockerIssueIds != null &&
-      canonicalJson(blockerIssueIds) === canonicalJson(currentWatchedSource.blockerIssueIds);
-  });
+  const latestRecoveryBoundary = recoveryActivities.reduce<number | null>((latest, activity) => {
+    const timestamp = activity.createdAt.getTime();
+    return latest == null || timestamp > latest ? timestamp : latest;
+  }, null);
+  if (latestRecoveryBoundary == null) return false;
+
+  // The canonical recovery transition must be the latest issue mutation at
+  // the current source revision. An older matching record cannot authorize a
+  // stale watchdog after a user or unrelated agent has since changed the
+  // source away from and back to the same shape. Equal-timestamp ambiguity
+  // also fails closed instead of choosing an arbitrary UUID row.
+  const latestRecoveryActivities = recoveryActivities.filter(
+    (activity) => activity.createdAt.getTime() === latestRecoveryBoundary,
+  );
+  if (latestRecoveryActivities.length !== 1) return false;
+
+  const activity = latestRecoveryActivities[0]!;
+  const details = parseObject(activity.details);
+  const blockerIssueIds = Array.isArray(details.blockedByIssueIds)
+    ? details.blockedByIssueIds.filter((id): id is string => typeof id === "string").sort()
+    : null;
+  return activity.actorType === "system" &&
+    activity.actorId === "system" &&
+    activity.agentId === null &&
+    activity.runId === null &&
+    activity.createdAt >= blockerEdge.createdAt &&
+    details.source === "recovery.reconcile_continuation_waiting_on_review" &&
+    details.status === "blocked" &&
+    details.previousStatus === input.observedWatchedSource.status &&
+    blockerIssueIds != null &&
+    canonicalJson(blockerIssueIds) === canonicalJson(currentWatchedSource.blockerIssueIds);
 }
 
 export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput): TaskWatchdogClassifierResult {
@@ -2084,7 +2099,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
       return { allowed: true as const, classification };
     }
-    if (classification.state === "stopped") {
+    if (classification.state === "stopped" || classification.state === "already_reviewed") {
       // Reconciliation can persist the server-added watchdog blocker before
       // this run writes. The immutable wake context is the run's baseline;
       // the watchdog row may already contain the newer self-blocked snapshot.

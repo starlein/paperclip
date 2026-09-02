@@ -831,6 +831,102 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     });
   });
 
+  it("rejects recovery provenance superseded by a later user source transition", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const boardApp = createApp(fixture.companyId);
+    const todo = await request(boardApp)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ status: "todo" });
+    expect(todo.status, JSON.stringify(todo.body)).toBe(200);
+    const blocked = await request(boardApp)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ status: "blocked" });
+    expect(blocked.status, JSON.stringify(blocked.body)).toBe(200);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects recovery provenance superseded by a later unrelated agent run transition", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const unrelatedAgentId = await seedAgent(fixture.companyId, { name: "Unrelated transition agent" });
+    const unrelatedRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: unrelatedRunId,
+      companyId: fixture.companyId,
+      agentId: unrelatedAgentId,
+      status: "succeeded",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId: fixture.sourceIssueId },
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "agent",
+      actorId: unrelatedAgentId,
+      agentId: unrelatedAgentId,
+      runId: unrelatedRunId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        status: "blocked",
+        previousStatus: "todo",
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+      createdAt: new Date(),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("accepts a server-owned blocker transition that returns to an already-reviewed snapshot", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
+    await taskWatchdogService(db).reconcileTaskWatchdogs({ companyId: fixture.companyId });
+    const [observed] = await db
+      .select({
+        fingerprint: issueWatchdogs.lastObservedFingerprint,
+        snapshot: issueWatchdogs.lastObservedStopSnapshot,
+      })
+      .from(issueWatchdogs)
+      .where(eq(issueWatchdogs.issueId, fixture.sourceIssueId));
+    await db
+      .update(issueWatchdogs)
+      .set({
+        lastReviewedFingerprint: observed?.fingerprint,
+        lastReviewedStopSnapshot: observed?.snapshot,
+      })
+      .where(eq(issueWatchdogs.issueId, fixture.sourceIssueId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      executionPolicy: null,
+    });
+  });
+
   it.each(
     [
       ["outside board user", { createdByUserId: "outside-board-user" }],
