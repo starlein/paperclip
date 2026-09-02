@@ -603,6 +603,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   const [blockerEdge, recoveryActivities] = await Promise.all([
     input.db
       .select({
+        createdByActorType: issueRelations.createdByActorType,
         createdByAgentId: issueRelations.createdByAgentId,
         createdByUserId: issueRelations.createdByUserId,
         createdAt: issueRelations.createdAt,
@@ -643,6 +644,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
 
   if (
     !blockerEdge ||
+    blockerEdge.createdByActorType !== "system" ||
     blockerEdge.createdByAgentId !== null ||
     blockerEdge.createdByUserId !== null ||
     blockerEdge.blockerCompanyId !== input.companyId ||
@@ -650,7 +652,23 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     blockerEdge.blockerOriginId !== input.watchedIssueId
   ) return false;
 
-  const latestRecoveryBoundary = recoveryActivities.reduce<number | null>((latest, activity) => {
+  const materialRecoveryActivities = recoveryActivities.filter((activity) => {
+    const details = parseObject(activity.details);
+    if (details.source === "recovery.reconcile_continuation_waiting_on_review") return true;
+    const changes = parseObject(details.changes);
+    return [
+      "status",
+      "assigneeAgentId",
+      "assigneeUserId",
+      "blockedByIssueIds",
+      "parentId",
+    ].some((key) =>
+      Object.prototype.hasOwnProperty.call(details, key) ||
+      Object.prototype.hasOwnProperty.call(changes, key),
+    );
+  });
+
+  const latestRecoveryBoundary = materialRecoveryActivities.reduce<number | null>((latest, activity) => {
     const timestamp = activity.createdAt.getTime();
     return latest == null || timestamp > latest ? timestamp : latest;
   }, null);
@@ -661,7 +679,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   // stale watchdog after a user or unrelated agent has since changed the
   // source away from and back to the same shape. Equal-timestamp ambiguity
   // also fails closed instead of choosing an arbitrary UUID row.
-  const latestRecoveryActivities = recoveryActivities.filter(
+  const latestRecoveryActivities = materialRecoveryActivities.filter(
     (activity) => activity.createdAt.getTime() === latestRecoveryBoundary,
   );
   if (latestRecoveryActivities.length !== 1) return false;

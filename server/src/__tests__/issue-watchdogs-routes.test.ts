@@ -361,6 +361,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         issueId: watchdogIssueId,
         relatedIssueId: sourceIssueId,
         type: "blocks",
+        createdByActorType: "system",
       });
     }
     const staleRunId = randomUUID();
@@ -428,6 +429,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         issueId: fixture.watchdogIssueId,
         relatedIssueId: fixture.sourceIssueId,
         type: "blocks",
+        createdByActorType: "system",
         createdAt: opts.createdAt ? new Date(opts.createdAt.getTime() - 1) : undefined,
       });
     }
@@ -894,6 +896,82 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(409);
     const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects a watchdog blocker edge whose agent provenance survives creator deletion", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const unrelatedAgentId = await seedAgent(fixture.companyId, { name: "Deleted blocker author" });
+    const transitionAt = new Date(Date.now() - 5_000);
+    await db.update(issues).set({
+      status: "blocked",
+      executionPolicy: { mode: "auto" },
+    }).where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(issueRelations).values({
+      companyId: fixture.companyId,
+      issueId: fixture.watchdogIssueId,
+      relatedIssueId: fixture.sourceIssueId,
+      type: "blocks",
+      createdByActorType: "agent",
+      createdByAgentId: unrelatedAgentId,
+      createdAt: new Date(transitionAt.getTime() - 1),
+    });
+    await db.delete(agents).where(eq(agents.id, unrelatedAgentId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        source: "recovery.reconcile_continuation_waiting_on_review",
+        status: "blocked",
+        previousStatus: "in_progress",
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+      createdAt: transitionAt,
+    });
+
+    const [persistedEdge] = await db.select({
+      createdByActorType: issueRelations.createdByActorType,
+      createdByAgentId: issueRelations.createdByAgentId,
+    }).from(issueRelations).where(and(
+      eq(issueRelations.companyId, fixture.companyId),
+      eq(issueRelations.issueId, fixture.watchdogIssueId),
+      eq(issueRelations.relatedIssueId, fixture.sourceIssueId),
+    ));
+    expect(persistedEdge).toEqual({ createdByActorType: "agent", createdByAgentId: null });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("keeps watchdog recovery authority after a non-material source edit", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const titleUpdate = await request(createApp(fixture.companyId))
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ title: "Renamed without changing recovery state" });
+    expect(titleUpdate.status, JSON.stringify(titleUpdate.body)).toBe(200);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      title: "Renamed without changing recovery state",
+      executionPolicy: null,
+    });
   });
 
   it("accepts a server-owned blocker transition that returns to an already-reviewed snapshot", async () => {

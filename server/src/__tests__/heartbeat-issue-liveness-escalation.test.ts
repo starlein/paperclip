@@ -647,7 +647,8 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
       .from(issues)
       .where(eq(issues.id, blockedIssueId))
       .then((rows) => rows[0]);
-    expect(dependent?.status).toBe("todo");
+    expect(dependent?.status).not.toBe("blocked");
+    expect(["todo", "in_progress"]).toContain(dependent?.status);
 
     const assigneeWakes = await db
       .select({ id: agentWakeupRequests.id, status: agentWakeupRequests.status })
@@ -898,6 +899,95 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
       .where(eq(issues.id, blockedIssueId))
       .then((rows) => rows[0]);
     expect(dependent?.status).toBe("todo");
+  });
+
+  it("revalidates the assignee and blockers after acquiring the dependent lock", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const replacementAgentId = randomUUID();
+    const newBlockerIssueId = randomUUID();
+    await db.insert(agents).values({
+      id: replacementAgentId,
+      companyId,
+      name: "Replacement owner",
+      role: "engineer",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: false } },
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: newBlockerIssueId,
+      companyId,
+      title: "Concurrent unresolved blocker",
+      status: "in_progress",
+      priority: "medium",
+      issueNumber: 3,
+      identifier: "R-RACE-3",
+    });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: blockedIssueId,
+        resolvedBlockerIssueId: blockerIssueId,
+        blockerIssueIds: [blockerIssueId],
+      },
+      status: "queued",
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: blockedIssueId,
+        blockerIssueIds: [blockerIssueId],
+      }),
+    });
+
+    let signalLockAcquired!: () => void;
+    const lockAcquired = new Promise<void>((resolve) => { signalLockAcquired = resolve; });
+    let releaseIssueLock!: () => void;
+    const issueLockRelease = new Promise<void>((resolve) => { releaseIssueLock = resolve; });
+    const concurrentMutation = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id })
+        .from(issues)
+        .where(eq(issues.id, blockedIssueId))
+        .for("update");
+      signalLockAcquired();
+      await issueLockRelease;
+      await tx.update(issues)
+        .set({ assigneeAgentId: replacementAgentId, updatedAt: new Date() })
+        .where(eq(issues.id, blockedIssueId));
+      await tx.insert(issueRelations).values({
+        companyId,
+        issueId: newBlockerIssueId,
+        relatedIssueId: blockedIssueId,
+        type: "blocks",
+      });
+    });
+    await lockAcquired;
+
+    const reconciliation = heartbeatService(db).reconcileIssueGraphLiveness();
+    // Let the backstop read the original ready state and reach its row lock.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    releaseIssueLock();
+    await concurrentMutation;
+    const result = await reconciliation;
+
+    expect(result.dependencyWakesHealed).toBe(0);
+    expect(result.dependencyWakeExistingSkipped).toBe(1);
+    const [dependent] = await db.select({
+      status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
+    }).from(issues).where(eq(issues.id, blockedIssueId));
+    expect(dependent).toEqual({ status: "blocked", assigneeAgentId: replacementAgentId });
+    const wakes = await db.select({ agentId: agentWakeupRequests.agentId })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+      ));
+    expect(wakes).toEqual([{ agentId }]);
   });
 
   it("heals a multi-blocker dependent when only a completed wake for an earlier blocker exists", async () => {

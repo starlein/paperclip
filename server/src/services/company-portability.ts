@@ -6370,6 +6370,7 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
                 issueId: row.issueId,
                 relatedIssueId: row.relatedIssueId,
                 type: "blocks" as const,
+                createdByActorType: actorUserId ? "user" as const : "system" as const,
                 createdByAgentId: null,
                 createdByUserId: actorUserId ?? null,
               })))

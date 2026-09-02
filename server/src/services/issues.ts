@@ -5271,6 +5271,7 @@ export function issueService(db: Db) {
         issueId: blockerIssueId,
         relatedIssueId: issueId,
         type: "blocks",
+        createdByActorType: actor.agentId ? "agent" : actor.userId ? "user" : "system",
         createdByAgentId: actor.agentId ?? null,
         createdByUserId: actor.userId ?? null,
       })),

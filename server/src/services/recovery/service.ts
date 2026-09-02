@@ -5305,6 +5305,37 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           if (existingWake.status !== "completed") {
             const now = new Date();
             const repaired = await db.transaction(async (tx) => {
+              const lockedIssue = await issuesSvc.getByIdForUpdate(candidate.id, tx);
+              if (
+                !lockedIssue ||
+                lockedIssue.companyId !== companyId ||
+                lockedIssue.status !== "blocked" ||
+                lockedIssue.assigneeAgentId !== agentId
+              ) return false;
+
+              const lockedReadiness = (await issuesSvc.listDependencyReadiness(
+                companyId,
+                [candidate.id],
+                tx,
+              )).get(candidate.id);
+              if (
+                !lockedReadiness ||
+                !lockedReadiness.isDependencyReady ||
+                lockedReadiness.blockerIssueIds.length === 0
+              ) return false;
+
+              const lockedWake = await findExistingIssueBlockersResolvedWakeForReadyState(
+                tx as unknown as Db,
+                {
+                  companyId,
+                  assigneeAgentId: agentId,
+                  dependentIssueId: candidate.id,
+                  blockerIssueIds: lockedReadiness.blockerIssueIds,
+                  blockedTransitionAt: lockedIssue.blockedTransitionAt,
+                },
+              );
+              if (!lockedWake || lockedWake.status === "completed") return false;
+
               const updated = await tx
                 .update(issues)
                 .set({
@@ -5320,6 +5351,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                     eq(issues.id, candidate.id),
                     eq(issues.companyId, companyId),
                     eq(issues.status, "blocked"),
+                    eq(issues.assigneeAgentId, agentId),
                   ),
                 )
                 .returning({ id: issues.id });
@@ -5336,11 +5368,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                 entityId: candidate.id,
                 details: {
                   source,
-                  existingWakeRequestId: existingWake.id,
-                  existingWakeStatus: existingWake.status,
+                  existingWakeRequestId: lockedWake.id,
+                  existingWakeStatus: lockedWake.status,
                   previousStatus: "blocked",
                   nextStatus: "todo",
-                  blockerIssueIds: readiness.blockerIssueIds,
+                  blockerIssueIds: lockedReadiness.blockerIssueIds,
                 },
               });
               return true;
