@@ -10,6 +10,7 @@ import {
 const dependentIssueId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const blockerIssueId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const companyId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const assigneeAgentId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const firstCycle = new Date("2026-04-01T12:00:00.000Z");
 const secondCycle = new Date("2026-08-01T09:30:00.000Z");
 
@@ -95,6 +96,7 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
 describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
   const readyState = {
     companyId,
+    assigneeAgentId,
     dependentIssueId,
     blockerIssueIds: [blockerIssueId],
     blockedTransitionAt: secondCycle,
@@ -114,6 +116,28 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
       readyState,
     );
     expect(existing?.id).toBe("wake-cycle");
+  });
+
+  it("prefers an in-flight assignee wake over a completed wake for the same ready state", async () => {
+    const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([
+        {
+          id: "wake-completed",
+          status: "completed",
+          idempotencyKey: cycleKey,
+          requestedAt: firstCycle,
+        },
+        {
+          id: "wake-queued",
+          status: "queued",
+          idempotencyKey: cycleKey,
+          requestedAt: secondCycle,
+        },
+      ]),
+      readyState,
+    );
+    expect(existing?.id).toBe("wake-queued");
   });
 
   it("does not let a completed old-key wake from a previous blocked cycle suppress", async () => {
@@ -170,6 +194,7 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
       ]),
       {
         companyId,
+        assigneeAgentId,
         dependentIssueId,
         blockerIssueIds: [blockerIssueId],
         blockedTransitionAt: null,

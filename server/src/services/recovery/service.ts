@@ -5281,8 +5281,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         // Level-triggered dedup: key on the full blocker set (the current ready
         // state), not on any single resolved edge. An older completed per-edge
         // wake for an earlier partial resolution has a different key, so it does
-        // not suppress this wake. The shared helper still suppresses a duplicate
-        // wake for the SAME ready state, which bounds reconciliation.
+        // not suppress this wake. The shared helper identifies delivery for the
+        // SAME ready state and assignee. An in-flight delivery repairs only the
+        // disposition; a completed delivery cannot cover a still-blocked issue.
         const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
@@ -5290,13 +5291,67 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         });
         const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(db, {
           companyId,
+          assigneeAgentId: agentId,
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
           blockedTransitionAt: candidate.blockedTransitionAt,
         });
         if (existingWake) {
-          result.existingWakeSkipped += 1;
-          continue;
+          // An in-flight assignee wake is already the durable execution path,
+          // but older builds could leave the issue itself blocked. Repair only
+          // the disposition and do not enqueue a duplicate. A completed wake
+          // cannot cover an issue that is still blocked: fall through and emit
+          // a fresh bounded recovery wake for that stranded state.
+          if (existingWake.status !== "completed") {
+            const now = new Date();
+            const repaired = await db.transaction(async (tx) => {
+              const updated = await tx
+                .update(issues)
+                .set({
+                  status: "todo",
+                  unblockDescriptor: null,
+                  blockedTransitionAt: null,
+                  blockedOwnerNotifiedAt: null,
+                  checkoutRunId: null,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(issues.id, candidate.id),
+                    eq(issues.companyId, companyId),
+                    eq(issues.status, "blocked"),
+                  ),
+                )
+                .returning({ id: issues.id });
+              if (updated.length === 0) return false;
+
+              await logActivity(tx as unknown as Db, {
+                companyId,
+                actorType: "system",
+                actorId: requestedByActorId,
+                agentId,
+                runId: opts?.runId ?? null,
+                action: "issue.blockers_resolved_disposition_repaired",
+                entityType: "issue",
+                entityId: candidate.id,
+                details: {
+                  source,
+                  existingWakeRequestId: existingWake.id,
+                  existingWakeStatus: existingWake.status,
+                  previousStatus: "blocked",
+                  nextStatus: "todo",
+                  blockerIssueIds: readiness.blockerIssueIds,
+                },
+              });
+              return true;
+            });
+            result.existingWakeSkipped += 1;
+            if (repaired) {
+              result.healed += 1;
+              result.issueIds.push(candidate.id);
+            }
+            continue;
+          }
         }
 
         if (

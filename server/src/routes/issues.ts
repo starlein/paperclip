@@ -10679,6 +10679,7 @@ export function issueRoutes(
         try {
           const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(db, {
             companyId: issue.companyId,
+            assigneeAgentId: input.agentId,
             dependentIssueId: input.dependentIssueId,
             blockerIssueIds: input.blockerIssueIds,
             blockedTransitionAt: input.blockedTransitionAt,
@@ -12812,6 +12813,7 @@ export function issueRoutes(
         try {
           const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(db, {
             companyId: currentIssue.companyId,
+            assigneeAgentId: input.agentId,
             dependentIssueId: input.dependentIssueId,
             blockerIssueIds: input.blockerIssueIds,
             blockedTransitionAt: input.blockedTransitionAt,

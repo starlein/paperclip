@@ -173,7 +173,9 @@ function wakeCoversIssueBlockersResolvedReadyState(
 
 /**
  * Find a wake that already covers the current dependency-ready state of the
- * dependent issue. The check is level-triggered and cycle-aware:
+ * dependent issue for its current assignee. The check is level-triggered and
+ * cycle-aware. Scoping the lookup to the assignee prevents reviewer or mention
+ * participants on the same thread from satisfying delivery for the owner:
  *
  * - The cycle-aware state key matches a wake in any idempotent status
  *   (including `completed`). This suppresses a duplicate for the SAME ready
@@ -190,6 +192,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
   db: Db,
   input: {
     companyId: string;
+    assigneeAgentId: string;
     dependentIssueId: string;
     blockerIssueIds: string[];
     blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
@@ -215,6 +218,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
   const rows = await db
     .select({
       id: agentWakeupRequests.id,
+      agentId: agentWakeupRequests.agentId,
       status: agentWakeupRequests.status,
       idempotencyKey: agentWakeupRequests.idempotencyKey,
       requestedAt: agentWakeupRequests.requestedAt,
@@ -223,11 +227,12 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     .where(
       and(
         eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.agentId, input.assigneeAgentId),
         inArray(agentWakeupRequests.idempotencyKey, lookupKeys),
       ),
     );
 
-  const covering = rows.find((row) =>
+  const covering = rows.filter((row) =>
     wakeCoversIssueBlockersResolvedReadyState(row, {
       cycleKey,
       oldStateKey,
@@ -235,5 +240,8 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
       blockedTransitionAt,
     }),
   );
-  return covering ?? null;
+  // Prefer a durable in-flight delivery over a historical completion. The
+  // reconciliation caller uses the returned status to decide whether it can
+  // repair only the disposition or must emit a new wake.
+  return covering.find((row) => row.status !== "completed") ?? covering[0] ?? null;
 }

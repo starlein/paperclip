@@ -471,6 +471,7 @@ describe("issue dependency wakeups in issue routes", () => {
         expect.anything(),
         expect.objectContaining({
           companyId: "company-1",
+          assigneeAgentId: "agent-release",
           dependentIssueId: releaseIssueId,
           blockerIssueIds: [reviewIssueId],
           blockedTransitionAt: releaseBlockedAt,
