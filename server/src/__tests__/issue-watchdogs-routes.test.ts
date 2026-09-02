@@ -227,7 +227,15 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .from(issueWatchdogs)
       .where(and(eq(issueWatchdogs.companyId, input.companyId), eq(issueWatchdogs.issueId, input.watchedIssueId)));
     const stopSnapshot = watchdog?.lastObservedStopSnapshot as {
-      materialLeaves?: unknown[];
+      materialLeaves?: Array<{
+        issueId: string;
+        status: string;
+        assigneeAgentId: string | null;
+        assigneeUserId: string | null;
+        blockerIssueIds: string[];
+        pendingInteractionIds: string[];
+        pendingApprovalIds: string[];
+      }>;
       waitsByIssueId?: Record<string, { pendingInteractionIds: string[]; pendingApprovalIds: string[] }>;
     } | null;
     const waitsByIssueId = stopSnapshot?.waitsByIssueId ?? {};
@@ -275,18 +283,21 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
           watchedIssueIdentifier: "WDOG-ROOT",
           watchedIssueTitle: "Watched root",
           stopFingerprint: watchdog?.lastObservedFingerprint,
-          terminalLeafSummaries: sourceIssue ? [{
-            issueId: sourceIssue.id,
-            identifier: sourceIssue.identifier,
-            title: sourceIssue.title,
-            status: sourceIssue.status,
-            assigneeAgentId: sourceIssue.assigneeAgentId,
-            assigneeUserId: sourceIssue.assigneeUserId,
-            blockerIssueIds: sourceBlockers.map((row) => row.issueId).sort(),
-            pendingInteractionIds: sourceWaits.pendingInteractionIds,
-            pendingApprovalIds: sourceWaits.pendingApprovalIds,
-            updatedAt: sourceIssue.updatedAt.toISOString(),
-          }] : [],
+          terminalLeafSummaries: (stopSnapshot?.materialLeaves?.length ?? 0) > 0
+            ? stopSnapshot!.materialLeaves
+            : sourceIssue ? [{
+                issueId: sourceIssue.id,
+                identifier: sourceIssue.identifier,
+                title: sourceIssue.title,
+                status: sourceIssue.status,
+                assigneeAgentId: sourceIssue.assigneeAgentId,
+                assigneeUserId: sourceIssue.assigneeUserId,
+                blockerIssueIds: sourceBlockers.map((row) => row.issueId).sort(),
+                pendingInteractionIds: sourceWaits.pendingInteractionIds,
+                pendingApprovalIds: sourceWaits.pendingApprovalIds,
+                updatedAt: sourceIssue.updatedAt.toISOString(),
+              }]
+            : [],
           pendingInteractions: Object.fromEntries(Object.entries(waitsByIssueId)
             .filter(([, waits]) => waits.pendingInteractionIds.length > 0)
             .map(([issueId, waits]) => [issueId, waits.pendingInteractionIds.map((id) => ({ id, kind: null }))])),
@@ -308,6 +319,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
 
   async function seedWatchdogMutationWithStaleOwnership(input: {
     sourceStatus: "in_progress" | "done" | "cancelled";
+    sourceChild?: boolean;
     preexistingWatchdogBlocker?: boolean;
     sourcePendingApproval?: boolean;
     preexistingResolvedBlocker?: boolean;
@@ -321,6 +333,14 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       status: input.sourceStatus,
       assigneeAgentId: ownerAgentId,
     });
+    const sourceChildId = input.sourceChild
+      ? await seedIssue(companyId, {
+          title: "Stopped source child",
+          status: "in_progress",
+          assigneeAgentId: ownerAgentId,
+          parentId: sourceIssueId,
+        })
+      : null;
     const watchdogIssueId = await seedIssue(companyId, {
       title: "Reusable watchdog issue",
       parentId: sourceIssueId,
@@ -404,6 +424,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       companyId,
       ownerAgentId,
       sourceIssueId,
+      sourceChildId,
       staleRunId,
       watchdogAgentId,
       watchdogIssueId,
@@ -857,6 +878,38 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(409);
     const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects a watchdog mutation after a descendant material boundary", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      sourceChild: true,
+    });
+    expect(fixture.sourceChildId).not.toBeNull();
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const canonicalBoundary = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceChildId}`)
+      .send({ priority: "medium" });
+    expect(canonicalBoundary.status, JSON.stringify(canonicalBoundary.body)).toBe(200);
+
+    const boardApp = createApp(fixture.companyId);
+    const boardMutation = await request(boardApp)
+      .patch(`/api/issues/${fixture.sourceChildId}`)
+      .send({ priority: "high" });
+    expect(boardMutation.status, JSON.stringify(boardMutation.body)).toBe(200);
+
+    const watchdogMutation = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceChildId}`)
+      .send({ priority: "low" });
+
+    expect(watchdogMutation.status, JSON.stringify(watchdogMutation.body)).toBe(409);
+    const [child] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceChildId!));
+    expect(child?.priority).toBe("high");
   });
 
   it("rejects recovery provenance superseded by a later unrelated agent run transition", async () => {

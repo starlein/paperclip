@@ -9279,20 +9279,28 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issue) throw notFound("Issue not found");
 
-      if (input.issueCommentId) {
-        const comment = await db
-          .select({ id: issueComments.id, companyId: issueComments.companyId, issueId: issueComments.issueId })
-          .from(issueComments)
-          .where(eq(issueComments.id, input.issueCommentId))
-          .then((rows) => rows[0] ?? null);
-        if (!comment) throw notFound("Issue comment not found");
-        if (comment.companyId !== issue.companyId || comment.issueId !== issue.id) {
-          throw unprocessable("Attachment comment must belong to same issue and company");
-        }
-      }
-
       const postCommitActivityPublications: ActivityPublication[] = [];
       const created = await db.transaction(async (tx) => {
+        const lockedIssue = await tx
+          .select({ id: issues.id, companyId: issues.companyId })
+          .from(issues)
+          .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!lockedIssue) throw notFound("Issue not found");
+
+        if (input.issueCommentId) {
+          const comment = await tx
+            .select({ id: issueComments.id, companyId: issueComments.companyId, issueId: issueComments.issueId })
+            .from(issueComments)
+            .where(eq(issueComments.id, input.issueCommentId))
+            .then((rows) => rows[0] ?? null);
+          if (!comment) throw notFound("Issue comment not found");
+          if (comment.companyId !== lockedIssue.companyId || comment.issueId !== lockedIssue.id) {
+            throw unprocessable("Attachment comment must belong to same issue and company");
+          }
+        }
+
         const [asset] = await tx
           .insert(assets)
           .values({
@@ -9411,8 +9419,30 @@ export function issueService(db: Db) {
         "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId"
       >,
     ) => {
+      // Resolve the owner without locking the attachment row first. Every
+      // attachment mutation then serializes on the owning issue, matching the
+      // watchdog source/target lock order. The row is re-read after acquiring
+      // the issue lock so a stale pre-read can never authorize deletion.
+      const attachmentOwner = await db
+        .select({ issueId: issueAttachments.issueId, companyId: issueAttachments.companyId })
+        .from(issueAttachments)
+        .where(eq(issueAttachments.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!attachmentOwner) return null;
+
       const postCommitActivityPublications: ActivityPublication[] = [];
       const removed = await db.transaction(async (tx) => {
+        const lockedIssue = await tx
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(
+            eq(issues.id, attachmentOwner.issueId),
+            eq(issues.companyId, attachmentOwner.companyId),
+          ))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!lockedIssue) return null;
+
         const existing = await tx
           .select({
             id: issueAttachments.id,
@@ -9435,7 +9465,11 @@ export function issueService(db: Db) {
           .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
           .where(eq(issueAttachments.id, id))
           .then((rows) => rows[0] ?? null);
-        if (!existing) return null;
+        if (
+          !existing ||
+          existing.issueId !== attachmentOwner.issueId ||
+          existing.companyId !== attachmentOwner.companyId
+        ) return null;
 
         await tx.delete(issueAttachments).where(eq(issueAttachments.id, id));
         await tx.delete(assets).where(eq(assets.id, existing.assetId));

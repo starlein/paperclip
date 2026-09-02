@@ -616,50 +616,19 @@ function isServerOwnedWatchdogBlockerTransition(input: {
     canonicalJson(observedWatchedSource.blockerIssueIds) !== canonicalJson(currentWatchedSource.blockerIssueIds);
 }
 
-async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
+async function loadMaterialWatchdogRecoveryActivities(input: {
   db: Db;
   companyId: string;
-  watchedIssueId: string;
-  watchdogIssueId: string;
-  observedWatchedSource: TaskWatchdogMaterialLeaf;
+  mutableIssueIds: string[];
+  observedStopSnapshot: TaskWatchdogStopSnapshot;
   current: TaskWatchdogStopSnapshot;
   watchdogTriggeredAt: Date;
 }) {
-  const currentWatchedSource = input.current.materialLeaves.find(
-    (leaf) => leaf.issueId === input.watchedIssueId,
-  );
-  if (!currentWatchedSource) return false;
-
-  const [
-    blockerEdge,
-    issueRecoveryActivities,
-    watchedIssueInteractions,
-  ] = await Promise.all([
-    input.db
-      .select({
-        createdByActorType: issueRelations.createdByActorType,
-        createdByAgentId: issueRelations.createdByAgentId,
-        createdByUserId: issueRelations.createdByUserId,
-        createdAt: issueRelations.createdAt,
-        blockerCompanyId: issues.companyId,
-        blockerOriginKind: issues.originKind,
-        blockerOriginId: issues.originId,
-      })
-      .from(issueRelations)
-      .innerJoin(issues, and(
-        eq(issues.companyId, issueRelations.companyId),
-        eq(issues.id, issueRelations.issueId),
-      ))
-      .where(and(
-        eq(issueRelations.companyId, input.companyId),
-        eq(issueRelations.issueId, input.watchdogIssueId),
-        eq(issueRelations.relatedIssueId, input.watchedIssueId),
-        eq(issueRelations.type, "blocks"),
-      ))
-      .then((rows) => rows[0] ?? null),
+  const [issueRecoveryActivities, subtreeInteractions] = await Promise.all([
     input.db
       .select({
         id: activityLog.id,
+        entityId: activityLog.entityId,
         action: activityLog.action,
         actorType: activityLog.actorType,
         actorId: activityLog.actorId,
@@ -673,7 +642,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
         eq(activityLog.companyId, input.companyId),
         inArray(activityLog.action, TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS),
         eq(activityLog.entityType, "issue"),
-        eq(activityLog.entityId, input.watchedIssueId),
+        inArray(activityLog.entityId, input.mutableIssueIds),
         gte(activityLog.createdAt, input.watchdogTriggeredAt),
       )),
     input.db
@@ -685,22 +654,12 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       .from(issueThreadInteractions)
       .where(and(
         eq(issueThreadInteractions.companyId, input.companyId),
-        eq(issueThreadInteractions.issueId, input.watchedIssueId),
+        inArray(issueThreadInteractions.issueId, input.mutableIssueIds),
       )),
   ]);
 
-  if (
-    !blockerEdge ||
-    blockerEdge.createdByActorType !== "system" ||
-    blockerEdge.createdByAgentId !== null ||
-    blockerEdge.createdByUserId !== null ||
-    blockerEdge.blockerCompanyId !== input.companyId ||
-    blockerEdge.blockerOriginKind !== TASK_WATCHDOG_ORIGIN_KIND ||
-    blockerEdge.blockerOriginId !== input.watchedIssueId
-  ) return false;
-
   const materialInteractionIds = new Set(
-    watchedIssueInteractions
+    subtreeInteractions
       .filter((interaction) =>
         (interaction.continuationPolicy === "wake_assignee" ||
           interaction.continuationPolicy === "wake_assignee_on_accept") &&
@@ -714,8 +673,8 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     activity.action === "issue.approval_linked" || activity.action === "issue.approval_unlinked"
   );
   const watchedApprovalIds = [...new Set([
-    ...input.observedWatchedSource.pendingApprovalIds,
-    ...currentWatchedSource.pendingApprovalIds,
+    ...input.observedStopSnapshot.materialLeaves.flatMap((leaf) => leaf.pendingApprovalIds),
+    ...input.current.materialLeaves.flatMap((leaf) => leaf.pendingApprovalIds),
     ...issueApprovalActivities.flatMap((activity) => {
       const approvalId = parseObject(activity.details).approvalId;
       return typeof approvalId === "string" ? [approvalId] : [];
@@ -763,14 +722,11 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     const approvalStateActivities = approvalRecoveryActivities.filter(
       (activity) => activity.entityId === approvalId,
     );
-    // Every decision action in this allowlist originates in a pending or
-    // revision-requested state. Walk backward from the persisted state to
-    // recover whether linking the approval could affect the stop snapshot at
-    // each point in the lifecycle.
     let pending = currentApprovalPendingState.get(approvalId) === true;
     if (approvalStateActivities.length > 0) pending = true;
-
-    let waiting = input.observedWatchedSource.pendingApprovalIds.includes(approvalId);
+    let waiting = input.observedStopSnapshot.materialLeaves.some(
+      (leaf) => leaf.pendingApprovalIds.includes(approvalId),
+    );
     const timeline = [
       ...issueApprovalActivities
         .filter((activity) => parseObject(activity.details).approvalId === approvalId),
@@ -799,7 +755,8 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       }
     }
   }
-  const materialRecoveryActivities = [
+
+  return [
     ...issueRecoveryActivities,
     ...approvalRecoveryActivities,
   ].filter((activity) => {
@@ -814,48 +771,118 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     if (TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS.includes(
       activity.action as (typeof TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS)[number],
     )) return materialApprovalActivityIds.has(activity.id);
-    if (activity.action !== "issue.updated") return true;
-    // Every persisted issue patch is a recovery boundary. Watchdog-authored
-    // mutations can write more than the classifier's current material fields
-    // (for example priority, goal, project, and billing code), and allowing an
-    // older recovery transition to authorize a later patch would let the
-    // watchdog overwrite a concurrent board edit to one of those fields.
-    // No-op PATCHes do not emit issue.updated, so failing closed here does not
-    // invalidate a review when the source row did not actually change.
+    // Every persisted issue patch and deliverable change is a recovery
+    // boundary. No-op PATCHes emit no issue.updated activity.
     return true;
   });
+}
 
-  const latestRecoveryBoundary = materialRecoveryActivities.reduce<number | null>((latest, activity) => {
+async function latestMaterialBoundaryIsServerOwnedWatchdogTransition(input: {
+  db: Db;
+  companyId: string;
+  watchedIssueId: string;
+  watchdogIssueId: string;
+  currentWatchedStatus: string;
+  currentBlockerIssueIds: string[];
+  expectedPreviousStatus?: string;
+  activities: Awaited<ReturnType<typeof loadMaterialWatchdogRecoveryActivities>>;
+}) {
+  const latestBoundary = input.activities.reduce<number | null>((latest, activity) => {
     const timestamp = activity.createdAt.getTime();
     return latest == null || timestamp > latest ? timestamp : latest;
   }, null);
-  if (latestRecoveryBoundary == null) return false;
-
-  // The canonical recovery transition must be the latest issue mutation at
-  // the current source revision. An older matching record cannot authorize a
-  // stale watchdog after a user or unrelated agent has since changed the
-  // source away from and back to the same shape. Equal-timestamp ambiguity
-  // also fails closed instead of choosing an arbitrary UUID row.
-  const latestRecoveryActivities = materialRecoveryActivities.filter(
-    (activity) => activity.createdAt.getTime() === latestRecoveryBoundary,
+  if (latestBoundary == null) return false;
+  const latestActivities = input.activities.filter(
+    (activity) => activity.createdAt.getTime() === latestBoundary,
   );
-  if (latestRecoveryActivities.length !== 1) return false;
+  if (latestActivities.length !== 1) return false;
 
-  const activity = latestRecoveryActivities[0]!;
+  const [blockerEdge] = await input.db
+    .select({
+      createdByActorType: issueRelations.createdByActorType,
+      createdByAgentId: issueRelations.createdByAgentId,
+      createdByUserId: issueRelations.createdByUserId,
+      createdAt: issueRelations.createdAt,
+      blockerCompanyId: issues.companyId,
+      blockerOriginKind: issues.originKind,
+      blockerOriginId: issues.originId,
+    })
+    .from(issueRelations)
+    .innerJoin(issues, and(
+      eq(issues.companyId, issueRelations.companyId),
+      eq(issues.id, issueRelations.issueId),
+    ))
+    .where(and(
+      eq(issueRelations.companyId, input.companyId),
+      eq(issueRelations.issueId, input.watchdogIssueId),
+      eq(issueRelations.relatedIssueId, input.watchedIssueId),
+      eq(issueRelations.type, "blocks"),
+    ));
+  if (
+    !blockerEdge ||
+    blockerEdge.createdByActorType !== "system" ||
+    blockerEdge.createdByAgentId !== null ||
+    blockerEdge.createdByUserId !== null ||
+    blockerEdge.blockerCompanyId !== input.companyId ||
+    blockerEdge.blockerOriginKind !== TASK_WATCHDOG_ORIGIN_KIND ||
+    blockerEdge.blockerOriginId !== input.watchedIssueId
+  ) return false;
+
+  const activity = latestActivities[0]!;
   const details = parseObject(activity.details);
   const blockerIssueIds = Array.isArray(details.blockedByIssueIds)
     ? details.blockedByIssueIds.filter((id): id is string => typeof id === "string").sort()
     : null;
-  return activity.actorType === "system" &&
+  return activity.entityId === input.watchedIssueId &&
+    activity.actorType === "system" &&
     activity.actorId === "system" &&
     activity.agentId === null &&
     activity.runId === null &&
     activity.createdAt >= blockerEdge.createdAt &&
+    input.currentWatchedStatus === "blocked" &&
     details.source === "recovery.reconcile_continuation_waiting_on_review" &&
     details.status === "blocked" &&
-    details.previousStatus === input.observedWatchedSource.status &&
+    typeof details.previousStatus === "string" &&
+    (input.expectedPreviousStatus === undefined ||
+      details.previousStatus === input.expectedPreviousStatus) &&
     blockerIssueIds != null &&
-    canonicalJson(blockerIssueIds) === canonicalJson(currentWatchedSource.blockerIssueIds);
+    canonicalJson(blockerIssueIds) === canonicalJson(input.currentBlockerIssueIds);
+}
+
+async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
+  db: Db;
+  companyId: string;
+  watchedIssueId: string;
+  watchdogIssueId: string;
+  mutableIssueIds: string[];
+  observedStopSnapshot: TaskWatchdogStopSnapshot;
+  observedWatchedSource: TaskWatchdogMaterialLeaf;
+  current: TaskWatchdogStopSnapshot;
+  watchdogTriggeredAt: Date;
+}) {
+  const currentWatchedSource = input.current.materialLeaves.find(
+    (leaf) => leaf.issueId === input.watchedIssueId,
+  );
+  if (!currentWatchedSource) return false;
+
+  const materialRecoveryActivities = await loadMaterialWatchdogRecoveryActivities({
+    db: input.db,
+    companyId: input.companyId,
+    mutableIssueIds: input.mutableIssueIds,
+    observedStopSnapshot: input.observedStopSnapshot,
+    current: input.current,
+    watchdogTriggeredAt: input.watchdogTriggeredAt,
+  });
+  return latestMaterialBoundaryIsServerOwnedWatchdogTransition({
+    db: input.db,
+    companyId: input.companyId,
+    watchedIssueId: input.watchedIssueId,
+    watchdogIssueId: input.watchdogIssueId,
+    currentWatchedStatus: currentWatchedSource.status,
+    currentBlockerIssueIds: currentWatchedSource.blockerIssueIds,
+    expectedPreviousStatus: input.observedWatchedSource.status,
+    activities: materialRecoveryActivities,
+  });
 }
 
 export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput): TaskWatchdogClassifierResult {
@@ -2253,24 +2280,26 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     runId?: string | null;
   }, options: {
     queryDb?: Db;
-    lockWatchedIssue?: boolean;
+    lockIssueIds?: string[];
     skipStaleOwnershipReconciliation?: boolean;
   } = {}) {
     const queryDb = options.queryDb ?? db;
-    if (options.lockWatchedIssue) {
-      const lockedWatchedIssue = await queryDb
+    if (options.lockIssueIds && options.lockIssueIds.length > 0) {
+      const issueIds = [...new Set(options.lockIssueIds)].sort();
+      const lockedIssues = await queryDb
         .select({ id: issues.id })
         .from(issues)
         .where(and(
-          eq(issues.id, scope.watchedIssueId),
+          inArray(issues.id, issueIds),
           eq(issues.companyId, scope.companyId),
         ))
+        .orderBy(asc(issues.id))
         .for("update")
-        .then((rows) => rows[0] ?? null);
-      if (!lockedWatchedIssue) {
+        .then((rows) => rows);
+      if (lockedIssues.length !== issueIds.length) {
         return {
           allowed: false as const,
-          reason: "Task-watchdog watched issue no longer exists in the run company.",
+          reason: "Task-watchdog source or mutation target no longer exists in the run company.",
         };
       }
     }
@@ -2308,37 +2337,78 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
 
     const input = await collectClassifierInput(watchdog.companyId, watchdog, queryDb);
     const classification = classifyTaskWatchdogSubtree(input);
+    const run = scope.runId
+      ? await queryDb
+        .select({
+          contextSnapshot: heartbeatRuns.contextSnapshot,
+          status: heartbeatRuns.status,
+        })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.id, scope.runId),
+          eq(heartbeatRuns.companyId, watchdog.companyId),
+          eq(heartbeatRuns.agentId, watchdog.watchdogAgentId),
+        ))
+        .then((rows) => rows[0] ?? null)
+      : null;
+    const observedRunState = watchdog.watchdogIssueId
+      ? stopSnapshotFromRunContext({
+        contextSnapshot: run?.contextSnapshot,
+        companyId: watchdog.companyId,
+        watchdogId: watchdog.id,
+        watchedIssueId: watchdog.issueId,
+        watchdogIssueId: watchdog.watchdogIssueId,
+        stopFingerprint: scope.stopFingerprint,
+      })
+      : null;
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
-      return { allowed: true as const, classification };
+      // The compact stop fingerprint intentionally excludes mutable metadata.
+      // A watchdog run may therefore still have an exact classifier match
+      // after a board/user edits priority, project, documents, attachments, or
+      // another material field. For persisted run contexts, accept the exact
+      // match only while no material subtree boundary has committed since the
+      // watchdog was triggered.
+      if (run?.status === "running" && observedRunState && watchdog.lastTriggeredAt) {
+        const materialRecoveryActivities = await loadMaterialWatchdogRecoveryActivities({
+          db: queryDb,
+          companyId: watchdog.companyId,
+          mutableIssueIds: input.issues.map((issue) => issue.id),
+          observedStopSnapshot: observedRunState.stopSnapshot,
+          current: classification.stopSnapshot,
+          watchdogTriggeredAt: watchdog.lastTriggeredAt,
+        });
+        if (materialRecoveryActivities.length === 0) {
+          return { allowed: true as const, classification };
+        }
+        const currentWatchedIssue = input.issues.find((issue) => issue.id === watchdog.issueId);
+        const currentBlockerIssueIds = input.blockers
+          .filter((relation) => relation.blockedIssueId === watchdog.issueId)
+          .map((relation) => relation.blockerIssueId)
+          .sort();
+        if (
+          currentWatchedIssue &&
+          watchdog.watchdogIssueId &&
+          await latestMaterialBoundaryIsServerOwnedWatchdogTransition({
+            db: queryDb,
+            companyId: watchdog.companyId,
+            watchedIssueId: watchdog.issueId,
+            watchdogIssueId: watchdog.watchdogIssueId,
+            currentWatchedStatus: currentWatchedIssue.status,
+            currentBlockerIssueIds,
+            activities: materialRecoveryActivities,
+          })
+        ) return { allowed: true as const, classification };
+      } else {
+        // Preserve service callers that perform classifier-only checks without
+        // a persisted run context. HTTP watchdog mutations always carry the
+        // verified running context above.
+        return { allowed: true as const, classification };
+      }
     }
     if (classification.state === "stopped" || classification.state === "already_reviewed") {
       // Reconciliation can persist the server-added watchdog blocker before
       // this run writes. The immutable wake context is the run's baseline;
       // the watchdog row may already contain the newer self-blocked snapshot.
-      const run = scope.runId
-        ? await queryDb
-          .select({
-            contextSnapshot: heartbeatRuns.contextSnapshot,
-            status: heartbeatRuns.status,
-          })
-          .from(heartbeatRuns)
-          .where(and(
-            eq(heartbeatRuns.id, scope.runId),
-            eq(heartbeatRuns.companyId, watchdog.companyId),
-            eq(heartbeatRuns.agentId, watchdog.watchdogAgentId),
-          ))
-          .then((rows) => rows[0] ?? null)
-        : null;
-      const observedRunState = watchdog.watchdogIssueId
-        ? stopSnapshotFromRunContext({
-          contextSnapshot: run?.contextSnapshot,
-          companyId: watchdog.companyId,
-          watchdogId: watchdog.id,
-          watchedIssueId: watchdog.issueId,
-          watchdogIssueId: watchdog.watchdogIssueId,
-          stopFingerprint: scope.stopFingerprint,
-        })
-        : null;
       const observedBlockerIssueIds = observedRunState?.watchedSource?.blockerIssueIds ?? [];
       const observedBlockerRows = observedBlockerIssueIds.length > 0
         ? await queryDb
@@ -2374,6 +2444,8 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           companyId: watchdog.companyId,
           watchedIssueId: watchdog.issueId,
           watchdogIssueId: watchdog.watchdogIssueId,
+          mutableIssueIds: input.issues.map((issue) => issue.id),
+          observedStopSnapshot: observedRunState.stopSnapshot,
           observedWatchedSource: observedRunState.watchedSource,
           current: classification.stopSnapshot,
           watchdogTriggeredAt: watchdog.lastTriggeredAt,

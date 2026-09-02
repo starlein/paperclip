@@ -10528,11 +10528,18 @@ export function issueRoutes(
       if (shouldUseTransactionalIssueUpdate) {
         issue = await db.transaction(async (tx) => {
           if (requiresLockedWatchdogRevalidation) {
+            // Dependency writers take the dependent advisory lock before any
+            // issue-row locks. Preserve that global order here so a watchdog
+            // blocker edit cannot deadlock with completion/finalization wake
+            // reconciliation, which follows the same advisory -> row order.
+            if (Array.isArray(req.body.blockedByIssueIds)) {
+              await svc.lockDependencyStateForUpdate(existing.companyId, existing.id, tx);
+            }
             const revalidated = await taskWatchdogsSvc.revalidateMutationScope(
               transactionalWatchdogScope,
               {
                 queryDb: tx as unknown as Db,
-                lockWatchedIssue: true,
+                lockIssueIds: [transactionalWatchdogScope.watchedIssueId, existing.id],
                 skipStaleOwnershipReconciliation: true,
               },
             );
