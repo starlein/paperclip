@@ -255,8 +255,12 @@ export function approvalRoutes(
 
     if (uniqueIssueIds.length > 0) {
       await issueApprovalsSvc.linkManyForApproval(approval.id, uniqueIssueIds, {
+        actorType: actor.actorType,
+        actorId: actor.actorId,
         agentId: actor.agentId,
         userId: actor.actorType === "user" ? actor.actorId : null,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
       });
     }
 

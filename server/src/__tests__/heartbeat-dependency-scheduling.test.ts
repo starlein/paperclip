@@ -857,6 +857,45 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     releaseIssue();
     await issueHolder;
     expect((await decision).approval.status).toBe("approved");
+
+    const linkActivities = await db.select({ action: activityLog.action }).from(activityLog).where(and(
+      eq(activityLog.entityId, issueId),
+      eq(activityLog.action, "issue.approval_linked"),
+    ));
+    expect(linkActivities).toHaveLength(1);
+
+    let releaseActivityLog!: () => void;
+    const activityLogCanUnlock = new Promise<void>((resolve) => { releaseActivityLog = resolve; });
+    let activityLogLocked!: () => void;
+    const activityLogIsLocked = new Promise<void>((resolve) => { activityLogLocked = resolve; });
+    const activityLogHolder = db.transaction(async (tx) => {
+      await tx.execute(sql`LOCK TABLE ${activityLog} IN ACCESS EXCLUSIVE MODE`);
+      activityLogLocked();
+      await activityLogCanUnlock;
+    });
+    await activityLogIsLocked;
+
+    let unlinkSettled = false;
+    const unlink = issueApprovalService(db).unlink(issueId, approvalId).finally(() => { unlinkSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(unlinkSettled).toBe(false);
+    expect(await db.select().from(issueApprovals).where(and(
+      eq(issueApprovals.issueId, issueId),
+      eq(issueApprovals.approvalId, approvalId),
+    ))).toHaveLength(1);
+
+    releaseActivityLog();
+    await activityLogHolder;
+    await unlink;
+    expect(await db.select().from(issueApprovals).where(and(
+      eq(issueApprovals.issueId, issueId),
+      eq(issueApprovals.approvalId, approvalId),
+    ))).toHaveLength(0);
+    const unlinkActivities = await db.select({ action: activityLog.action }).from(activityLog).where(and(
+      eq(activityLog.entityId, issueId),
+      eq(activityLog.action, "issue.approval_unlinked"),
+    ));
+    expect(unlinkActivities).toHaveLength(1);
   });
 
   it("waits for an in-flight blocker edge addition before evaluating readiness", async () => {

@@ -1161,6 +1161,42 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     },
   );
 
+  it.each([
+    "issue.document_created",
+    "issue.document_updated",
+    "issue.document_upserted",
+    "issue.document_restored",
+    "issue.document_deleted",
+    "issue.work_product_created",
+    "issue.work_product_updated",
+    "issue.work_product_deleted",
+  ] as const)("rejects recovery provenance superseded by %s", async (action) => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action,
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: action.startsWith("issue.document_")
+        ? { documentId: randomUUID() }
+        : { workProductId: randomUUID() },
+      createdAt: new Date(Date.now() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
   it("keeps recovery authority across a non-waking interaction lifecycle", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {

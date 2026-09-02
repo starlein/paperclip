@@ -1370,7 +1370,7 @@ describe.sequential("agent skill routes", () => {
     expect(mockIssueApprovalService.linkManyForApproval).toHaveBeenCalledWith(
       "approval-1",
       [sourceIssueId],
-      { agentId: null, userId: "local-board" },
+      expect.objectContaining({ agentId: null, userId: "local-board" }),
     );
   });
 

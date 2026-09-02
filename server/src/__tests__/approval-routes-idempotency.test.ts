@@ -358,7 +358,7 @@ describe("approval routes idempotent retries", () => {
     expect(mockIssueApprovalService.linkManyForApproval).toHaveBeenCalledWith(
       "approval-1",
       ["00000000-0000-0000-0000-000000000001"],
-      { agentId: "agent-1", userId: null },
+      expect.objectContaining({ agentId: "agent-1", userId: null }),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),

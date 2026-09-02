@@ -1781,7 +1781,11 @@ export function createToolGatewayService(
         .returning();
       formalApprovalId = approval.id;
       await linkedApprovals.link(input.session.issueId, approval.id, {
+        actorType: input.session.actorType ?? "agent",
+        actorId: input.session.actorId ?? input.session.agentId ?? "system",
         agentId: input.session.agentId,
+        userId: input.session.actorType === "user" ? input.session.actorId ?? null : null,
+        runId: input.session.runId,
       });
     }
 

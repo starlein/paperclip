@@ -8942,21 +8942,12 @@ export function issueRoutes(
 
     const actor = getActorInfo(req);
     await issueApprovalsSvc.link(id, req.body.approvalId, {
-      agentId: actor.agentId,
-      userId: actor.actorType === "user" ? actor.actorId : null,
-    });
-
-    await logActivity(db, {
-      companyId: issue.companyId,
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
+      userId: actor.actorType === "user" ? actor.actorId : null,
       runId: actor.runId,
       agentApiKeyId: actor.agentApiKeyId,
-      action: "issue.approval_linked",
-      entityType: "issue",
-      entityId: issue.id,
-      details: { approvalId: req.body.approvalId },
     });
 
     const approvals = await issueApprovalsSvc.listApprovalsForIssue(id);
@@ -8972,20 +8963,14 @@ export function issueRoutes(
     if (!(await assertApprovalMutationAllowedByRunContext(req, res, issue))) return;
     if (!(await assertCanManageIssueApprovalLinks(req, res, issue.companyId))) return;
 
-    await issueApprovalsSvc.unlink(id, approvalId);
-
     const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId: issue.companyId,
+    await issueApprovalsSvc.unlink(id, approvalId, {
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
+      userId: actor.actorType === "user" ? actor.actorId : null,
       runId: actor.runId,
       agentApiKeyId: actor.agentApiKeyId,
-      action: "issue.approval_unlinked",
-      entityType: "issue",
-      entityId: issue.id,
-      details: { approvalId },
     });
 
     res.json({ ok: true });

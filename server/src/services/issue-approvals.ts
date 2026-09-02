@@ -3,13 +3,55 @@ import type { Db } from "@paperclipai/db";
 import { approvals, issueApprovals, issues } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { redactEventPayload } from "../redaction.js";
+import {
+  logActivity,
+  publishActivity,
+  type ActivityPublication,
+  type LogActivityInput,
+} from "./activity-log.js";
 
 interface LinkActor {
+  actorType?: LogActivityInput["actorType"];
+  actorId?: string | null;
   agentId?: string | null;
   userId?: string | null;
+  runId?: string | null;
+  agentApiKeyId?: string | null;
 }
 
 export function issueApprovalService(db: Db) {
+  function approvalLinkActor(actor?: LinkActor) {
+    const actorType = actor?.actorType ?? (actor?.userId ? "user" : actor?.agentId ? "agent" : "system");
+    const actorId = actor?.actorId ?? actor?.userId ?? actor?.agentId ?? "system";
+    return { actorType, actorId };
+  }
+
+  async function persistApprovalLinkActivity(
+    tx: Db,
+    publications: ActivityPublication[],
+    input: {
+      issueId: string;
+      companyId: string;
+      approvalId: string;
+      action: "issue.approval_linked" | "issue.approval_unlinked";
+      actor?: LinkActor;
+    },
+  ) {
+    const activityActor = approvalLinkActor(input.actor);
+    await logActivity(tx, {
+      companyId: input.companyId,
+      actorType: activityActor.actorType,
+      actorId: activityActor.actorId,
+      agentId: input.actor?.agentId ?? null,
+      runId: input.actor?.runId ?? null,
+      agentApiKeyId: input.actor?.agentApiKeyId ?? null,
+      action: input.action,
+      entityType: "issue",
+      entityId: input.issueId,
+      details: { approvalId: input.approvalId },
+    }, publications);
+  }
+
   async function getIssue(dbOrTx: any, issueId: string, lock = false) {
     const query = dbOrTx
       .select()
@@ -113,7 +155,8 @@ export function issueApprovalService(db: Db) {
     },
 
     link: async (issueId: string, approvalId: string, actor?: LinkActor) => {
-      return db.transaction(async (tx) => {
+      const publications: ActivityPublication[] = [];
+      const result = await db.transaction(async (tx) => {
         const { issue } = await assertIssueAndApprovalSameCompany(tx, issueId, approvalId, true);
 
         await tx
@@ -127,27 +170,47 @@ export function issueApprovalService(db: Db) {
           })
           .onConflictDoNothing();
 
+        await persistApprovalLinkActivity(tx as unknown as Db, publications, {
+          issueId,
+          companyId: issue.companyId,
+          approvalId,
+          action: "issue.approval_linked",
+          actor,
+        });
+
         return tx
           .select()
           .from(issueApprovals)
           .where(and(eq(issueApprovals.issueId, issueId), eq(issueApprovals.approvalId, approvalId)))
           .then((rows) => rows[0] ?? null);
       });
+      for (const publication of publications) publishActivity(publication);
+      return result;
     },
 
-    unlink: async (issueId: string, approvalId: string) => {
+    unlink: async (issueId: string, approvalId: string, actor?: LinkActor) => {
+      const publications: ActivityPublication[] = [];
       await db.transaction(async (tx) => {
-        await assertIssueAndApprovalSameCompany(tx, issueId, approvalId, true);
+        const { issue } = await assertIssueAndApprovalSameCompany(tx, issueId, approvalId, true);
         await tx
           .delete(issueApprovals)
           .where(and(eq(issueApprovals.issueId, issueId), eq(issueApprovals.approvalId, approvalId)));
+        await persistApprovalLinkActivity(tx as unknown as Db, publications, {
+          issueId,
+          companyId: issue.companyId,
+          approvalId,
+          action: "issue.approval_unlinked",
+          actor,
+        });
       });
+      for (const publication of publications) publishActivity(publication);
     },
 
     linkManyForApproval: async (approvalId: string, issueIds: string[], actor?: LinkActor) => {
       if (issueIds.length === 0) return;
 
       const uniqueIssueIds = Array.from(new Set(issueIds));
+      const publications: ActivityPublication[] = [];
       await db.transaction(async (tx) => {
         const rows = await tx
           .select({
@@ -183,7 +246,18 @@ export function issueApprovalService(db: Db) {
             })),
           )
           .onConflictDoNothing();
+
+        for (const row of rows) {
+          await persistApprovalLinkActivity(tx as unknown as Db, publications, {
+            issueId: row.id,
+            companyId: row.companyId,
+            approvalId,
+            action: "issue.approval_linked",
+            actor,
+          });
+        }
       });
+      for (const publication of publications) publishActivity(publication);
     },
   };
 }
