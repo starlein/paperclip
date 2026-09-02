@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { and, asc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
+  activityLog,
   agentWakeupRequests,
   agents,
   approvals,
@@ -422,17 +423,23 @@ function verifiedStopSnapshot(input: {
 function stopSnapshotFromRunContext(input: {
   contextSnapshot: unknown;
   companyId: string;
+  watchdogId: string;
   watchedIssueId: string;
   stopFingerprint: string;
 }) {
   const context = parseObject(input.contextSnapshot);
   const taskWatchdog = parseObject(context.taskWatchdog);
-  if (!Array.isArray(taskWatchdog.terminalLeafSummaries)) return null;
+  if (
+    context.watchdogId !== input.watchdogId ||
+    taskWatchdog.watchedIssueId !== input.watchedIssueId ||
+    taskWatchdog.stopFingerprint !== input.stopFingerprint ||
+    !Array.isArray(taskWatchdog.terminalLeafSummaries)
+  ) return null;
   const materialLeaves: TaskWatchdogMaterialLeaf[] = [];
+  let watchedSource: TaskWatchdogMaterialLeaf | null = null;
   for (const value of taskWatchdog.terminalLeafSummaries) {
     const leaf = parseObject(value);
     if (typeof leaf.issueId !== "string" || typeof leaf.status !== "string") return null;
-    if (isTerminalIssueStatus(leaf.status)) continue;
     if (
       (leaf.assigneeAgentId !== null && typeof leaf.assigneeAgentId !== "string") ||
       (leaf.assigneeUserId !== null && typeof leaf.assigneeUserId !== "string") ||
@@ -443,7 +450,7 @@ function stopSnapshotFromRunContext(input: {
       !Array.isArray(leaf.pendingApprovalIds) ||
       !leaf.pendingApprovalIds.every((id) => typeof id === "string")
     ) return null;
-    materialLeaves.push({
+    const normalizedLeaf: TaskWatchdogMaterialLeaf = {
       issueId: leaf.issueId,
       status: leaf.status,
       assigneeAgentId: leaf.assigneeAgentId,
@@ -451,7 +458,9 @@ function stopSnapshotFromRunContext(input: {
       blockerIssueIds: [...leaf.blockerIssueIds].sort(),
       pendingInteractionIds: [...leaf.pendingInteractionIds].sort(),
       pendingApprovalIds: [...leaf.pendingApprovalIds].sort(),
-    });
+    };
+    if (leaf.issueId === input.watchedIssueId) watchedSource = normalizedLeaf;
+    if (!isTerminalIssueStatus(leaf.status)) materialLeaves.push(normalizedLeaf);
   }
 
   const interactionsByIssueId = parseObject(taskWatchdog.pendingInteractions);
@@ -475,7 +484,7 @@ function stopSnapshotFromRunContext(input: {
     };
   }
 
-  return verifiedStopSnapshot({
+  const stopSnapshot = verifiedStopSnapshot({
     snapshot: {
       version: 2,
       fingerprint: input.stopFingerprint,
@@ -486,6 +495,7 @@ function stopSnapshotFromRunContext(input: {
     watchedIssueId: input.watchedIssueId,
     stopFingerprint: input.stopFingerprint,
   });
+  return stopSnapshot ? { stopSnapshot, watchedSource } : null;
 }
 
 // Snapshots loaded from jsonb columns come back with Postgres's normalized key
@@ -516,47 +526,134 @@ function isShrinkOfReviewedSnapshot(
 
 function isServerOwnedWatchdogBlockerTransition(input: {
   observed: TaskWatchdogStopSnapshot | null;
+  observedWatchedSource: TaskWatchdogMaterialLeaf | null;
   current: TaskWatchdogStopSnapshot;
   watchedIssueId: string;
   watchdogIssueId: string | null;
   stopFingerprint: string;
 }) {
-  const { observed, current, watchedIssueId, watchdogIssueId, stopFingerprint } = input;
+  const {
+    observed,
+    observedWatchedSource,
+    current,
+    watchedIssueId,
+    watchdogIssueId,
+    stopFingerprint,
+  } = input;
   if (
     !observed ||
+    !observedWatchedSource ||
     !watchdogIssueId ||
     observed.fingerprint !== stopFingerprint ||
-    canonicalJson(observed.waitsByIssueId) !== canonicalJson(current.waitsByIssueId) ||
-    observed.materialLeaves.length !== current.materialLeaves.length
+    canonicalJson(observed.waitsByIssueId) !== canonicalJson(current.waitsByIssueId)
   ) return false;
 
-  const observedLeaves = new Map(observed.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
-  let acceptedSelfBlocker = false;
-  for (const leaf of current.materialLeaves) {
-    const previous = observedLeaves.get(leaf.issueId);
-    if (!previous) return false;
-    if (leaf.issueId !== watchedIssueId) {
-      if (canonicalJson(previous) !== canonicalJson(leaf)) return false;
-      continue;
-    }
+  const observedSiblingLeaves = observed.materialLeaves
+    .filter((leaf) => leaf.issueId !== watchedIssueId);
+  const currentSiblingLeaves = current.materialLeaves
+    .filter((leaf) => leaf.issueId !== watchedIssueId);
+  if (canonicalJson(observedSiblingLeaves) !== canonicalJson(currentSiblingLeaves)) return false;
 
-    const expectedBlockerIssueIds = [...new Set([
-      ...previous.blockerIssueIds,
-      watchdogIssueId,
-    ])].sort();
-    if (
-      previous.blockerIssueIds.includes(watchdogIssueId) ||
-      canonicalJson(leaf.blockerIssueIds) !== canonicalJson(expectedBlockerIssueIds) ||
-      (leaf.status !== previous.status && leaf.status !== "blocked") ||
-      leaf.assigneeAgentId !== previous.assigneeAgentId ||
-      leaf.assigneeUserId !== previous.assigneeUserId ||
-      canonicalJson(leaf.pendingInteractionIds) !== canonicalJson(previous.pendingInteractionIds) ||
-      canonicalJson(leaf.pendingApprovalIds) !== canonicalJson(previous.pendingApprovalIds)
-    ) return false;
-    acceptedSelfBlocker = true;
-  }
+  const currentWatchedSource = current.materialLeaves.find((leaf) => leaf.issueId === watchedIssueId);
+  if (!currentWatchedSource || currentWatchedSource.status !== "blocked") return false;
+  const expectedBlockerIssueIds = [...new Set([
+    ...observedWatchedSource.blockerIssueIds,
+    watchdogIssueId,
+  ])].sort();
+  if (
+    canonicalJson(currentWatchedSource.blockerIssueIds) !== canonicalJson(expectedBlockerIssueIds) ||
+    currentWatchedSource.assigneeAgentId !== observedWatchedSource.assigneeAgentId ||
+    currentWatchedSource.assigneeUserId !== observedWatchedSource.assigneeUserId ||
+    canonicalJson(currentWatchedSource.pendingInteractionIds) !==
+      canonicalJson(observedWatchedSource.pendingInteractionIds) ||
+    canonicalJson(currentWatchedSource.pendingApprovalIds) !==
+      canonicalJson(observedWatchedSource.pendingApprovalIds)
+  ) return false;
 
-  return acceptedSelfBlocker;
+  return observedWatchedSource.status !== currentWatchedSource.status ||
+    canonicalJson(observedWatchedSource.blockerIssueIds) !== canonicalJson(currentWatchedSource.blockerIssueIds);
+}
+
+async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
+  db: Db;
+  companyId: string;
+  watchedIssueId: string;
+  watchdogIssueId: string;
+  observedWatchedSource: TaskWatchdogMaterialLeaf;
+  current: TaskWatchdogStopSnapshot;
+  runCreatedAt: Date;
+}) {
+  const currentWatchedSource = input.current.materialLeaves.find(
+    (leaf) => leaf.issueId === input.watchedIssueId,
+  );
+  if (!currentWatchedSource) return false;
+
+  const [blockerEdge, recoveryActivities] = await Promise.all([
+    input.db
+      .select({
+        createdByAgentId: issueRelations.createdByAgentId,
+        createdByUserId: issueRelations.createdByUserId,
+        createdAt: issueRelations.createdAt,
+        blockerCompanyId: issues.companyId,
+        blockerOriginKind: issues.originKind,
+        blockerOriginId: issues.originId,
+      })
+      .from(issueRelations)
+      .innerJoin(issues, and(
+        eq(issues.companyId, issueRelations.companyId),
+        eq(issues.id, issueRelations.issueId),
+      ))
+      .where(and(
+        eq(issueRelations.companyId, input.companyId),
+        eq(issueRelations.issueId, input.watchdogIssueId),
+        eq(issueRelations.relatedIssueId, input.watchedIssueId),
+        eq(issueRelations.type, "blocks"),
+      ))
+      .then((rows) => rows[0] ?? null),
+    input.db
+      .select({
+        actorType: activityLog.actorType,
+        actorId: activityLog.actorId,
+        agentId: activityLog.agentId,
+        runId: activityLog.runId,
+        details: activityLog.details,
+        createdAt: activityLog.createdAt,
+      })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, input.companyId),
+        eq(activityLog.action, "issue.updated"),
+        eq(activityLog.entityType, "issue"),
+        eq(activityLog.entityId, input.watchedIssueId),
+        gte(activityLog.createdAt, input.runCreatedAt),
+      )),
+  ]);
+
+  if (
+    !blockerEdge ||
+    blockerEdge.createdByAgentId !== null ||
+    blockerEdge.createdByUserId !== null ||
+    blockerEdge.blockerCompanyId !== input.companyId ||
+    blockerEdge.blockerOriginKind !== TASK_WATCHDOG_ORIGIN_KIND ||
+    blockerEdge.blockerOriginId !== input.watchedIssueId
+  ) return false;
+
+  return recoveryActivities.some((activity) => {
+    const details = parseObject(activity.details);
+    const blockerIssueIds = Array.isArray(details.blockedByIssueIds)
+      ? details.blockedByIssueIds.filter((id): id is string => typeof id === "string").sort()
+      : null;
+    return activity.actorType === "system" &&
+      activity.actorId === "system" &&
+      activity.agentId === null &&
+      activity.runId === null &&
+      activity.createdAt >= blockerEdge.createdAt &&
+      details.source === "recovery.reconcile_continuation_waiting_on_review" &&
+      details.status === "blocked" &&
+      details.previousStatus === input.observedWatchedSource.status &&
+      blockerIssueIds != null &&
+      canonicalJson(blockerIssueIds) === canonicalJson(currentWatchedSource.blockerIssueIds);
+  });
 }
 
 export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput): TaskWatchdogClassifierResult {
@@ -1982,7 +2079,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       // the watchdog row may already contain the newer self-blocked snapshot.
       const run = scope.runId
         ? await db
-          .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+          .select({
+            contextSnapshot: heartbeatRuns.contextSnapshot,
+            createdAt: heartbeatRuns.createdAt,
+          })
           .from(heartbeatRuns)
           .where(and(
             eq(heartbeatRuns.id, scope.runId),
@@ -1991,24 +2091,36 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           ))
           .then((rows) => rows[0] ?? null)
         : null;
-      const observed = stopSnapshotFromRunContext({
+      const observedRunState = stopSnapshotFromRunContext({
         contextSnapshot: run?.contextSnapshot,
         companyId: watchdog.companyId,
-        watchedIssueId: watchdog.issueId,
-        stopFingerprint: scope.stopFingerprint,
-      }) ?? verifiedStopSnapshot({
-        snapshot: parseStopSnapshot(watchdog.lastObservedStopSnapshot),
-        companyId: watchdog.companyId,
+        watchdogId: watchdog.id,
         watchedIssueId: watchdog.issueId,
         stopFingerprint: scope.stopFingerprint,
       });
-      if (isServerOwnedWatchdogBlockerTransition({
-        observed,
+      const transitionMatches = isServerOwnedWatchdogBlockerTransition({
+        observed: observedRunState?.stopSnapshot ?? null,
+        observedWatchedSource: observedRunState?.watchedSource ?? null,
         current: classification.stopSnapshot,
         watchedIssueId: watchdog.issueId,
         watchdogIssueId: watchdog.watchdogIssueId,
         stopFingerprint: scope.stopFingerprint,
-      })) return { allowed: true as const, classification };
+      });
+      if (
+        transitionMatches &&
+        run &&
+        watchdog.watchdogIssueId &&
+        observedRunState?.watchedSource &&
+        await hasServerOwnedWatchdogBlockerTransitionProvenance({
+          db,
+          companyId: watchdog.companyId,
+          watchedIssueId: watchdog.issueId,
+          watchdogIssueId: watchdog.watchdogIssueId,
+          observedWatchedSource: observedRunState.watchedSource,
+          current: classification.stopSnapshot,
+          runCreatedAt: run.createdAt,
+        })
+      ) return { allowed: true as const, classification };
     }
 
     return {

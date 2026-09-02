@@ -206,6 +206,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     await taskWatchdogService(db).reconcileTaskWatchdogs({ companyId: input.companyId });
     const [watchdog] = await db
       .select({
+        id: issueWatchdogs.id,
         lastObservedFingerprint: issueWatchdogs.lastObservedFingerprint,
         lastObservedStopSnapshot: issueWatchdogs.lastObservedStopSnapshot,
       })
@@ -216,6 +217,28 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       waitsByIssueId?: Record<string, { pendingInteractionIds: string[]; pendingApprovalIds: string[] }>;
     } | null;
     const waitsByIssueId = stopSnapshot?.waitsByIssueId ?? {};
+    const [sourceIssue, sourceBlockers] = await Promise.all([
+      db.select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        assigneeUserId: issues.assigneeUserId,
+        updatedAt: issues.updatedAt,
+      }).from(issues).where(eq(issues.id, input.watchedIssueId)).then((rows) => rows[0]),
+      db.select({ issueId: issueRelations.issueId })
+        .from(issueRelations)
+        .where(and(
+          eq(issueRelations.companyId, input.companyId),
+          eq(issueRelations.relatedIssueId, input.watchedIssueId),
+          eq(issueRelations.type, "blocks"),
+        )),
+    ]);
+    const sourceWaits = waitsByIssueId[input.watchedIssueId] ?? {
+      pendingInteractionIds: [],
+      pendingApprovalIds: [],
+    };
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({
       id: runId,
@@ -224,12 +247,24 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       status: "running",
       contextSnapshot: {
         issueId: input.watchdogIssueId,
+        watchdogId: watchdog?.id,
         taskWatchdog: {
           watchedIssueId: input.watchedIssueId,
           watchedIssueIdentifier: "WDOG-ROOT",
           watchedIssueTitle: "Watched root",
           stopFingerprint: watchdog?.lastObservedFingerprint,
-          terminalLeafSummaries: stopSnapshot?.materialLeaves ?? [],
+          terminalLeafSummaries: sourceIssue ? [{
+            issueId: sourceIssue.id,
+            identifier: sourceIssue.identifier,
+            title: sourceIssue.title,
+            status: sourceIssue.status,
+            assigneeAgentId: sourceIssue.assigneeAgentId,
+            assigneeUserId: sourceIssue.assigneeUserId,
+            blockerIssueIds: sourceBlockers.map((row) => row.issueId).sort(),
+            pendingInteractionIds: sourceWaits.pendingInteractionIds,
+            pendingApprovalIds: sourceWaits.pendingApprovalIds,
+            updatedAt: sourceIssue.updatedAt.toISOString(),
+          }] : [],
           pendingInteractions: Object.fromEntries(Object.entries(waitsByIssueId)
             .filter(([, waits]) => waits.pendingInteractionIds.length > 0)
             .map(([issueId, waits]) => [issueId, waits.pendingInteractionIds.map((id) => ({ id, kind: null }))])),
@@ -243,7 +278,8 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
   }
 
   async function seedWatchdogMutationWithStaleOwnership(input: {
-    sourceStatus: "in_progress" | "done";
+    sourceStatus: "in_progress" | "done" | "cancelled";
+    preexistingWatchdogBlocker?: boolean;
   }) {
     const companyId = await seedCompany();
     const ownerAgentId = await seedAgent(companyId, { name: "Stopped owner" });
@@ -261,6 +297,14 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       originKind: "task_watchdog",
       originId: sourceIssueId,
     });
+    if (input.preexistingWatchdogBlocker) {
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: watchdogIssueId,
+        relatedIssueId: sourceIssueId,
+        type: "blocks",
+      });
+    }
     const staleRunId = randomUUID();
     await db.insert(heartbeatRuns).values({
       id: staleRunId,
@@ -299,7 +343,40 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       watchdogAgentId,
       watchdogIssueId,
       watchdogRunId,
+      preexistingWatchdogBlocker: input.preexistingWatchdogBlocker === true,
     };
+  }
+
+  async function recordServerOwnedWatchdogBlockerTransition(
+    fixture: Awaited<ReturnType<typeof seedWatchdogMutationWithStaleOwnership>>,
+    previousStatus: "in_progress" | "done" | "cancelled",
+  ) {
+    await db.update(issues).set({
+      status: "blocked",
+      executionPolicy: { mode: "auto" },
+    }).where(eq(issues.id, fixture.sourceIssueId));
+    if (!fixture.preexistingWatchdogBlocker) {
+      await db.insert(issueRelations).values({
+        companyId: fixture.companyId,
+        issueId: fixture.watchdogIssueId,
+        relatedIssueId: fixture.sourceIssueId,
+        type: "blocks",
+      });
+    }
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        source: "recovery.reconcile_continuation_waiting_on_review",
+        status: "blocked",
+        previousStatus,
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+    });
   }
 
   async function waitForAssignmentWakeup(companyId: string) {
@@ -629,16 +706,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
 
   it("accepts the server-owned reusable-watchdog blocker transition for source recovery", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
-    await db.update(issues).set({
-      status: "blocked",
-      executionPolicy: { mode: "auto" },
-    }).where(eq(issues.id, fixture.sourceIssueId));
-    await db.insert(issueRelations).values({
-      companyId: fixture.companyId,
-      issueId: fixture.watchdogIssueId,
-      relatedIssueId: fixture.sourceIssueId,
-      type: "blocks",
-    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
     await taskWatchdogService(db).reconcileTaskWatchdogs({ companyId: fixture.companyId });
     const [run, persistedWatchdog] = await Promise.all([
       db.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
@@ -677,6 +745,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       eq(activityLog.companyId, fixture.companyId),
       eq(activityLog.entityId, fixture.sourceIssueId),
       eq(activityLog.action, "issue.updated"),
+      eq(activityLog.runId, fixture.watchdogRunId),
     ));
     expect(audit).toMatchObject({
       actorType: "agent",
@@ -684,6 +753,99 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       runId: fixture.watchdogRunId,
     });
   });
+
+  it.each(
+    [
+      ["outside board user", { createdByUserId: "outside-board-user" }],
+      ["unrelated agent", { createAgent: true }],
+    ] as Array<[string, { createdByUserId?: string; createAgent?: boolean }]>,
+  )("rejects a reusable-watchdog blocker transition created by an %s", async (_label, creator) => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const unrelatedAgentId = creator.createAgent
+      ? await seedAgent(fixture.companyId, { name: "Unrelated recovery actor" })
+      : null;
+    const unrelatedRunId = unrelatedAgentId ? randomUUID() : null;
+    if (unrelatedAgentId && unrelatedRunId) {
+      await db.insert(heartbeatRuns).values({
+        id: unrelatedRunId,
+        companyId: fixture.companyId,
+        agentId: unrelatedAgentId,
+        status: "succeeded",
+        finishedAt: new Date(),
+        contextSnapshot: { issueId: fixture.sourceIssueId },
+      });
+    }
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(issueRelations).values({
+      companyId: fixture.companyId,
+      issueId: fixture.watchdogIssueId,
+      relatedIssueId: fixture.sourceIssueId,
+      type: "blocks",
+      createdByAgentId: unrelatedAgentId,
+      createdByUserId: creator.createdByUserId ?? null,
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: unrelatedAgentId ? "agent" : "user",
+      actorId: unrelatedAgentId ?? creator.createdByUserId ?? "outside",
+      agentId: unrelatedAgentId,
+      runId: unrelatedRunId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        status: "blocked",
+        previousStatus: "in_progress",
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ title: "Must remain unchanged" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.title).toBe("Stopped source");
+  });
+
+  it("accepts an attributable status-only transition when the reusable blocker predates the wake", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      preexistingWatchdogBlocker: true,
+    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      executionPolicy: null,
+    });
+  });
+
+  it.each(["done", "cancelled"] as const)(
+    "accepts an attributable reusable-blocker transition from terminal status %s",
+    async (sourceStatus) => {
+      const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus });
+      await recordServerOwnedWatchdogBlockerTransition(fixture, sourceStatus);
+
+      const res = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ executionPolicy: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toMatchObject({
+        id: fixture.sourceIssueId,
+        status: "blocked",
+        executionPolicy: null,
+      });
+    },
+  );
 
   it("rejects a source mutation when another blocker changes the self-blocked fingerprint", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
