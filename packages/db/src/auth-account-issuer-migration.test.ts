@@ -44,7 +44,7 @@ describeEmbeddedPostgres("Better Auth account issuer migration", () => {
     `;
 
     const migrationSql = await readFile(
-      new URL("./migrations/0228_gorgeous_slipstream.sql", import.meta.url),
+      new URL("./migrations/0230_better_auth_account_issuer.sql", import.meta.url),
       "utf8",
     );
     for (const statement of migrationSql

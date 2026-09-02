@@ -330,7 +330,11 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       source: "automation",
       triggerDetail: "system",
       reason: "interaction_pending",
-      payload: { issueId: blockedIssueId, interactionId: pendingInteractionId },
+      payload: {
+        issueId: blockedIssueId,
+        interactionId: pendingInteractionId,
+        mutation: "interaction",
+      },
       contextSnapshot: {
         issueId: blockedIssueId,
         interactionId: pendingInteractionId,
