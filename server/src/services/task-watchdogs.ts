@@ -425,11 +425,13 @@ function stopSnapshotFromRunContext(input: {
   companyId: string;
   watchdogId: string;
   watchedIssueId: string;
+  watchdogIssueId: string;
   stopFingerprint: string;
 }) {
   const context = parseObject(input.contextSnapshot);
   const taskWatchdog = parseObject(context.taskWatchdog);
   if (
+    context.issueId !== input.watchdogIssueId ||
     context.watchdogId !== input.watchdogId ||
     taskWatchdog.watchedIssueId !== input.watchedIssueId ||
     taskWatchdog.stopFingerprint !== input.stopFingerprint ||
@@ -531,6 +533,7 @@ function isServerOwnedWatchdogBlockerTransition(input: {
   watchedIssueId: string;
   watchdogIssueId: string | null;
   stopFingerprint: string;
+  terminalObservedBlockerIssueIds: Set<string>;
 }) {
   const {
     observed,
@@ -539,13 +542,20 @@ function isServerOwnedWatchdogBlockerTransition(input: {
     watchedIssueId,
     watchdogIssueId,
     stopFingerprint,
+    terminalObservedBlockerIssueIds,
   } = input;
+  const observedSiblingWaits = Object.fromEntries(
+    Object.entries(observed?.waitsByIssueId ?? {}).filter(([issueId]) => issueId !== watchedIssueId),
+  );
+  const currentSiblingWaits = Object.fromEntries(
+    Object.entries(current.waitsByIssueId).filter(([issueId]) => issueId !== watchedIssueId),
+  );
   if (
     !observed ||
     !observedWatchedSource ||
     !watchdogIssueId ||
     observed.fingerprint !== stopFingerprint ||
-    canonicalJson(observed.waitsByIssueId) !== canonicalJson(current.waitsByIssueId)
+    canonicalJson(observedSiblingWaits) !== canonicalJson(currentSiblingWaits)
   ) return false;
 
   const observedSiblingLeaves = observed.materialLeaves
@@ -557,7 +567,9 @@ function isServerOwnedWatchdogBlockerTransition(input: {
   const currentWatchedSource = current.materialLeaves.find((leaf) => leaf.issueId === watchedIssueId);
   if (!currentWatchedSource || currentWatchedSource.status !== "blocked") return false;
   const expectedBlockerIssueIds = [...new Set([
-    ...observedWatchedSource.blockerIssueIds,
+    ...observedWatchedSource.blockerIssueIds.filter(
+      (issueId) => !terminalObservedBlockerIssueIds.has(issueId),
+    ),
     watchdogIssueId,
   ])].sort();
   if (
@@ -581,7 +593,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   watchdogIssueId: string;
   observedWatchedSource: TaskWatchdogMaterialLeaf;
   current: TaskWatchdogStopSnapshot;
-  runCreatedAt: Date;
+  watchdogTriggeredAt: Date;
 }) {
   const currentWatchedSource = input.current.materialLeaves.find(
     (leaf) => leaf.issueId === input.watchedIssueId,
@@ -625,7 +637,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
         eq(activityLog.action, "issue.updated"),
         eq(activityLog.entityType, "issue"),
         eq(activityLog.entityId, input.watchedIssueId),
-        gte(activityLog.createdAt, input.runCreatedAt),
+        gte(activityLog.createdAt, input.watchdogTriggeredAt),
       )),
   ]);
 
@@ -2061,7 +2073,6 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         reason: "Task-watchdog run context is not backed by an active persisted watchdog.",
       };
     }
-
     await reconcileStaleSubtreeOwnershipForMutation({
       watchdog,
       stopFingerprint: scope.stopFingerprint,
@@ -2081,7 +2092,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         ? await db
           .select({
             contextSnapshot: heartbeatRuns.contextSnapshot,
-            createdAt: heartbeatRuns.createdAt,
+            status: heartbeatRuns.status,
           })
           .from(heartbeatRuns)
           .where(and(
@@ -2091,13 +2102,31 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           ))
           .then((rows) => rows[0] ?? null)
         : null;
-      const observedRunState = stopSnapshotFromRunContext({
-        contextSnapshot: run?.contextSnapshot,
-        companyId: watchdog.companyId,
-        watchdogId: watchdog.id,
-        watchedIssueId: watchdog.issueId,
-        stopFingerprint: scope.stopFingerprint,
-      });
+      const observedRunState = watchdog.watchdogIssueId
+        ? stopSnapshotFromRunContext({
+          contextSnapshot: run?.contextSnapshot,
+          companyId: watchdog.companyId,
+          watchdogId: watchdog.id,
+          watchedIssueId: watchdog.issueId,
+          watchdogIssueId: watchdog.watchdogIssueId,
+          stopFingerprint: scope.stopFingerprint,
+        })
+        : null;
+      const observedBlockerIssueIds = observedRunState?.watchedSource?.blockerIssueIds ?? [];
+      const observedBlockerRows = observedBlockerIssueIds.length > 0
+        ? await db
+          .select({ id: issues.id, status: issues.status })
+          .from(issues)
+          .where(and(
+            eq(issues.companyId, watchdog.companyId),
+            inArray(issues.id, observedBlockerIssueIds),
+          ))
+        : [];
+      const terminalObservedBlockerIssueIds = new Set(
+        observedBlockerRows
+          .filter((issue) => isTerminalIssueStatus(issue.status))
+          .map((issue) => issue.id),
+      );
       const transitionMatches = isServerOwnedWatchdogBlockerTransition({
         observed: observedRunState?.stopSnapshot ?? null,
         observedWatchedSource: observedRunState?.watchedSource ?? null,
@@ -2105,11 +2134,13 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         watchedIssueId: watchdog.issueId,
         watchdogIssueId: watchdog.watchdogIssueId,
         stopFingerprint: scope.stopFingerprint,
+        terminalObservedBlockerIssueIds,
       });
       if (
         transitionMatches &&
-        run &&
+        run?.status === "running" &&
         watchdog.watchdogIssueId &&
+        watchdog.lastTriggeredAt &&
         observedRunState?.watchedSource &&
         await hasServerOwnedWatchdogBlockerTransitionProvenance({
           db,
@@ -2118,7 +2149,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           watchdogIssueId: watchdog.watchdogIssueId,
           observedWatchedSource: observedRunState.watchedSource,
           current: classification.stopSnapshot,
-          runCreatedAt: run.createdAt,
+          watchdogTriggeredAt: watchdog.lastTriggeredAt,
         })
       ) return { allowed: true as const, classification };
     }
