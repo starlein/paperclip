@@ -1000,6 +1000,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
   it.each([
     ["title", { title: "Board-renamed source" }],
     ["description", { description: "Board-authored source details" }],
+    ["priority", { priority: "high" }],
   ] as const)("rejects watchdog recovery authority after a board %s edit", async (_field, patch) => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
@@ -1167,6 +1168,8 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     "issue.document_upserted",
     "issue.document_restored",
     "issue.document_deleted",
+    "issue.attachment_added",
+    "issue.attachment_removed",
     "issue.work_product_created",
     "issue.work_product_updated",
     "issue.work_product_deleted",
@@ -1184,7 +1187,9 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       entityId: fixture.sourceIssueId,
       details: action.startsWith("issue.document_")
         ? { documentId: randomUUID() }
-        : { workProductId: randomUUID() },
+        : action.startsWith("issue.attachment_")
+          ? { attachmentId: randomUUID() }
+          : { workProductId: randomUUID() },
       createdAt: new Date(Date.now() - 1_000),
     });
 

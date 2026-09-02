@@ -2101,6 +2101,23 @@ describe("agent issue mutation checkout ownership", () => {
       );
     });
 
+    it("keeps watchdog recovery runs out of deliverable mutation surfaces", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: ownerAgentId }));
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app)
+        .post(`/api/companies/${companyId}/issues/${issueId}/attachments`)
+        .attach("file", Buffer.from("watchdog artifact"), {
+          filename: "finding.txt",
+          contentType: "text/plain",
+        });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.error).toContain("Task-watchdog runs cannot update issue documents");
+      expect(mockStorageService.putFile).not.toHaveBeenCalled();
+    });
+
     it.each([
       ["in_progress"],
       ["blocked"],
@@ -2117,7 +2134,11 @@ describe("agent issue mutation checkout ownership", () => {
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status });
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status }));
+      expect(mockIssueService.update).toHaveBeenCalledWith(
+        issueId,
+        expect.objectContaining({ status }),
+        expect.anything(),
+      );
     });
 
     it("lets an authorized watchdog block an active review without impersonating its reviewer", async () => {
@@ -2300,6 +2321,38 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
+    it("revalidates watchdog authority again under the source mutation lock", async () => {
+      denyBaseBoundary();
+      mockIssueService.getById.mockResolvedValue(
+        makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId }),
+      );
+      mockTaskWatchdogService.revalidateMutationScope
+        .mockResolvedValueOnce({
+          allowed: true,
+          classification: { state: "stopped", stopFingerprint: "task_watchdog_stop:test" },
+        })
+        .mockResolvedValueOnce({
+          allowed: false,
+          reason: "Task-watchdog review became stale while waiting for the source mutation lock.",
+          classification: { state: "live", liveIssueIds: [issueId] },
+        });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({ priority: "high" });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenCalledTimes(2);
+      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: "watchdog", watchedIssueId: issueId }),
+        expect.objectContaining({
+          queryDb: expect.anything(),
+          lockWatchedIssue: true,
+          skipStaleOwnershipReconciliation: true,
+        }),
+      );
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
     it("suppresses watchdog follow-up creation when current source revalidation is live", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: ownerAgentId }));
@@ -2442,6 +2495,7 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).toHaveBeenCalledWith(
         issueId,
         expect.objectContaining({ assigneeAgentId: peerAgentId }),
+        expect.anything(),
       );
     });
 

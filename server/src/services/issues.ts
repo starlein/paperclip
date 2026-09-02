@@ -133,6 +133,7 @@ import {
   persistActivity,
   publishActivity,
   type ActivityPublication,
+  type LogActivityInput,
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
@@ -9266,6 +9267,10 @@ export function issueService(db: Db) {
       originalFilename?: string | null;
       createdByAgentId?: string | null;
       createdByUserId?: string | null;
+      activityActor?: Pick<
+        LogActivityInput,
+        "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId"
+      >;
     }) => {
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })
@@ -9286,7 +9291,8 @@ export function issueService(db: Db) {
         }
       }
 
-      return db.transaction(async (tx) => {
+      const postCommitActivityPublications: ActivityPublication[] = [];
+      const created = await db.transaction(async (tx) => {
         const [asset] = await tx
           .insert(assets)
           .values({
@@ -9312,7 +9318,7 @@ export function issueService(db: Db) {
           })
           .returning();
 
-        return {
+        const result = {
           id: attachment.id,
           companyId: attachment.companyId,
           issueId: attachment.issueId,
@@ -9329,7 +9335,25 @@ export function issueService(db: Db) {
           createdAt: attachment.createdAt,
           updatedAt: attachment.updatedAt,
         };
+        if (input.activityActor) {
+          await logActivity(tx as unknown as Db, {
+            companyId: issue.companyId,
+            ...input.activityActor,
+            action: "issue.attachment_added",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              attachmentId: result.id,
+              originalFilename: result.originalFilename,
+              contentType: result.contentType,
+              byteSize: result.byteSize,
+            },
+          }, postCommitActivityPublications);
+        }
+        return result;
       });
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
+      return created;
     },
 
     listAttachments: async (issueId: string) =>
@@ -9380,8 +9404,15 @@ export function issueService(db: Db) {
         .where(eq(issueAttachments.id, id))
         .then((rows) => rows[0] ?? null),
 
-    removeAttachment: async (id: string) =>
-      db.transaction(async (tx) => {
+    removeAttachment: async (
+      id: string,
+      activityActor?: Pick<
+        LogActivityInput,
+        "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId"
+      >,
+    ) => {
+      const postCommitActivityPublications: ActivityPublication[] = [];
+      const removed = await db.transaction(async (tx) => {
         const existing = await tx
           .select({
             id: issueAttachments.id,
@@ -9408,8 +9439,21 @@ export function issueService(db: Db) {
 
         await tx.delete(issueAttachments).where(eq(issueAttachments.id, id));
         await tx.delete(assets).where(eq(assets.id, existing.assetId));
+        if (activityActor) {
+          await logActivity(tx as unknown as Db, {
+            companyId: existing.companyId,
+            ...activityActor,
+            action: "issue.attachment_removed",
+            entityType: "issue",
+            entityId: existing.issueId,
+            details: { attachmentId: existing.id },
+          }, postCommitActivityPublications);
+        }
         return existing;
-      }),
+      });
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
+      return removed;
+    },
 
     findMentionedAgents: async (companyId: string, body: string) => {
       const explicitAgentMentionIds = extractAgentMentionIds(body);

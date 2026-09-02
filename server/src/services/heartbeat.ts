@@ -206,7 +206,9 @@ import {
 } from "./issue-rewake-throttle.js";
 import {
   logActivity,
+  publishActivity,
   publishPluginDomainEvent,
+  type ActivityPublication,
   type LogActivityInput,
 } from "./activity-log.js";
 import {
@@ -23317,6 +23319,7 @@ export function heartbeatService(
       // still respect the issue execution lock so a second agent cannot start on the
       // same issue workspace while the assignee already has a live run.
       const agentNameKey = normalizeAgentNameKey(agent.name);
+      const postCommitActivityPublications: ActivityPublication[] = [];
 
       const outcome = await db.transaction(async (tx) => {
         if (reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) {
@@ -23768,7 +23771,7 @@ export function heartbeatService(
               source,
               triggerDetail,
             },
-          });
+          }, postCommitActivityPublications);
         };
 
         // Serialize duplicate dependency-ready emitters on the issue row. A
@@ -24459,6 +24462,10 @@ export function heartbeatService(
 
         return { kind: "queued" as const, run: newRun };
       });
+
+      for (const publication of postCommitActivityPublications) {
+        publishActivity(publication);
+      }
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped")
         return null;

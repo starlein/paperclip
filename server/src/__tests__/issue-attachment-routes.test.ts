@@ -287,8 +287,10 @@ describe("issue attachment routes", () => {
         issueId: "11111111-1111-4111-8111-111111111111",
         contentType: "application/zip",
         originalFilename: "bundle.zip",
+        activityActor: expect.objectContaining({ actorType: "user" }),
       }),
     );
+    expect(mockLogActivity).not.toHaveBeenCalled();
     expect(res.body.contentType).toBe("application/zip");
   });
 

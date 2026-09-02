@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import {
   activityLog,
   agents,
+  assets,
   companies,
   createDb,
   documentRevisions,
@@ -15,6 +16,7 @@ import {
   heartbeatRuns,
   instanceSettings,
   issueComments,
+  issueAttachments,
   issueInboxArchives,
   issueDocuments,
   issuePlanDecompositions,
@@ -62,6 +64,67 @@ describe("issue list limit helpers", () => {
     expect(clampIssueListLimit(0)).toBe(1);
     expect(clampIssueListLimit(25.9)).toBe(25);
     expect(clampIssueListLimit(ISSUE_LIST_MAX_LIMIT + 10)).toBe(ISSUE_LIST_MAX_LIMIT);
+  });
+});
+
+describeEmbeddedPostgres("issue attachment activity atomicity", () => {
+  let db!: ReturnType<typeof createDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-attachment-activity-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  it("rolls back the attachment rows when its activity row cannot persist", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const objectKey = `issues/${issueId}/atomicity.txt`;
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Attachment Atomicity",
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Attachment activity boundary",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await expect(issueService(db).createAttachment({
+      issueId,
+      provider: "local",
+      objectKey,
+      contentType: "text/plain",
+      byteSize: 6,
+      sha256: "a".repeat(64),
+      originalFilename: "atomicity.txt",
+      activityActor: {
+        actorType: "agent",
+        actorId: "missing-agent",
+        agentId: randomUUID(),
+        runId: null,
+      },
+    })).rejects.toThrow();
+
+    const [persistedAssets, persistedAttachments, persistedActivities] = await Promise.all([
+      db.select({ id: assets.id }).from(assets).where(eq(assets.objectKey, objectKey)),
+      db.select({ id: issueAttachments.id }).from(issueAttachments).where(eq(issueAttachments.issueId, issueId)),
+      db.select({ id: activityLog.id }).from(activityLog).where(and(
+        eq(activityLog.entityId, issueId),
+        eq(activityLog.action, "issue.attachment_added"),
+      )),
+    ]);
+    expect(persistedAssets).toHaveLength(0);
+    expect(persistedAttachments).toHaveLength(0);
+    expect(persistedActivities).toHaveLength(0);
   });
 });
 

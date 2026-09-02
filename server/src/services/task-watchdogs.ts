@@ -42,6 +42,8 @@ const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
   "issue.document_upserted",
   "issue.document_restored",
   "issue.document_deleted",
+  "issue.attachment_added",
+  "issue.attachment_removed",
   "issue.work_product_created",
   "issue.work_product_updated",
   "issue.work_product_deleted",
@@ -808,23 +810,14 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       activity.action as (typeof TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS)[number],
     )) return materialApprovalActivityIds.has(activity.id);
     if (activity.action !== "issue.updated") return true;
-    if (details.source === "recovery.reconcile_continuation_waiting_on_review") return true;
-    const changes = parseObject(details.changes);
-    const patch = parseObject(details.patch);
-    return [
-      "status",
-      "title",
-      "description",
-      "assigneeAgentId",
-      "assigneeUserId",
-      "blockedByIssueIds",
-      "parentId",
-      "executionPolicy",
-    ].some((key) =>
-      Object.prototype.hasOwnProperty.call(details, key) ||
-      Object.prototype.hasOwnProperty.call(changes, key) ||
-      Object.prototype.hasOwnProperty.call(patch, key),
-    );
+    // Every persisted issue patch is a recovery boundary. Watchdog-authored
+    // mutations can write more than the classifier's current material fields
+    // (for example priority, goal, project, and billing code), and allowing an
+    // older recovery transition to authorize a later patch would let the
+    // watchdog overwrite a concurrent board edit to one of those fields.
+    // No-op PATCHes do not emit issue.updated, so failing closed here does not
+    // invalidate a review when the source row did not actually change.
+    return true;
   });
 
   const latestRecoveryBoundary = materialRecoveryActivities.reduce<number | null>((latest, activity) => {
@@ -1396,12 +1389,20 @@ export async function loadTaskWatchdogSubtreeIssues(db: Db, companyId: string, w
 export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) {
   const issuesSvc = issueService(db);
 
-  async function loadWatchdogSubtreeIssues(companyId: string, watchedIssueId: string) {
-    return loadTaskWatchdogSubtreeIssues(db, companyId, watchedIssueId);
+  async function loadWatchdogSubtreeIssues(
+    companyId: string,
+    watchedIssueId: string,
+    queryDb: Db = db,
+  ) {
+    return loadTaskWatchdogSubtreeIssues(queryDb, companyId, watchedIssueId);
   }
 
-  async function collectClassifierInput(companyId: string, watchdog: IssueWatchdogRow) {
-    const issueRows = await loadWatchdogSubtreeIssues(companyId, watchdog.issueId);
+  async function collectClassifierInput(
+    companyId: string,
+    watchdog: IssueWatchdogRow,
+    queryDb: Db = db,
+  ) {
+    const issueRows = await loadWatchdogSubtreeIssues(companyId, watchdog.issueId, queryDb);
     const subtreeIssueIds = issueRows.map((issue) => issue.id);
     if (subtreeIssueIds.length === 0) {
       return {
@@ -1429,7 +1430,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       documentActivityRows,
       workProductActivityRows,
     ] = await Promise.all([
-      db
+      queryDb
         .select({
           companyId: heartbeatRuns.companyId,
           agentId: heartbeatRuns.agentId,
@@ -1445,7 +1446,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
             inArray(sql`${heartbeatRuns.contextSnapshot}->>'taskId'`, subtreeIssueIds),
           ),
         )),
-      db
+      queryDb
         .select({
           companyId: issues.companyId,
           agentId: heartbeatRuns.agentId,
@@ -1464,7 +1465,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           visibleIssueCondition(),
           inArray(heartbeatRuns.status, [...TASK_WATCHDOG_LIVE_RUN_STATUSES]),
         )),
-      db
+      queryDb
         .select({
           companyId: agentWakeupRequests.companyId,
           agentId: agentWakeupRequests.agentId,
@@ -1482,7 +1483,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
             inArray(sql`${agentWakeupRequests.payload}->'_paperclipWakeContext'->>'taskId'`, subtreeIssueIds),
           ),
         )),
-      db
+      queryDb
         .select({
           companyId: issueRelations.companyId,
           blockerIssueId: issueRelations.issueId,
@@ -1494,7 +1495,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           eq(issueRelations.type, "blocks"),
           inArray(issueRelations.relatedIssueId, subtreeIssueIds),
         )),
-      db
+      queryDb
         .select({
           companyId: issueThreadInteractions.companyId,
           issueId: issueThreadInteractions.issueId,
@@ -1510,7 +1511,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           inArray(issueThreadInteractions.issueId, subtreeIssueIds),
           eq(issueThreadInteractions.status, "pending"),
         )),
-      db
+      queryDb
         .select({
           companyId: issueApprovals.companyId,
           issueId: issueApprovals.issueId,
@@ -1524,7 +1525,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           inArray(issueApprovals.issueId, subtreeIssueIds),
           inArray(approvals.status, ["pending", "revision_requested"]),
         )),
-      db
+      queryDb
         .select({
           issueId: issueComments.issueId,
           latestAt: sql<Date | null>`MAX(${issueComments.updatedAt})`,
@@ -1536,7 +1537,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           isNull(issueComments.deletedAt),
         ))
         .groupBy(issueComments.issueId),
-      db
+      queryDb
         .select({
           issueId: issueDocuments.issueId,
           latestAt: sql<Date | null>`MAX(${issueDocuments.updatedAt})`,
@@ -1547,7 +1548,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           inArray(issueDocuments.issueId, subtreeIssueIds),
         ))
         .groupBy(issueDocuments.issueId),
-      db
+      queryDb
         .select({
           issueId: issueWorkProducts.issueId,
           latestAt: sql<Date | null>`MAX(${issueWorkProducts.updatedAt})`,
@@ -1575,7 +1576,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         return createdAtMs != null && evaluatedAtMs - createdAtMs < TASK_WATCHDOG_FIRST_RUN_GRACE_MS;
       })
       .map((row) => row.id);
-    const completedRunIssueIds = await collectCompletedRunIssueIds(companyId, freshIssueIds);
+    const completedRunIssueIds = await collectCompletedRunIssueIds(companyId, freshIssueIds, queryDb);
 
     return {
       watchdog: {
@@ -1612,11 +1613,15 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   // Returns the subset of `issueIds` that already have at least one run in a
   // terminal status. Such issues have demonstrably executed, so a stopped
   // subtree is genuine and must not be masked by the pending-first-run guard.
-  async function collectCompletedRunIssueIds(companyId: string, issueIds: string[]) {
+  async function collectCompletedRunIssueIds(
+    companyId: string,
+    issueIds: string[],
+    queryDb: Db = db,
+  ) {
     if (issueIds.length === 0) return [];
     const candidates = new Set(issueIds);
     const [contextRuns, issueOwnedRuns] = await Promise.all([
-      db
+      queryDb
         .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
         .from(heartbeatRuns)
         .where(and(
@@ -1627,7 +1632,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
             inArray(sql`${heartbeatRuns.contextSnapshot}->>'taskId'`, issueIds),
           ),
         )),
-      db
+      queryDb
         .select({ issueId: issues.id })
         .from(issues)
         .innerJoin(heartbeatRuns, or(
@@ -2241,7 +2246,30 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     watchedIssueId: string;
     stopFingerprint: string | null;
     runId?: string | null;
-  }) {
+  }, options: {
+    queryDb?: Db;
+    lockWatchedIssue?: boolean;
+    skipStaleOwnershipReconciliation?: boolean;
+  } = {}) {
+    const queryDb = options.queryDb ?? db;
+    if (options.lockWatchedIssue) {
+      const lockedWatchedIssue = await queryDb
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(
+          eq(issues.id, scope.watchedIssueId),
+          eq(issues.companyId, scope.companyId),
+        ))
+        .for("update")
+        .then((rows) => rows[0] ?? null);
+      if (!lockedWatchedIssue) {
+        return {
+          allowed: false as const,
+          reason: "Task-watchdog watched issue no longer exists in the run company.",
+        };
+      }
+    }
+
     if (!scope.stopFingerprint) {
       return {
         allowed: false as const,
@@ -2249,7 +2277,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       };
     }
 
-    const watchdog = await db
+    const watchdog = await queryDb
       .select()
       .from(issueWatchdogs)
       .where(and(
@@ -2265,13 +2293,15 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         reason: "Task-watchdog run context is not backed by an active persisted watchdog.",
       };
     }
-    await reconcileStaleSubtreeOwnershipForMutation({
-      watchdog,
-      stopFingerprint: scope.stopFingerprint,
-      runId: scope.runId,
-    });
+    if (!options.skipStaleOwnershipReconciliation) {
+      await reconcileStaleSubtreeOwnershipForMutation({
+        watchdog,
+        stopFingerprint: scope.stopFingerprint,
+        runId: scope.runId,
+      });
+    }
 
-    const input = await collectClassifierInput(watchdog.companyId, watchdog);
+    const input = await collectClassifierInput(watchdog.companyId, watchdog, queryDb);
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
       return { allowed: true as const, classification };
@@ -2281,7 +2311,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       // this run writes. The immutable wake context is the run's baseline;
       // the watchdog row may already contain the newer self-blocked snapshot.
       const run = scope.runId
-        ? await db
+        ? await queryDb
           .select({
             contextSnapshot: heartbeatRuns.contextSnapshot,
             status: heartbeatRuns.status,
@@ -2306,7 +2336,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         : null;
       const observedBlockerIssueIds = observedRunState?.watchedSource?.blockerIssueIds ?? [];
       const observedBlockerRows = observedBlockerIssueIds.length > 0
-        ? await db
+        ? await queryDb
           .select({ id: issues.id, status: issues.status })
           .from(issues)
           .where(and(
@@ -2335,7 +2365,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         watchdog.lastTriggeredAt &&
         observedRunState?.watchedSource &&
         await hasServerOwnedWatchdogBlockerTransitionProvenance({
-          db,
+          db: queryDb,
           companyId: watchdog.companyId,
           watchedIssueId: watchdog.issueId,
           watchdogIssueId: watchdog.watchdogIssueId,
