@@ -2,12 +2,14 @@ ALTER TABLE "issue_relations" ADD COLUMN IF NOT EXISTS "created_by_actor_type" t
 DO $$
 DECLARE
   changed_rows integer;
+  last_relation_id uuid := '00000000-0000-0000-0000-000000000000';
 BEGIN
   LOOP
     WITH "candidates" AS (
       SELECT "relation"."id"
       FROM "issue_relations" AS "relation"
       WHERE "relation"."created_by_actor_type" = 'unknown'
+        AND "relation"."id" > last_relation_id
         AND (
           "relation"."created_by_agent_id" IS NOT NULL
           OR "relation"."created_by_user_id" IS NOT NULL
@@ -55,17 +57,21 @@ BEGIN
       ORDER BY "relation"."id"
       LIMIT 500
       FOR UPDATE OF "relation"
+    ), "updated" AS (
+      UPDATE "issue_relations" AS "relation"
+      SET "created_by_actor_type" = CASE
+        WHEN "relation"."created_by_agent_id" IS NOT NULL THEN 'agent'
+        WHEN "relation"."created_by_user_id" IS NOT NULL THEN 'user'
+        ELSE 'system'
+      END
+      FROM "candidates"
+      WHERE "relation"."id" = "candidates"."id"
+      RETURNING "relation"."id"
     )
-    UPDATE "issue_relations" AS "relation"
-    SET "created_by_actor_type" = CASE
-      WHEN "relation"."created_by_agent_id" IS NOT NULL THEN 'agent'
-      WHEN "relation"."created_by_user_id" IS NOT NULL THEN 'user'
-      ELSE 'system'
-    END
-    FROM "candidates"
-    WHERE "relation"."id" = "candidates"."id";
+    SELECT count(*)::integer, max("id"::text)::uuid
+    INTO changed_rows, last_relation_id
+    FROM "updated";
 
-    GET DIAGNOSTICS changed_rows = ROW_COUNT;
     EXIT WHEN changed_rows = 0;
   END LOOP;
 END $$;

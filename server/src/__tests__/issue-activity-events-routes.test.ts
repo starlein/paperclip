@@ -126,7 +126,9 @@ function registerModuleMocks() {
   }));
 }
 
-async function createApp(db: unknown = {}) {
+async function createApp(
+  db: unknown = { transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({}) },
+) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),

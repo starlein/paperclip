@@ -5223,6 +5223,43 @@ export function issueService(db: Db) {
     }
   }
 
+  async function lockDependencyState(
+    companyId: string,
+    issueId: string,
+    dbOrTx: any,
+  ) {
+    await dbOrTx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`paperclip:issue-dependency:${companyId}:${issueId}`}, 0))`,
+    );
+  }
+
+  async function lockDependencyStateForUpdate(
+    companyId: string,
+    issueId: string,
+    dbOrTx: any,
+  ) {
+    // The dependent-scoped advisory lock closes the uncommitted-new-edge gap:
+    // relation writers acquire it before reading or changing the edge set.
+    await lockDependencyState(companyId, issueId, dbOrTx);
+    const blockerIds = await dbOrTx
+      .select({ id: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.relatedIssueId, issueId),
+        eq(issueRelations.type, "blocks"),
+      ))
+      .then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
+    const issueIds = [...new Set([issueId, ...blockerIds])].sort();
+    await dbOrTx
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)))
+      .orderBy(asc(issues.id))
+      .for("update");
+    return blockerIds;
+  }
+
   async function syncBlockedByIssueIds(
     issueId: string,
     companyId: string,
@@ -5235,6 +5272,7 @@ export function issueService(db: Db) {
       throw unprocessable("Issue cannot be blocked by itself");
     }
 
+    await lockDependencyState(companyId, issueId, dbOrTx);
     const lockedIssueIds = [issueId, ...deduped].sort();
     await dbOrTx.execute(
       sql`SELECT ${issues.id} FROM ${issues}
@@ -6653,6 +6691,8 @@ export function issueService(db: Db) {
       return listIssueDependencyReadinessMap(dbOrTx, companyId, issueIds);
     },
 
+    lockDependencyStateForUpdate,
+
     listBlockerAttention: async (
       companyId: string,
       issueRows: IssueBlockerAttentionInputNode[],
@@ -6874,16 +6914,20 @@ export function issueService(db: Db) {
       });
 
       if (blockParentUntilDone) {
-        const existingBlockers = await db
-          .select({ blockerIssueId: issueRelations.issueId })
-          .from(issueRelations)
-          .where(and(eq(issueRelations.companyId, parent.companyId), eq(issueRelations.relatedIssueId, parent.id), eq(issueRelations.type, "blocks")));
-        await syncBlockedByIssueIds(
-          parent.id,
-          parent.companyId,
-          [...new Set([...existingBlockers.map((row) => row.blockerIssueId), child.id])],
-          { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
-        );
+        await db.transaction(async (tx) => {
+          await lockDependencyState(parent.companyId, parent.id, tx);
+          const existingBlockers = await tx
+            .select({ blockerIssueId: issueRelations.issueId })
+            .from(issueRelations)
+            .where(and(eq(issueRelations.companyId, parent.companyId), eq(issueRelations.relatedIssueId, parent.id), eq(issueRelations.type, "blocks")));
+          await syncBlockedByIssueIds(
+            parent.id,
+            parent.companyId,
+            [...new Set([...existingBlockers.map((row) => row.blockerIssueId), child.id])],
+            { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+            tx,
+          );
+        });
         [child] = await withIssueRelationSummaries(parent.companyId, [child], db);
       }
 
@@ -7945,6 +7989,22 @@ export function issueService(db: Db) {
       }
 
       const runUpdate = async (tx: any) => {
+        // Dependency-edge mutations must take the dependent-scoped lock before
+        // any issue-row lock. Recovery takes the same order, so a concurrent
+        // edge addition cannot either evade the readiness snapshot or deadlock
+        // while each transaction waits on the other's first lock.
+        if (blockedByIssueIds !== undefined) {
+          await lockDependencyState(existing.companyId, id, tx);
+        }
+        const livenessRelationDependentId =
+          (issueData.status === "done" || issueData.status === "cancelled")
+          && existing.status !== issueData.status
+          && existing.originKind === RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation
+            ? parseIssueGraphLivenessIncidentKey(existing.originId)?.issueId ?? null
+            : null;
+        if (livenessRelationDependentId) {
+          await lockDependencyState(existing.companyId, livenessRelationDependentId, tx);
+        }
         // The receipt baseline must be read under the same row lock as the
         // write. Otherwise a concurrent update can be mistaken for a change
         // made by this request.

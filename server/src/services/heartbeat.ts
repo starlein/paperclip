@@ -18820,33 +18820,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       const agentNameKey = normalizeAgentNameKey(agent.name);
 
       const outcome = await db.transaction(async (tx) => {
-        // Dependency recovery must serialize with both relation edits and blocker
-        // status changes. Read the current edge set first, then acquire the same
-        // deterministic issue-row lock order used by blocker relation mutation.
-        // Once the dependent row is held, a concurrent edge edit cannot commit;
-        // once every observed blocker is held, a concurrent reopen cannot make
-        // the readiness snapshot stale before the disposition update.
-        const dependencyBlockerIds = reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON
-          ? await tx
-            .select({ id: issueRelations.issueId })
-            .from(issueRelations)
-            .where(and(
-              eq(issueRelations.companyId, agent.companyId),
-              eq(issueRelations.relatedIssueId, issueId),
-              eq(issueRelations.type, "blocks"),
-            ))
-            .then((rows) => rows.map((row) => row.id))
-          : [];
-        const issueLockIds = [...new Set([issueId, ...dependencyBlockerIds])].sort();
-        await tx
-          .select({ id: issues.id })
-          .from(issues)
-          .where(and(
-            eq(issues.companyId, agent.companyId),
-            inArray(issues.id, issueLockIds),
-          ))
-          .orderBy(asc(issues.id))
-          .for("update");
+        if (reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) {
+          await issuesSvc.lockDependencyStateForUpdate(agent.companyId, issueId, tx);
+        } else {
+          await tx.execute(
+            sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
+          );
+        }
 
         const issue = await tx
           .select({
@@ -19285,6 +19265,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               asc(agentWakeupRequests.requestedAt),
             )
             .limit(1)
+            .for("update")
             .then((rows) => rows[0] ?? null);
           if (
             existingDependencyWake &&

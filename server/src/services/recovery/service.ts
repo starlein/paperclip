@@ -5323,6 +5323,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             const repairResult = await db.transaction(async (tx): Promise<
               "repaired" | "interaction_suppressed" | "approval_suppressed" | "pause_suppressed" | "not_repaired"
             > => {
+              await issuesSvc.lockDependencyStateForUpdate(companyId, candidate.id, tx);
               const lockedIssue = await issuesSvc.getByIdForUpdate(candidate.id, tx);
               if (
                 !lockedIssue ||

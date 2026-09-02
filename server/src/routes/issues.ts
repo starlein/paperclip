@@ -9875,7 +9875,7 @@ export function issueRoutes(
     const enteringReviewRequested =
       existing.status !== "in_review" && updateFields.status === "in_review";
     const persistReviewActivityTransactionally =
-      enteringReviewRequested || Boolean(reviewInteractionId);
+      enteringReviewRequested || Boolean(reviewInteractionId) || req.body.executionPolicy !== undefined;
 
     const nextAssigneeAgentId =
       updateFields.assigneeAgentId === undefined ? existing.assigneeAgentId : (updateFields.assigneeAgentId as string | null);
