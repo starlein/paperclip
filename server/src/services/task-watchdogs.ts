@@ -59,6 +59,7 @@ const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
 const TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS = [
   "approval.approved",
   "approval.rejected",
+  "approval.cancelled",
   "approval.revision_requested",
   "approval.resubmitted",
 ] as const;
@@ -784,7 +785,11 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       } else if (activity.action === "issue.approval_unlinked") {
         if (waiting) materialApprovalActivityIds.add(activity.id);
         waiting = false;
-      } else if (activity.action === "approval.approved" || activity.action === "approval.rejected") {
+      } else if (
+        activity.action === "approval.approved" ||
+        activity.action === "approval.rejected" ||
+        activity.action === "approval.cancelled"
+      ) {
         if (waiting) materialApprovalActivityIds.add(activity.id);
         pending = false;
         waiting = false;

@@ -157,10 +157,20 @@ export function approvalService(db: Db) {
     // Cancel an open (pending/revision_requested) approval without a board
     // decision — e.g. when its paired agent is terminated during duplicate
     // cleanup. Idempotent: a no-op on already-resolved approvals.
-    cancel: async (id: string, reason?: string | null) => {
-      return withLockedLinkedIssues(id, async (tx) => {
+    cancel: async (
+      id: string,
+      reason?: string | null,
+      actor: ApprovalActivityActor = {
+        actorType: "system",
+        actorId: "approval-service",
+        agentId: null,
+        runId: null,
+      },
+    ) => {
+      const activityPublications: ActivityPublication[] = [];
+      const updated = await withLockedLinkedIssues(id, async (tx) => {
         const now = new Date();
-        return tx
+        const approval = await tx
           .update(approvals)
           .set({
             status: "cancelled",
@@ -171,7 +181,20 @@ export function approvalService(db: Db) {
           .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
           .returning()
           .then((rows: ApprovalRecord[]) => rows[0] ?? null);
+        if (approval) {
+          await logActivity(tx as Db, {
+            companyId: approval.companyId,
+            ...actor,
+            action: "approval.cancelled",
+            entityType: "approval",
+            entityId: approval.id,
+            details: { type: approval.type, reason: reason ?? null },
+          }, activityPublications);
+        }
+        return approval;
       });
+      for (const publication of activityPublications) publishActivity(publication);
+      return updated;
     },
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {

@@ -198,6 +198,43 @@ describe("approvalService resolution idempotency", () => {
     expect(mockPublishActivity).toHaveBeenCalledTimes(1);
   });
 
+  it("persists cancellation activity before the locked transaction commits", async () => {
+    const cancelled = createApproval("cancelled");
+    const dbStub = createDbStub([[createApproval("pending")]], [cancelled]);
+    mockLogActivity.mockImplementation(async (_tx, _input, publications) => {
+      expect(dbStub.isTransactionActive()).toBe(true);
+      publications.push({ companyId: "company-1", payload: {}, pluginEvent: null });
+    });
+    mockPublishActivity.mockImplementation(() => {
+      expect(dbStub.isTransactionActive()).toBe(false);
+    });
+
+    const result = await approvalService(dbStub.db as any).cancel(
+      "approval-1",
+      "Duplicate cleanup",
+      {
+        actorType: "system",
+        actorId: "built-in-agents",
+        agentId: null,
+        runId: null,
+      },
+    );
+
+    expect(result?.status).toBe("cancelled");
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      dbStub.db,
+      expect.objectContaining({
+        actorType: "system",
+        actorId: "built-in-agents",
+        action: "approval.cancelled",
+        entityId: "approval-1",
+        details: expect.objectContaining({ reason: "Duplicate cleanup" }),
+      }),
+      expect.any(Array),
+    );
+    expect(mockPublishActivity).toHaveBeenCalledTimes(1);
+  });
+
   it("persists resubmission activity before the locked transaction commits", async () => {
     const resubmitted = createApproval("pending");
     const dbStub = createDbStub([[createApproval("revision_requested")]], [resubmitted]);

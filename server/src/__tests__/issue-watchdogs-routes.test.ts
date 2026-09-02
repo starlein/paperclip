@@ -1337,6 +1337,37 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
   });
 
+  it("rejects recovery provenance superseded by a linked approval cancellation", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      sourcePendingApproval: true,
+    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    await db.update(approvals)
+      .set({ status: "cancelled" })
+      .where(eq(approvals.id, fixture.sourceApprovalId!));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "system",
+      actorId: "built-in-agents",
+      action: "approval.cancelled",
+      entityType: "approval",
+      entityId: fixture.sourceApprovalId!,
+      details: { reason: "Duplicate cleanup" },
+      createdAt: new Date(Date.now() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
   it("accepts a server-owned blocker transition that returns to an already-reviewed snapshot", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
