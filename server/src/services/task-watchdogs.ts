@@ -813,6 +813,8 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     const patch = parseObject(details.patch);
     return [
       "status",
+      "title",
+      "description",
       "assigneeAgentId",
       "assigneeUserId",
       "blockedByIssueIds",

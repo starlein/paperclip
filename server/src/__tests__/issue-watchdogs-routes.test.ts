@@ -997,30 +997,30 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
   });
 
-  it("keeps watchdog recovery authority after a non-material source edit", async () => {
+  it.each([
+    ["title", { title: "Board-renamed source" }],
+    ["description", { description: "Board-authored source details" }],
+  ] as const)("rejects watchdog recovery authority after a board %s edit", async (_field, patch) => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
       createdAt: new Date(Date.now() - 5_000),
     });
-    const titleUpdate = await request(createApp(fixture.companyId))
+    const contentUpdate = await request(createApp(fixture.companyId))
       .patch(`/api/issues/${fixture.sourceIssueId}`)
-      .send({ title: "Renamed without changing recovery state" });
-    expect(titleUpdate.status, JSON.stringify(titleUpdate.body)).toBe(200);
+      .send(patch);
+    expect(contentUpdate.status, JSON.stringify(contentUpdate.body)).toBe(200);
 
     const res = await request(fixture.app)
       .patch(`/api/issues/${fixture.sourceIssueId}`)
       .send({ executionPolicy: null });
 
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body).toMatchObject({
-      id: fixture.sourceIssueId,
-      status: "blocked",
-      title: "Renamed without changing recovery state",
-      executionPolicy: null,
-    });
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source).toMatchObject(patch);
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
   });
 
-  it("keeps watchdog recovery authority when a mixed patch resubmits the unchanged policy", async () => {
+  it("rejects watchdog recovery after a content edit that resubmits an unchanged policy", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     const unchangedPolicy = {
       mode: "normal",
@@ -1054,12 +1054,12 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .patch(`/api/issues/${fixture.sourceIssueId}`)
       .send({ executionPolicy: null });
 
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body).toMatchObject({
-      id: fixture.sourceIssueId,
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source).toMatchObject({
       status: "blocked",
       title: "Renamed with unchanged policy",
-      executionPolicy: null,
+      executionPolicy: unchangedPolicy,
     });
   });
 
