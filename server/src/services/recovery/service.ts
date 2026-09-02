@@ -4440,6 +4440,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           // cannot cover an issue that is still blocked: fall through and emit
           // a fresh bounded recovery wake for that stranded state.
           if (existingWake.status !== "completed") {
+            const repairActivityPublications: ActivityPublication[] = [];
             const repairResult = await db.transaction(async (tx): Promise<
               | "repaired"
               | "interaction_suppressed"
@@ -4554,9 +4555,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                   nextStatus: "todo",
                   blockerIssueIds: lockedReadiness.blockerIssueIds,
                 },
-              });
+              }, repairActivityPublications);
               return "repaired";
             });
+            for (const publication of repairActivityPublications) publishActivity(publication);
             if (repairResult === "stale_wake") {
               // The wake row can lag behind run finalization. It does not cover
               // delivery once its linked run is terminal, so fall through and

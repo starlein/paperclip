@@ -10,6 +10,7 @@ const mockIssueService = vi.hoisted(() => ({
   getByIdentifier: vi.fn(),
   createAttachment: vi.fn(),
   getAttachmentById: vi.fn(),
+  removeAttachment: vi.fn(),
 }));
 const mockCompanyService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -251,12 +252,44 @@ describe("issue attachment routes", () => {
       assigneeUserId: null,
       identifier: "PAP-1",
     });
+    mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("text/plain", "report.txt"));
+    mockIssueService.removeAttachment.mockResolvedValue(makeAttachment("text/plain", "report.txt"));
     mockCompanyService.getById.mockResolvedValue({
       id: "company-1",
     });
     mockWorkProductService.createForIssue.mockReset();
     mockWorkProductService.getById.mockReset();
     mockWorkProductService.update.mockReset();
+  });
+
+  it("deletes storage only after attachment metadata commits", async () => {
+    const storage = createStorageService();
+    const res = await request(await createApp(storage))
+      .delete("/api/attachments/attachment-1");
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.removeAttachment).toHaveBeenCalledWith(
+      "attachment-1",
+      expect.objectContaining({ actorType: "user" }),
+    );
+    expect(storage.deleteObject).toHaveBeenCalledWith(
+      "company-1",
+      "issues/issue-1/report.txt",
+    );
+    expect(mockIssueService.removeAttachment.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(storage.deleteObject).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("preserves storage when attachment metadata removal rolls back", async () => {
+    const storage = createStorageService();
+    mockIssueService.removeAttachment.mockRejectedValueOnce(new Error("transaction rolled back"));
+
+    const res = await request(await createApp(storage))
+      .delete("/api/attachments/attachment-1");
+
+    expect(res.status).toBe(500);
+    expect(storage.deleteObject).not.toHaveBeenCalled();
   });
 
   it("accepts zip uploads for issue attachments", async () => {

@@ -279,6 +279,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         issueId: input.watchdogIssueId,
         watchdogId: watchdog?.id,
         taskWatchdog: {
+          triggeredAt: triggeredAt.toISOString(),
           watchedIssueId: input.watchedIssueId,
           watchedIssueIdentifier: "WDOG-ROOT",
           watchedIssueTitle: "Watched root",
@@ -1072,6 +1073,35 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
     expect(source).toMatchObject(patch);
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("uses the immutable run trigger when the shared watchdog timestamp advances", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardEditAt = new Date(fixture.watchdogTriggeredAt.getTime() + 10_000);
+    await db.update(issues)
+      .set({ title: "Board edit after run snapshot" })
+      .where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: { title: "Board edit after run snapshot" },
+      createdAt: boardEditAt,
+    });
+    await db.update(issueWatchdogs)
+      .set({ lastTriggeredAt: new Date(boardEditAt.getTime() + 10_000) })
+      .where(eq(issueWatchdogs.issueId, fixture.sourceIssueId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ title: "Stale watchdog overwrite" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.title).toBe("Board edit after run snapshot");
   });
 
   it("rejects watchdog recovery after a content edit that resubmits an unchanged policy", async () => {

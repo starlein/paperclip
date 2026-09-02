@@ -460,12 +460,17 @@ function stopSnapshotFromRunContext(input: {
 }) {
   const context = parseObject(input.contextSnapshot);
   const taskWatchdog = parseObject(context.taskWatchdog);
+  const triggeredAt = typeof taskWatchdog.triggeredAt === "string"
+    ? new Date(taskWatchdog.triggeredAt)
+    : null;
   if (
     context.issueId !== input.watchdogIssueId ||
     context.watchdogId !== input.watchdogId ||
     taskWatchdog.watchedIssueId !== input.watchedIssueId ||
     taskWatchdog.stopFingerprint !== input.stopFingerprint ||
-    !Array.isArray(taskWatchdog.terminalLeafSummaries)
+    !Array.isArray(taskWatchdog.terminalLeafSummaries) ||
+    !triggeredAt ||
+    !Number.isFinite(triggeredAt.getTime())
   ) return null;
   const materialLeaves: TaskWatchdogMaterialLeaf[] = [];
   let watchedSource: TaskWatchdogMaterialLeaf | null = null;
@@ -527,7 +532,7 @@ function stopSnapshotFromRunContext(input: {
     watchedIssueId: input.watchedIssueId,
     stopFingerprint: input.stopFingerprint,
   });
-  return stopSnapshot ? { stopSnapshot, watchedSource } : null;
+  return stopSnapshot ? { stopSnapshot, watchedSource, triggeredAt } : null;
 }
 
 // Snapshots loaded from jsonb columns come back with Postgres's normalized key
@@ -1209,6 +1214,7 @@ function watchdogWakeContext(input: {
   watchdogIssue: IssueRow;
   sourceIssue: IssueRow;
   classification: Extract<TaskWatchdogClassifierResult, { state: "stopped" }>;
+  triggeredAt: Date;
 }) {
   return {
     issueId: input.watchdogIssue.id,
@@ -1216,6 +1222,7 @@ function watchdogWakeContext(input: {
     wakeReason: "task_watchdog_stopped_subtree",
     source: TASK_WATCHDOG_ORIGIN_KIND,
     taskWatchdog: {
+      triggeredAt: input.triggeredAt.toISOString(),
       watchedIssueId: input.sourceIssue.id,
       watchedIssueIdentifier: input.sourceIssue.identifier,
       watchedIssueTitle: input.sourceIssue.title,
@@ -1969,6 +1976,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   }
 
   async function evaluateWatchdog(row: IssueWatchdogRow, opts: { runId?: string | null } = {}) {
+    // Bind the future run to a boundary captured before its stopped-subtree
+    // snapshot. The shared watchdog row can advance during later reconciles;
+    // it must never redefine this run's freshness window.
+    const triggeredAt = new Date();
     const watchdog = await markTerminalWatchdogIssueReviewed(row, opts);
     const sourceIssue = await db
       .select()
@@ -2042,7 +2053,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       runId: opts.runId ?? null,
     });
     const now = new Date();
-    await db
+    const triggerClaim = await db
       .update(issueWatchdogs)
       .set({
         watchdogIssueId: watchdogIssue.id,
@@ -2052,7 +2063,23 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         triggerCount: sql`${issueWatchdogs.triggerCount} + 1`,
         updatedAt: now,
       })
-      .where(eq(issueWatchdogs.id, watchdog.id));
+      .where(and(
+        eq(issueWatchdogs.id, watchdog.id),
+        eq(issueWatchdogs.status, "active"),
+        watchdog.lastTriggeredAt
+          ? eq(issueWatchdogs.lastTriggeredAt, watchdog.lastTriggeredAt)
+          : isNull(issueWatchdogs.lastTriggeredAt),
+      ))
+      .returning({ id: issueWatchdogs.id });
+    if (triggerClaim.length === 0) {
+      // A concurrent reconciliation already claimed this trigger cycle. Its
+      // idempotent wake remains the only authorizing run.
+      return {
+        state: "watchdog_live" as const,
+        classification,
+        watchdogIssueId: watchdogIssue.id,
+      };
+    }
 
     await logActivity(db, {
       companyId: sourceIssue.companyId,
@@ -2067,6 +2094,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         source: "task_watchdogs.evaluate",
         watchdogId: watchdog.id,
         watchdogIssueId: watchdogIssue.id,
+        triggeredAt: triggeredAt.toISOString(),
         stopFingerprint: classification.stopFingerprint,
         stopSnapshot: classification.stopSnapshot,
         stoppedLeaves: classification.stoppedLeaves,
@@ -2078,6 +2106,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       watchdogIssue,
       sourceIssue,
       classification,
+      triggeredAt,
     });
     const wake = deps.enqueueWakeup
       ? await deps.enqueueWakeup(watchdog.watchdogAgentId, {
@@ -2368,14 +2397,14 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       // another material field. For persisted run contexts, accept the exact
       // match only while no material subtree boundary has committed since the
       // watchdog was triggered.
-      if (run?.status === "running" && observedRunState && watchdog.lastTriggeredAt) {
+      if (run?.status === "running" && observedRunState) {
         const materialRecoveryActivities = await loadMaterialWatchdogRecoveryActivities({
           db: queryDb,
           companyId: watchdog.companyId,
           mutableIssueIds: input.issues.map((issue) => issue.id),
           observedStopSnapshot: observedRunState.stopSnapshot,
           current: classification.stopSnapshot,
-          watchdogTriggeredAt: watchdog.lastTriggeredAt,
+          watchdogTriggeredAt: observedRunState.triggeredAt,
         });
         if (materialRecoveryActivities.length === 0) {
           return { allowed: true as const, classification };
@@ -2437,7 +2466,6 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         transitionMatches &&
         run?.status === "running" &&
         watchdog.watchdogIssueId &&
-        watchdog.lastTriggeredAt &&
         observedRunState?.watchedSource &&
         await hasServerOwnedWatchdogBlockerTransitionProvenance({
           db: queryDb,
@@ -2448,7 +2476,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           observedStopSnapshot: observedRunState.stopSnapshot,
           observedWatchedSource: observedRunState.watchedSource,
           current: classification.stopSnapshot,
-          watchdogTriggeredAt: watchdog.lastTriggeredAt,
+          watchdogTriggeredAt: observedRunState.triggeredAt,
         })
       ) return { allowed: true as const, classification };
     }

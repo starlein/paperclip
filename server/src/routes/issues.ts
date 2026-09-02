@@ -14101,12 +14101,6 @@ export function issueRoutes(
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
 
-    try {
-      await storage.deleteObject(attachment.companyId, attachment.objectKey);
-    } catch (err) {
-      logger.warn({ err, attachmentId }, "storage delete failed while removing attachment");
-    }
-
     const actor = getActorInfo(req);
     const removed = await svc.removeAttachment(attachmentId, {
       actorType: actor.actorType,
@@ -14118,6 +14112,15 @@ export function issueRoutes(
     if (!removed) {
       res.status(404).json({ error: "Attachment not found" });
       return;
+    }
+
+    // Metadata is the authoritative object reference. Delete storage only
+    // after its transaction commits so rollback cannot restore an attachment
+    // whose underlying object is already gone.
+    try {
+      await storage.deleteObject(removed.companyId, removed.objectKey);
+    } catch (err) {
+      logger.warn({ err, attachmentId }, "storage delete failed after removing attachment metadata");
     }
 
     res.json({ ok: true });
