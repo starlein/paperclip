@@ -124,6 +124,56 @@ d("issue relation actor provenance migration", () => {
       )
     `;
 
+    // More than one migration batch of attributable legacy relations proves
+    // the loop advances, while the update trigger proves replay and ambiguous
+    // rows do not cause a table-wide rewrite.
+    await sql`
+      INSERT INTO "issues" ("id", "company_id", "title", "identifier", "origin_kind")
+      SELECT
+        gen_random_uuid(),
+        ${companyId},
+        'Batch blocker ' || batch_number,
+        'RAM-BATCH-' || batch_number,
+        'manual'
+      FROM generate_series(1, 501) AS batch_number
+    `;
+    await sql`
+      INSERT INTO "issue_relations" (
+        "id", "company_id", "issue_id", "related_issue_id", "type",
+        "created_by_actor_type", "created_by_user_id", "created_at", "updated_at"
+      )
+      SELECT
+        gen_random_uuid(),
+        ${companyId},
+        "id",
+        ${watchedIssueIds[0]},
+        'blocks',
+        'unknown',
+        'legacy-user',
+        ${relationCreatedAt},
+        ${relationCreatedAt}
+      FROM "issues"
+      WHERE "company_id" = ${companyId}
+        AND "identifier" LIKE 'RAM-BATCH-%'
+    `;
+    await sql`CREATE TEMP TABLE "relation_update_audit" ("relation_id" uuid NOT NULL)`;
+    await sql.unsafe(`
+      CREATE OR REPLACE FUNCTION pg_temp.audit_relation_update()
+      RETURNS trigger
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        INSERT INTO relation_update_audit (relation_id) VALUES (NEW.id);
+        RETURN NEW;
+      END;
+      $$
+    `);
+    await sql.unsafe(`
+      CREATE TRIGGER relation_update_audit_trigger
+      AFTER UPDATE ON issue_relations
+      FOR EACH ROW EXECUTE FUNCTION pg_temp.audit_relation_update()
+    `);
+
     const statements = await migrationStatements();
     for (const statement of statements) await sql.unsafe(statement);
     for (const statement of statements) await sql.unsafe(statement);
@@ -141,5 +191,16 @@ d("issue relation actor provenance migration", () => {
         { id: relationIds[2], created_by_actor_type: "unknown" },
       ].sort((left, right) => left.id.localeCompare(right.id)),
     );
+    const [audit] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM "relation_update_audit"
+    `;
+    expect(audit?.count).toBe(502);
+    const [remainingUnknown] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM "issue_relations"
+      WHERE "company_id" = ${companyId}
+        AND "created_by_actor_type" = 'unknown'
+    `;
+    expect(remainingUnknown?.count).toBe(1);
   }, 240_000);
 });

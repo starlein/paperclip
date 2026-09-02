@@ -6,6 +6,7 @@ import {
   agents,
   agentRuntimeState,
   agentWakeupRequests,
+  approvals,
   companySkills,
   companies,
   createDb,
@@ -18,6 +19,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueApprovals,
   issueRelations,
   issueThreadInteractions,
   issueTreeHolds,
@@ -31,6 +33,8 @@ import {
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 import { buildIssueBlockersResolvedWakeStateKey } from "../services/issue-dependency-wakeups.ts";
+import { approvalService } from "../services/approvals.ts";
+import { issueApprovalService } from "../services/issue-approvals.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -140,6 +144,8 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueRelations);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(issueThreadInteractions);
     await db.delete(issueTreeHolds);
     await db.delete(issues);
@@ -608,6 +614,158 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       .update(heartbeatRuns)
       .set({ status: "succeeded", finishedAt: new Date(), updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, activeRunId));
+  });
+
+  it("revalidates readiness after a concurrent blocker reopen commits", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const blockerId = randomUUID();
+    const blockedIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "DependencyRevalidator",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    const blockedTransitionAt = new Date();
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Completed blocker", status: "done", priority: "high" },
+      {
+        id: blockedIssueId,
+        companyId,
+        title: "Blocked dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId: agentId,
+        blockedTransitionAt,
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: blockedIssueId,
+      type: "blocks",
+    });
+
+    let releaseReopen!: () => void;
+    const reopenCanCommit = new Promise<void>((resolve) => { releaseReopen = resolve; });
+    let reopenWritten!: () => void;
+    const reopenIsUncommitted = new Promise<void>((resolve) => { reopenWritten = resolve; });
+    const reopen = db.transaction(async (tx) => {
+      await tx.update(issues).set({ status: "todo", updatedAt: new Date() }).where(eq(issues.id, blockerId));
+      reopenWritten();
+      await reopenCanCommit;
+    });
+    await reopenIsUncommitted;
+
+    const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerId],
+      blockedTransitionAt,
+    });
+    let wakeSettled = false;
+    const wake = heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerId },
+      idempotencyKey,
+      contextSnapshot: { issueId: blockedIssueId, wakeReason: "issue_blockers_resolved" },
+    }).finally(() => { wakeSettled = true; });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(wakeSettled).toBe(false);
+    releaseReopen();
+    await reopen;
+    expect(await wake).toBeNull();
+
+    const [dependent, requests] = await Promise.all([
+      db.select({ status: issues.status }).from(issues).where(eq(issues.id, blockedIssueId)).then((rows) => rows[0]),
+      db.select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, idempotencyKey)),
+    ]);
+    expect(dependent?.status).toBe("blocked");
+    expect(requests).toEqual([expect.objectContaining({
+      status: "skipped",
+      reason: "issue_blockers_resolved_state_mismatch",
+    })]);
+  });
+
+  it("serializes approval links and status changes on their linked issue rows", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Approval-gated dependent",
+      status: "blocked",
+      priority: "high",
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "test",
+      status: "pending",
+      payload: {},
+    });
+
+    let releaseApproval!: () => void;
+    const approvalCanUnlock = new Promise<void>((resolve) => { releaseApproval = resolve; });
+    let approvalLocked!: () => void;
+    const approvalIsLocked = new Promise<void>((resolve) => { approvalLocked = resolve; });
+    const approvalHolder = db.transaction(async (tx) => {
+      await tx.select({ id: approvals.id }).from(approvals).where(eq(approvals.id, approvalId)).for("update");
+      approvalLocked();
+      await approvalCanUnlock;
+    });
+    await approvalIsLocked;
+
+    let linkSettled = false;
+    const link = issueApprovalService(db).link(issueId, approvalId).finally(() => { linkSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(linkSettled).toBe(false);
+    releaseApproval();
+    await approvalHolder;
+    await link;
+
+    let releaseIssue!: () => void;
+    const issueCanUnlock = new Promise<void>((resolve) => { releaseIssue = resolve; });
+    let issueLocked!: () => void;
+    const issueIsLocked = new Promise<void>((resolve) => { issueLocked = resolve; });
+    const issueHolder = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId)).for("update");
+      issueLocked();
+      await issueCanUnlock;
+    });
+    await issueIsLocked;
+
+    let decisionSettled = false;
+    const decision = approvalService(db).approve(approvalId, "board").finally(() => { decisionSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(decisionSettled).toBe(false);
+    releaseIssue();
+    await issueHolder;
+    expect((await decision).approval.status).toBe("approved");
   });
 
   it("honors maxConcurrentRuns 1 by leaving a second assignment wake queued", async () => {

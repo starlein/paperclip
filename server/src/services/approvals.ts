@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvalComments, approvals } from "@paperclipai/db";
+import { approvalComments, approvals, issueApprovals, issues } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
@@ -31,14 +31,35 @@ export function approvalService(db: Db) {
     await builtInAgentService(db).ensure(companyId, sourceBuiltInAgentKey);
   }
 
-  async function getExistingApproval(id: string) {
-    const existing = await db
+  async function getExistingApproval(id: string, dbOrTx: any = db, lock = false) {
+    const query = dbOrTx
       .select()
       .from(approvals)
-      .where(eq(approvals.id, id))
-      .then((rows) => rows[0] ?? null);
+      .where(eq(approvals.id, id));
+    const existing = await (lock ? query.for("update") : query)
+      .then((rows: ApprovalRecord[]) => rows[0] ?? null);
     if (!existing) throw notFound("Approval not found");
     return existing;
+  }
+
+  async function withLockedLinkedIssues<T>(
+    id: string,
+    mutation: (tx: any, existing: ApprovalRecord) => Promise<T>,
+  ): Promise<T> {
+    return db.transaction(async (tx) => {
+      // Approval links take issue locks before the approval lock. Match that
+      // order here so dependency recovery's issue lock serializes every change
+      // to an approval gate without introducing an issue/approval deadlock.
+      await tx
+        .select({ id: issues.id })
+        .from(issueApprovals)
+        .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
+        .where(eq(issueApprovals.approvalId, id))
+        .orderBy(asc(issues.id))
+        .for("update", { of: issues });
+      const existing = await getExistingApproval(id, tx, true);
+      return mutation(tx, existing);
+    });
   }
 
   async function resolveApproval(
@@ -47,42 +68,43 @@ export function approvalService(db: Db) {
     decidedByUserId: string,
     decisionNote: string | null | undefined,
   ): Promise<ResolutionResult> {
-    const existing = await getExistingApproval(id);
-    if (!canResolveStatuses.has(existing.status)) {
-      if (existing.status === targetStatus) {
-        return { approval: existing, applied: false };
+    return withLockedLinkedIssues(id, async (tx, existing) => {
+      if (!canResolveStatuses.has(existing.status)) {
+        if (existing.status === targetStatus) {
+          return { approval: existing, applied: false };
+        }
+        throw unprocessable(
+          `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
+        );
       }
+
+      const now = new Date();
+      const updated = await tx
+        .update(approvals)
+        .set({
+          status: targetStatus,
+          decidedByUserId,
+          decisionNote: decisionNote ?? null,
+          decidedAt: now,
+          updatedAt: now,
+        })
+        .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+        .returning()
+        .then((rows: ApprovalRecord[]) => rows[0] ?? null);
+
+      if (updated) {
+        return { approval: updated, applied: true };
+      }
+
+      const latest = await getExistingApproval(id, tx);
+      if (latest.status === targetStatus) {
+        return { approval: latest, applied: false };
+      }
+
       throw unprocessable(
         `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
       );
-    }
-
-    const now = new Date();
-    const updated = await db
-      .update(approvals)
-      .set({
-        status: targetStatus,
-        decidedByUserId,
-        decisionNote: decisionNote ?? null,
-        decidedAt: now,
-        updatedAt: now,
-      })
-      .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-
-    if (updated) {
-      return { approval: updated, applied: true };
-    }
-
-    const latest = await getExistingApproval(id);
-    if (latest.status === targetStatus) {
-      return { approval: latest, applied: false };
-    }
-
-    throw unprocessable(
-      `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
-    );
+    });
   }
 
   return {
@@ -125,19 +147,20 @@ export function approvalService(db: Db) {
     // decision — e.g. when its paired agent is terminated during duplicate
     // cleanup. Idempotent: a no-op on already-resolved approvals.
     cancel: async (id: string, reason?: string | null) => {
-      const now = new Date();
-      const updated = await db
-        .update(approvals)
-        .set({
-          status: "cancelled",
-          decisionNote: reason ?? null,
-          decidedAt: now,
-          updatedAt: now,
-        })
-        .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      return updated;
+      return withLockedLinkedIssues(id, async (tx) => {
+        const now = new Date();
+        return tx
+          .update(approvals)
+          .set({
+            status: "cancelled",
+            decisionNote: reason ?? null,
+            decidedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+          .returning()
+          .then((rows: ApprovalRecord[]) => rows[0] ?? null);
+      });
     },
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
@@ -230,46 +253,48 @@ export function approvalService(db: Db) {
     },
 
     requestRevision: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
-      const existing = await getExistingApproval(id);
-      if (existing.status !== "pending") {
-        throw unprocessable("Only pending approvals can request revision");
-      }
+      return withLockedLinkedIssues(id, async (tx, existing) => {
+        if (existing.status !== "pending") {
+          throw unprocessable("Only pending approvals can request revision");
+        }
 
-      const now = new Date();
-      return db
-        .update(approvals)
-        .set({
-          status: "revision_requested",
-          decidedByUserId,
-          decisionNote: decisionNote ?? null,
-          decidedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(approvals.id, id))
-        .returning()
-        .then((rows) => rows[0]);
+        const now = new Date();
+        return tx
+          .update(approvals)
+          .set({
+            status: "revision_requested",
+            decidedByUserId,
+            decisionNote: decisionNote ?? null,
+            decidedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(approvals.id, id))
+          .returning()
+          .then((rows: ApprovalRecord[]) => rows[0]);
+      });
     },
 
     resubmit: async (id: string, payload?: Record<string, unknown>) => {
-      const existing = await getExistingApproval(id);
-      if (existing.status !== "revision_requested") {
-        throw unprocessable("Only revision requested approvals can be resubmitted");
-      }
+      return withLockedLinkedIssues(id, async (tx, existing) => {
+        if (existing.status !== "revision_requested") {
+          throw unprocessable("Only revision requested approvals can be resubmitted");
+        }
 
-      const now = new Date();
-      return db
-        .update(approvals)
-        .set({
-          status: "pending",
-          payload: payload ?? existing.payload,
-          decisionNote: null,
-          decidedByUserId: null,
-          decidedAt: null,
-          updatedAt: now,
-        })
-        .where(eq(approvals.id, id))
-        .returning()
-        .then((rows) => rows[0]);
+        const now = new Date();
+        return tx
+          .update(approvals)
+          .set({
+            status: "pending",
+            payload: payload ?? existing.payload,
+            decisionNote: null,
+            decidedByUserId: null,
+            decidedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(approvals.id, id))
+          .returning()
+          .then((rows: ApprovalRecord[]) => rows[0]);
+      });
     },
 
     listComments: async (approvalId: string) => {

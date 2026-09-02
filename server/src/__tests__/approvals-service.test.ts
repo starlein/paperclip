@@ -39,17 +39,34 @@ function createApproval(status: string): ApprovalRecord {
 
 function createDbStub(selectResults: ApprovalRecord[][], updateResults: ApprovalRecord[]) {
   const pendingSelectResults = [...selectResults];
-  const selectWhere = vi.fn(async () => pendingSelectResults.shift() ?? []);
-  const from = vi.fn(() => ({ where: selectWhere }));
-  const select = vi.fn(() => ({ from }));
+  const selectWhere = vi.fn();
+  const select = vi.fn(() => {
+    let linkedIssueLockQuery = false;
+    const query: any = {
+      from: vi.fn(() => query),
+      innerJoin: vi.fn(() => {
+        linkedIssueLockQuery = true;
+        return query;
+      }),
+      where: selectWhere.mockImplementation(() => query),
+      orderBy: vi.fn(() => query),
+      for: vi.fn(() => query),
+      then: (resolve: (value: ApprovalRecord[]) => unknown, reject: (reason: unknown) => unknown) =>
+        Promise.resolve(linkedIssueLockQuery ? [] : pendingSelectResults.shift() ?? []).then(resolve, reject),
+    };
+    return query;
+  });
 
   const returning = vi.fn(async () => updateResults);
   const updateWhere = vi.fn(() => ({ returning }));
   const set = vi.fn(() => ({ where: updateWhere }));
   const update = vi.fn(() => ({ set }));
 
+  const db: any = { select, update };
+  db.transaction = vi.fn(async (callback: (tx: typeof db) => Promise<unknown>) => callback(db));
+
   return {
-    db: { select, update },
+    db,
     selectWhere,
     returning,
   };
