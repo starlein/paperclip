@@ -33,6 +33,19 @@ const TASK_WATCHDOG_STOP_FINGERPRINT_PREFIX = "task_watchdog_stop:";
 const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
 const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
+const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
+  "issue.updated",
+  "issue.approval_linked",
+  "issue.approval_unlinked",
+  "issue.thread_interaction_created",
+  "issue.thread_interaction_accepted",
+  "issue.thread_interaction_rejected",
+  "issue.thread_interaction_answered",
+  "issue.thread_interaction_item_verdicts_submitted",
+  "issue.thread_interaction_withdrawn",
+  "issue.thread_interaction_cancelled",
+  "issue.thread_interaction_expired",
+] as const;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
 const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
 // Grace window after an issue is created/assigned during which its first
@@ -625,6 +638,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       .then((rows) => rows[0] ?? null),
     input.db
       .select({
+        action: activityLog.action,
         actorType: activityLog.actorType,
         actorId: activityLog.actorId,
         agentId: activityLog.agentId,
@@ -635,7 +649,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       .from(activityLog)
       .where(and(
         eq(activityLog.companyId, input.companyId),
-        eq(activityLog.action, "issue.updated"),
+        inArray(activityLog.action, TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS),
         eq(activityLog.entityType, "issue"),
         eq(activityLog.entityId, input.watchedIssueId),
         gte(activityLog.createdAt, input.watchdogTriggeredAt),
@@ -653,6 +667,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   ) return false;
 
   const materialRecoveryActivities = recoveryActivities.filter((activity) => {
+    if (activity.action !== "issue.updated") return true;
     const details = parseObject(activity.details);
     if (details.source === "recovery.reconcile_continuation_waiting_on_review") return true;
     const changes = parseObject(details.changes);

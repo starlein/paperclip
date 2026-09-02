@@ -990,6 +990,63 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     expect(wakes).toEqual([{ agentId }]);
   });
 
+  it("keeps the dependent blocked when its covering wake completes during repair", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const [wake] = await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: blockedIssueId,
+        resolvedBlockerIssueId: blockerIssueId,
+        blockerIssueIds: [blockerIssueId],
+      },
+      status: "queued",
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: blockedIssueId,
+        blockerIssueIds: [blockerIssueId],
+      }),
+    }).returning({ id: agentWakeupRequests.id });
+
+    let signalWakeLockAcquired!: () => void;
+    const wakeLockAcquired = new Promise<void>((resolve) => { signalWakeLockAcquired = resolve; });
+    let releaseWakeLock!: () => void;
+    const wakeLockRelease = new Promise<void>((resolve) => { releaseWakeLock = resolve; });
+    const concurrentCompletion = db.transaction(async (tx) => {
+      await tx.select({ id: agentWakeupRequests.id })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wake!.id))
+        .for("update");
+      signalWakeLockAcquired();
+      await wakeLockRelease;
+      await tx.update(agentWakeupRequests)
+        .set({ status: "completed", finishedAt: new Date() })
+        .where(eq(agentWakeupRequests.id, wake!.id));
+    });
+    await wakeLockAcquired;
+
+    const reconciliation = heartbeatService(db).reconcileIssueGraphLiveness();
+    // Let the backstop observe the queued wake before its locked revalidation.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    releaseWakeLock();
+    await concurrentCompletion;
+    const result = await reconciliation;
+
+    expect(result.dependencyWakesHealed).toBe(0);
+    expect(result.dependencyWakeExistingSkipped).toBe(1);
+    const [dependent] = await db.select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, blockedIssueId));
+    expect(dependent?.status).toBe("blocked");
+    const [completedWake] = await db.select({ status: agentWakeupRequests.status })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wake!.id));
+    expect(completedWake?.status).toBe("completed");
+  });
+
   it("heals a multi-blocker dependent when only a completed wake for an earlier blocker exists", async () => {
     await enableAutoRecovery();
     const { companyId, agentId, blockedIssueId, blockerIssueId } =

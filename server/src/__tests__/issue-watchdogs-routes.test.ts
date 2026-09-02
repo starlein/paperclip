@@ -974,6 +974,49 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     });
   });
 
+  it.each([
+    ["interaction", "issue.thread_interaction_created", "issue.thread_interaction_accepted"],
+    ["approval", "issue.approval_linked", "issue.approval_unlinked"],
+  ] as const)(
+    "rejects recovery provenance superseded by a completed %s wait lifecycle",
+    async (_kind, openedAction, closedAction) => {
+      const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+      await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+        createdAt: new Date(Date.now() - 5_000),
+      });
+      await db.insert(activityLog).values([
+        {
+          companyId: fixture.companyId,
+          actorType: "user",
+          actorId: "outside-board-user",
+          action: openedAction,
+          entityType: "issue",
+          entityId: fixture.sourceIssueId,
+          details: {},
+          createdAt: new Date(Date.now() - 2_000),
+        },
+        {
+          companyId: fixture.companyId,
+          actorType: "user",
+          actorId: "outside-board-user",
+          action: closedAction,
+          entityType: "issue",
+          entityId: fixture.sourceIssueId,
+          details: {},
+          createdAt: new Date(Date.now() - 1_000),
+        },
+      ]);
+
+      const res = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ executionPolicy: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+      expect(source?.executionPolicy).toEqual({ mode: "auto" });
+    },
+  );
+
   it("accepts a server-owned blocker transition that returns to an already-reviewed snapshot", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");

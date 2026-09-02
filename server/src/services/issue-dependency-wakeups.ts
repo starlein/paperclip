@@ -196,6 +196,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     dependentIssueId: string;
     blockerIssueIds: string[];
     blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+    lockForUpdate?: boolean;
   },
 ) {
   const cycleKey = buildIssueBlockersResolvedWakeStateKey(input);
@@ -215,7 +216,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
   const lookupKeys = [...new Set([cycleKey, oldStateKey, ...legacyKeyList])];
   const blockedTransitionAt = parseWakeCycleDate(input.blockedTransitionAt);
 
-  const rows = await db
+  const query = db
     .select({
       id: agentWakeupRequests.id,
       agentId: agentWakeupRequests.agentId,
@@ -231,6 +232,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
         inArray(agentWakeupRequests.idempotencyKey, lookupKeys),
       ),
     );
+  const rows = input.lockForUpdate ? await query.for("update") : await query;
 
   const covering = rows.filter((row) =>
     wakeCoversIssueBlockersResolvedReadyState(row, {

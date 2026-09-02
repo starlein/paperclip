@@ -5332,6 +5332,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                   dependentIssueId: candidate.id,
                   blockerIssueIds: lockedReadiness.blockerIssueIds,
                   blockedTransitionAt: lockedIssue.blockedTransitionAt,
+                  lockForUpdate: true,
                 },
               );
               if (!lockedWake || lockedWake.status === "completed") return false;
