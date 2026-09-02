@@ -419,11 +419,11 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
   async function recordServerOwnedWatchdogBlockerTransition(
     fixture: Awaited<ReturnType<typeof seedWatchdogMutationWithStaleOwnership>>,
     previousStatus: "in_progress" | "done" | "cancelled",
-    opts: { createdAt?: Date } = {},
+    opts: { createdAt?: Date; executionPolicy?: Record<string, unknown> } = {},
   ) {
     await db.update(issues).set({
       status: "blocked",
-      executionPolicy: { mode: "auto" },
+      executionPolicy: opts.executionPolicy ?? { mode: "auto" },
     }).where(eq(issues.id, fixture.sourceIssueId));
     if (!fixture.preexistingWatchdogBlocker) {
       await db.insert(issueRelations).values({
@@ -1016,6 +1016,49 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       id: fixture.sourceIssueId,
       status: "blocked",
       title: "Renamed without changing recovery state",
+      executionPolicy: null,
+    });
+  });
+
+  it("keeps watchdog recovery authority when a mixed patch resubmits the unchanged policy", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const unchangedPolicy = {
+      mode: "normal",
+      commentRequired: true,
+      stages: [{
+        id: randomUUID(),
+        type: "review",
+        approvalsNeeded: 1,
+        participants: [{
+          id: randomUUID(),
+          type: "agent",
+          agentId: fixture.watchdogAgentId,
+          userId: null,
+        }],
+      }],
+    };
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+      executionPolicy: unchangedPolicy,
+    });
+    const titleUpdate = await request(createApp(fixture.companyId))
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({
+        title: "Renamed with unchanged policy",
+        executionPolicy: unchangedPolicy,
+      });
+    expect(titleUpdate.status, JSON.stringify(titleUpdate.body)).toBe(200);
+    expect(titleUpdate.body.changes).not.toHaveProperty("executionPolicy");
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      title: "Renamed with unchanged policy",
       executionPolicy: null,
     });
   });

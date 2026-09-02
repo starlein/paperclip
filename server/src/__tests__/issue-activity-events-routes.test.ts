@@ -673,6 +673,7 @@ describe("issue activity event routes", () => {
       expect.objectContaining({
         action: "issue.updated",
         details: expect.objectContaining({
+          priority: "high",
           changes: {
             priority: { from: "medium", to: "high" },
           },
@@ -680,6 +681,8 @@ describe("issue activity event routes", () => {
       }),
       expect.any(Array),
     );
+    const updateActivity = mockLogActivity.mock.calls.find(([, input]) => input.action === "issue.updated")?.[1];
+    expect(updateActivity?.details).not.toHaveProperty("executionPolicy");
   });
 
   it("logs explicit reviewer and approver activity when execution policy participants change", async () => {

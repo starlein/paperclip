@@ -10449,6 +10449,9 @@ export function issueRoutes(
       const previous = Object.fromEntries(
         Object.entries(changes).map(([key, change]) => [key, change.from]),
       );
+      const changedUpdateFields = Object.fromEntries(
+        Object.entries(updateFields).filter(([key]) => Object.prototype.hasOwnProperty.call(changes, key)),
+      );
       await logActivity(tx as unknown as Db, {
         companyId: updated.companyId,
         actorType: actor.actorType,
@@ -10461,7 +10464,7 @@ export function issueRoutes(
         entityType: "issue",
         entityId: updated.id,
         details: {
-          ...updateFields,
+          ...changedUpdateFields,
           identifier: updated.identifier,
           authorizationReason: issueMutationAuthorizationReason,
           changes,
