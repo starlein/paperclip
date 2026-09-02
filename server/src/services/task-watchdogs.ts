@@ -46,6 +46,12 @@ const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
   "issue.thread_interaction_cancelled",
   "issue.thread_interaction_expired",
 ] as const;
+const TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS = [
+  "approval.approved",
+  "approval.rejected",
+  "approval.revision_requested",
+  "approval.resubmitted",
+] as const;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
 const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
 // Grace window after an issue is created/assigned during which its first
@@ -613,7 +619,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   );
   if (!currentWatchedSource) return false;
 
-  const [blockerEdge, recoveryActivities] = await Promise.all([
+  const [blockerEdge, issueRecoveryActivities, approvalRecoveryActivities] = await Promise.all([
     input.db
       .select({
         createdByActorType: issueRelations.createdByActorType,
@@ -654,6 +660,28 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
         eq(activityLog.entityId, input.watchedIssueId),
         gte(activityLog.createdAt, input.watchdogTriggeredAt),
       )),
+    input.db
+      .select({
+        action: activityLog.action,
+        actorType: activityLog.actorType,
+        actorId: activityLog.actorId,
+        agentId: activityLog.agentId,
+        runId: activityLog.runId,
+        details: activityLog.details,
+        createdAt: activityLog.createdAt,
+      })
+      .from(activityLog)
+      .innerJoin(issueApprovals, and(
+        eq(issueApprovals.companyId, activityLog.companyId),
+        sql`${activityLog.entityId} = ${issueApprovals.approvalId}::text`,
+      ))
+      .where(and(
+        eq(activityLog.companyId, input.companyId),
+        inArray(activityLog.action, TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS),
+        eq(activityLog.entityType, "approval"),
+        eq(issueApprovals.issueId, input.watchedIssueId),
+        gte(activityLog.createdAt, input.watchdogTriggeredAt),
+      )),
   ]);
 
   if (
@@ -666,7 +694,10 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     blockerEdge.blockerOriginId !== input.watchedIssueId
   ) return false;
 
-  const materialRecoveryActivities = recoveryActivities.filter((activity) => {
+  const materialRecoveryActivities = [
+    ...issueRecoveryActivities,
+    ...approvalRecoveryActivities,
+  ].filter((activity) => {
     if (activity.action !== "issue.updated") return true;
     const details = parseObject(activity.details);
     if (details.source === "recovery.reconcile_continuation_waiting_on_review") return true;

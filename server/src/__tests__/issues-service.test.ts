@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
@@ -4028,6 +4028,62 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
 
     expect(blockerRelations.blocks.map((relation) => relation.id)).toEqual([blockedId]);
     expect(blockedRelations.blockedBy.map((relation) => relation.id)).toEqual([blockerId]);
+  });
+
+  it("preserves creator provenance for retained blocker relations", async () => {
+    const companyId = randomUUID();
+    const blockedId = randomUUID();
+    const retainedBlockerId = randomUUID();
+    const addedBlockerId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values([
+      { id: blockedId, companyId, title: "Blocked", status: "blocked", priority: "medium" },
+      { id: retainedBlockerId, companyId, title: "Retained", status: "todo", priority: "medium" },
+      { id: addedBlockerId, companyId, title: "Added", status: "todo", priority: "medium" },
+    ]);
+    const retainedCreatedAt = new Date("2026-08-05T10:00:00.000Z");
+    const [retainedRelation] = await db.insert(issueRelations).values({
+      companyId,
+      issueId: retainedBlockerId,
+      relatedIssueId: blockedId,
+      type: "blocks",
+      createdByActorType: "user",
+      createdByUserId: "outside-board-user",
+      createdAt: retainedCreatedAt,
+    }).returning({ id: issueRelations.id });
+
+    await svc.update(blockedId, {
+      blockedByIssueIds: [retainedBlockerId, addedBlockerId],
+    });
+
+    const relations = await db.select({
+      id: issueRelations.id,
+      blockerIssueId: issueRelations.issueId,
+      createdByActorType: issueRelations.createdByActorType,
+      createdByUserId: issueRelations.createdByUserId,
+      createdAt: issueRelations.createdAt,
+    }).from(issueRelations).where(and(
+      eq(issueRelations.companyId, companyId),
+      eq(issueRelations.relatedIssueId, blockedId),
+      eq(issueRelations.type, "blocks"),
+    ));
+    expect(relations.find((relation) => relation.blockerIssueId === retainedBlockerId)).toEqual({
+      id: retainedRelation!.id,
+      blockerIssueId: retainedBlockerId,
+      createdByActorType: "user",
+      createdByUserId: "outside-board-user",
+      createdAt: retainedCreatedAt,
+    });
+    expect(relations.find((relation) => relation.blockerIssueId === addedBlockerId)).toMatchObject({
+      blockerIssueId: addedBlockerId,
+      createdByActorType: "system",
+      createdByUserId: null,
+    });
   });
 
   it("returns blocked-by summaries on newly created issues", async () => {

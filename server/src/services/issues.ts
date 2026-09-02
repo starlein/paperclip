@@ -5235,14 +5235,15 @@ export function issueService(db: Db) {
       throw unprocessable("Issue cannot be blocked by itself");
     }
 
+    const lockedIssueIds = [issueId, ...deduped].sort();
+    await dbOrTx.execute(
+      sql`SELECT ${issues.id} FROM ${issues}
+          WHERE ${and(eq(issues.companyId, companyId), inArray(issues.id, lockedIssueIds))}
+          ORDER BY ${issues.id}
+          FOR UPDATE`,
+    );
+
     if (deduped.length > 0) {
-      const lockedIssueIds = [issueId, ...deduped].sort();
-      await dbOrTx.execute(
-        sql`SELECT ${issues.id} FROM ${issues}
-            WHERE ${and(eq(issues.companyId, companyId), inArray(issues.id, lockedIssueIds))}
-            ORDER BY ${issues.id}
-            FOR UPDATE`,
-      );
       const relatedIssues = await dbOrTx
         .select({ id: issues.id })
         .from(issues)
@@ -5253,20 +5254,35 @@ export function issueService(db: Db) {
       await assertNoBlockingCycles(companyId, issueId, deduped, dbOrTx);
     }
 
-    await dbOrTx
-      .delete(issueRelations)
-      .where(
-        and(
+    const existingRelations = await dbOrTx
+      .select({ blockerIssueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.relatedIssueId, issueId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    const existingBlockerIds = new Set<string>(
+      existingRelations.map((relation: { blockerIssueId: string }) => relation.blockerIssueId),
+    );
+    const desiredBlockerIds = new Set(deduped);
+    const removedBlockerIds = [...existingBlockerIds].filter((blockerId) => !desiredBlockerIds.has(blockerId));
+    if (removedBlockerIds.length > 0) {
+      await dbOrTx
+        .delete(issueRelations)
+        .where(and(
           eq(issueRelations.companyId, companyId),
           eq(issueRelations.relatedIssueId, issueId),
           eq(issueRelations.type, "blocks"),
-        ),
-      );
+          inArray(issueRelations.issueId, removedBlockerIds),
+        ));
+    }
 
-    if (deduped.length === 0) return;
+    const addedBlockerIds = deduped.filter((blockerId) => !existingBlockerIds.has(blockerId));
+    if (addedBlockerIds.length === 0) return;
 
     await dbOrTx.insert(issueRelations).values(
-      deduped.map((blockerIssueId) => ({
+      addedBlockerIds.map((blockerIssueId) => ({
         companyId,
         issueId: blockerIssueId,
         relatedIssueId: issueId,
