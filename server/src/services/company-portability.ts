@@ -105,6 +105,12 @@ import type {
   ImportIssueWorkProductRow,
   ImportIssueAttachmentRow,
 } from "./import-write-types.js";
+import {
+  PaperclipRunnerProviderProfileError,
+  resolvePaperclipRunnerProviderProfile,
+} from "./native-runtime/provider-profile.js";
+import { managedAgentProfileService } from "./managed-agent-profiles.js";
+import { remoteAgentProfileService } from "./remote-agent-profiles.js";
 
 const EXPORT_READ_CONCURRENCY = 8;
 const EXPORT_ISSUE_READ_CONCURRENCY = 2;
@@ -3581,15 +3587,30 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
   }
 
   async function assertImportAdapterConfigConstraints(
+    companyId: string,
     adapterType: string,
     adapterConfig: Record<string, unknown>,
   ) {
     if (adapterType === "paperclip_runner") {
-      const provider = adapterConfig.provider ?? "codex";
-      if (provider !== "codex") {
-        throw unprocessable(
-          "Imported Paperclip Runner agents currently support only the Codex provider.",
-          { code: "paperclip_runner_provider_unavailable" },
+      let profile;
+      try {
+        profile = resolvePaperclipRunnerProviderProfile(adapterConfig);
+      } catch (error) {
+        if (error instanceof PaperclipRunnerProviderProfileError) {
+          throw unprocessable(error.message, { code: error.code });
+        }
+        throw error;
+      }
+      if (profile.provider === "claude_managed") {
+        await managedAgentProfileService(db).requireQualified(
+          companyId,
+          profile.managedProfileId,
+        );
+      } else if (profile.provider === "aws_agentcore") {
+        await remoteAgentProfileService(db).requireQualified(
+          companyId,
+          profile.agentCoreProfileId,
+          "aws_bedrock_agentcore_harness",
         );
       }
       return;
@@ -3629,7 +3650,11 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
       nextAdapterConfig,
       { strictMode: strictSecretsMode, adapterType: effectiveAdapterType },
     );
-    await assertImportAdapterConfigConstraints(effectiveAdapterType, normalizedAdapterConfig);
+    await assertImportAdapterConfigConstraints(
+      companyId,
+      effectiveAdapterType,
+      normalizedAdapterConfig,
+    );
     return {
       adapterType: effectiveAdapterType,
       adapterConfig: normalizedAdapterConfig,
