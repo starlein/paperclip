@@ -552,7 +552,7 @@ export function issueTreeControlService(db: Db) {
     return result;
   }
 
-  async function activeRunsForTree(companyId: string, treeIssues: TreeIssue[]) {
+  async function activeRunsForTree(companyId: string, treeIssues: TreeIssue[], dbOrTx: Db = db) {
     const issueIds = treeIssues.map((issue) => issue.id);
     if (issueIds.length === 0) return [];
     const runIds = treeIssues
@@ -562,7 +562,7 @@ export function issueTreeControlService(db: Db) {
     const issueIdFromContext = sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`;
     const issueIdSet = new Set(issueIds);
 
-    const rows = await db
+    const rows = await dbOrTx
       .select({
         id: heartbeatRuns.id,
         agentId: heartbeatRuns.agentId,
@@ -820,7 +820,7 @@ export function issueTreeControlService(db: Db) {
     resumedPauseHoldIds?: string[];
   }> {
     const holdReleasePolicy = normalizeReleasePolicy(input.releasePolicy);
-    const holdPreview = await preview(companyId, rootIssueId, {
+    let holdPreview = await preview(companyId, rootIssueId, {
       mode: input.mode,
       releasePolicy: holdReleasePolicy,
     });
@@ -909,6 +909,55 @@ export function issueTreeControlService(db: Db) {
     }
 
     const { hold, members } = await db.transaction(async (tx) => {
+      const issueIds = [...new Set(holdPreview.issues.map((issue) => issue.id))].sort();
+      const lockedIssues = issueIds.length > 0
+        ? await tx
+          .select()
+          .from(issues)
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)))
+          .orderBy(asc(issues.id))
+          .for("update")
+        : [];
+      if (lockedIssues.length !== issueIds.length) {
+        throw notFound("One or more issues in the subtree no longer exist");
+      }
+
+      // A dependency recovery transaction may have queued work while this
+      // pause waited for the same issue lock. Refresh active runs after the
+      // lock so the caller cancels that newly committed work as part of hold
+      // creation instead of relying on the stale pre-lock preview.
+      if (input.mode === "pause") {
+        const depthByIssueId = new Map(holdPreview.issues.map((issue) => [issue.id, issue.depth]));
+        const refreshedRuns = (await activeRunsForTree(
+          companyId,
+          lockedIssues.map((issue) => ({ ...issue, depth: depthByIssueId.get(issue.id) ?? 0 })),
+          tx as unknown as Db,
+        )).map(toPreviewRun);
+        const runByIssueId = new Map(refreshedRuns.map((run) => [run.issueId, run]));
+        const refreshedIssues = holdPreview.issues.map((issue) => ({
+          ...issue,
+          activeRun: runByIssueId.get(issue.id) ?? null,
+        }));
+        holdPreview = {
+          ...holdPreview,
+          generatedAt: new Date(),
+          issues: refreshedIssues,
+          activeRuns: refreshedRuns,
+          affectedAgents: buildAffectedAgents(refreshedIssues),
+          totals: {
+            ...holdPreview.totals,
+            activeRuns: refreshedRuns.filter((run) => run.status === "running").length,
+            queuedRuns: refreshedRuns.filter((run) => run.status === "queued").length,
+            affectedAgents: buildAffectedAgents(refreshedIssues).length,
+          },
+          warnings: buildWarnings({
+            mode: input.mode,
+            issuesToPreview: refreshedIssues,
+            activeRuns: refreshedRuns,
+          }),
+        };
+      }
+
       const [createdHold] = await tx
         .insert(issueTreeHolds)
         .values({

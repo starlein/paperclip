@@ -802,6 +802,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     if (activity.action !== "issue.updated") return true;
     if (details.source === "recovery.reconcile_continuation_waiting_on_review") return true;
     const changes = parseObject(details.changes);
+    const patch = parseObject(details.patch);
     return [
       "status",
       "assigneeAgentId",
@@ -811,7 +812,8 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       "executionPolicy",
     ].some((key) =>
       Object.prototype.hasOwnProperty.call(details, key) ||
-      Object.prototype.hasOwnProperty.call(changes, key),
+      Object.prototype.hasOwnProperty.call(changes, key) ||
+      Object.prototype.hasOwnProperty.call(patch, key),
     );
   });
 

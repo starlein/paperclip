@@ -13,7 +13,6 @@ import {
   connectionGrants,
   documents,
   heartbeatRuns,
-  issueApprovals,
   issueDocuments,
   issueThreadInteractions,
   issues,
@@ -81,6 +80,7 @@ import {
 } from "./remote-url-credentials.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
+import { issueApprovalService } from "./issue-approvals.js";
 import {
   createToolRuntimeSupervisor,
   ToolRuntimeSupervisorError,
@@ -880,6 +880,7 @@ export function createToolGatewayService(
   });
   const pluginToolDispatcher = options.pluginToolDispatcher;
   const interactions = issueThreadInteractionService(db);
+  const linkedApprovals = issueApprovalService(db);
   const policyService = toolAccessPolicyService(db);
   const secrets = secretService(db);
   const configuredCloudConnector = options.paperclipCloudConnector ?? options.paperclipIdGmailConnector;
@@ -1779,15 +1780,9 @@ export function createToolGatewayService(
         })
         .returning();
       formalApprovalId = approval.id;
-      await db
-        .insert(issueApprovals)
-        .values({
-          companyId: input.session.companyId,
-          issueId: input.session.issueId,
-          approvalId: approval.id,
-          linkedByAgentId: input.session.agentId,
-        })
-        .onConflictDoNothing();
+      await linkedApprovals.link(input.session.issueId, approval.id, {
+        agentId: input.session.agentId,
+      });
     }
 
     const interaction = await interactions.create(

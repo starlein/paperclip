@@ -350,6 +350,79 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     expect(released.members).toHaveLength(1);
   });
 
+  it("waits for dependency recovery and refreshes newly queued runs before creating a pause hold", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "ReleaseDevOps",
+      role: "release_devops",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Dependency-ready issue",
+      status: "blocked",
+      priority: "high",
+      assigneeAgentId: agentId,
+    });
+
+    let releaseRecovery!: () => void;
+    const recoveryCanUnlock = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+    let recoveryLocked!: () => void;
+    const recoveryIsLocked = new Promise<void>((resolve) => { recoveryLocked = resolve; });
+    const recovery = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId)).for("update");
+      await tx.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        triggerDetail: "system",
+        status: "queued",
+        contextSnapshot: { issueId, wakeReason: "issue_blockers_resolved" },
+      });
+      recoveryLocked();
+      await recoveryCanUnlock;
+    });
+    await recoveryIsLocked;
+
+    let holdSettled = false;
+    const holdPromise = issueTreeControlService(db).createHold(companyId, issueId, {
+      mode: "pause",
+      reason: "operator requested pause",
+      actor: { actorType: "user", actorId: "board-user", userId: "board-user" },
+    }).finally(() => { holdSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(holdSettled).toBe(false);
+
+    releaseRecovery();
+    await recovery;
+    const created = await holdPromise;
+    expect(created.preview.activeRuns).toEqual([
+      expect.objectContaining({ id: runId, issueId, agentId, status: "queued" }),
+    ]);
+    expect(created.hold.members?.[0]).toMatchObject({
+      issueId,
+      activeRunId: runId,
+      activeRunStatus: "queued",
+    });
+  });
+
   it("cancels non-terminal issue statuses and restores from the cancel snapshot", async () => {
     const companyId = randomUUID();
     const rootIssueId = randomUUID();

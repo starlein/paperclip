@@ -900,6 +900,50 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
   });
 
+  it("rejects recovery provenance superseded by plugin-host issue patch transitions", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const transitionAt = Date.now();
+    await db.insert(activityLog).values([
+      {
+        companyId: fixture.companyId,
+        actorType: "plugin",
+        actorId: "test-plugin",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: {
+          patch: { status: "todo" },
+          _previous: { status: "blocked" },
+        },
+        createdAt: new Date(transitionAt),
+      },
+      {
+        companyId: fixture.companyId,
+        actorType: "plugin",
+        actorId: "test-plugin",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: {
+          patch: { status: "blocked" },
+          _previous: { status: "todo" },
+        },
+        createdAt: new Date(transitionAt + 1),
+      },
+    ]);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
   it("rejects a watchdog blocker edge whose agent provenance survives creator deletion", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     const unrelatedAgentId = await seedAgent(fixture.companyId, { name: "Deleted blocker author" });
