@@ -974,6 +974,39 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     });
   });
 
+  it("rejects recovery provenance superseded by an execution-policy edit", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const policyUpdate = await request(createApp(fixture.companyId))
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({
+        executionPolicy: {
+          mode: "normal",
+          stages: [{
+            type: "review",
+            participants: [{ type: "agent", agentId: fixture.watchdogAgentId }],
+          }],
+        },
+      });
+    expect(policyUpdate.status, JSON.stringify(policyUpdate.body)).toBe(200);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toMatchObject({
+      mode: "normal",
+      stages: [{
+        type: "review",
+        participants: [{ type: "agent", agentId: fixture.watchdogAgentId }],
+      }],
+    });
+  });
+
   it.each([
     ["interaction", "issue.thread_interaction_created", "issue.thread_interaction_accepted"],
     ["approval", "issue.approval_linked", "issue.approval_unlinked"],

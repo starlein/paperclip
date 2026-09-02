@@ -17,6 +17,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueRelations,
+  issueThreadInteractions,
   issueTreeHoldMembers,
   issueTreeHolds,
   issues,
@@ -112,6 +113,7 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     await db.delete(costEvents);
     await db.delete(workspaceOperations);
     await db.delete(issueComments);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueTreeHoldMembers);
     await db.delete(issueTreeHolds);
     await db.delete(issueRelations);
@@ -1045,6 +1047,117 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.id, wake!.id));
     expect(completedWake?.status).toBe("completed");
+  });
+
+  it.each(["interaction", "pause"] as const)(
+    "keeps an existing-wake dependent blocked under an active %s suppression gate",
+    async (gate) => {
+      const { companyId, agentId, blockedIssueId, blockerIssueId } =
+        await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      await db.insert(agentWakeupRequests).values({
+        companyId,
+        agentId,
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_blockers_resolved",
+        payload: {
+          issueId: blockedIssueId,
+          resolvedBlockerIssueId: blockerIssueId,
+          blockerIssueIds: [blockerIssueId],
+        },
+        status: "queued",
+        idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+          dependentIssueId: blockedIssueId,
+          blockerIssueIds: [blockerIssueId],
+        }),
+      });
+      if (gate === "interaction") {
+        await db.insert(issueThreadInteractions).values({
+          companyId,
+          issueId: blockedIssueId,
+          kind: "request_confirmation",
+          status: "pending",
+          continuationPolicy: "wake_assignee",
+          payload: { version: 1, prompt: "Continue dependency recovery?" },
+        });
+      } else {
+        await db.insert(issueTreeHolds).values({
+          companyId,
+          rootIssueId: blockedIssueId,
+          mode: "pause",
+          status: "active",
+          reason: "operator paused dependency recovery",
+          releasePolicy: { strategy: "manual" },
+        });
+      }
+
+      const result = await heartbeatService(db).reconcileIssueGraphLiveness();
+
+      expect(result.dependencyWakesHealed).toBe(0);
+      expect(result.dependencyWakeExistingSkipped).toBe(1);
+      expect(gate === "interaction" ? result.dependencyWakeInteractionSkipped : result.dependencyWakePauseHoldSkipped)
+        .toBe(1);
+      const [dependent] = await db.select({ status: issues.status })
+        .from(issues)
+        .where(eq(issues.id, blockedIssueId));
+      expect(dependent?.status).toBe("blocked");
+    },
+  );
+
+  it("timestamps an existing-wake repair after waiting for the dependent lock", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: blockedIssueId,
+        resolvedBlockerIssueId: blockerIssueId,
+        blockerIssueIds: [blockerIssueId],
+      },
+      status: "queued",
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: blockedIssueId,
+        blockerIssueIds: [blockerIssueId],
+      }),
+    });
+
+    let signalLockAcquired!: () => void;
+    const lockAcquired = new Promise<void>((resolve) => { signalLockAcquired = resolve; });
+    let releaseIssueLock!: () => void;
+    const issueLockRelease = new Promise<void>((resolve) => { releaseIssueLock = resolve; });
+    let concurrentUpdatedAt!: Date;
+    const concurrentMutation = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id })
+        .from(issues)
+        .where(eq(issues.id, blockedIssueId))
+        .for("update");
+      signalLockAcquired();
+      await issueLockRelease;
+      concurrentUpdatedAt = new Date();
+      await tx.update(issues)
+        .set({ title: "Concurrent non-readiness update", updatedAt: concurrentUpdatedAt })
+        .where(eq(issues.id, blockedIssueId));
+    });
+    await lockAcquired;
+
+    const reconciliation = heartbeatService(db).reconcileIssueGraphLiveness();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    releaseIssueLock();
+    await concurrentMutation;
+    const result = await reconciliation;
+
+    expect(result.dependencyWakesHealed).toBe(1);
+    const [dependent] = await db.select({
+      status: issues.status,
+      title: issues.title,
+      updatedAt: issues.updatedAt,
+    }).from(issues).where(eq(issues.id, blockedIssueId));
+    expect(dependent).toMatchObject({ status: "todo", title: "Concurrent non-readiness update" });
+    expect(dependent!.updatedAt.getTime()).toBeGreaterThanOrEqual(concurrentUpdatedAt.getTime());
   });
 
   it("heals a multi-blocker dependent when only a completed wake for an earlier blocker exists", async () => {

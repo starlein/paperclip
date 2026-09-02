@@ -904,8 +904,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return Boolean(run || deferredWake);
   }
 
-  async function hasPendingWakeInteraction(companyId: string, issueId: string) {
-    return db
+  async function hasPendingWakeInteraction(companyId: string, issueId: string, queryDb: Db = db) {
+    return queryDb
       .select({ id: issueThreadInteractions.id })
       .from(issueThreadInteractions)
       .where(
@@ -5303,15 +5303,16 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           // cannot cover an issue that is still blocked: fall through and emit
           // a fresh bounded recovery wake for that stranded state.
           if (existingWake.status !== "completed") {
-            const now = new Date();
-            const repaired = await db.transaction(async (tx) => {
+            const repairResult = await db.transaction(async (tx): Promise<
+              "repaired" | "interaction_suppressed" | "pause_suppressed" | "not_repaired"
+            > => {
               const lockedIssue = await issuesSvc.getByIdForUpdate(candidate.id, tx);
               if (
                 !lockedIssue ||
                 lockedIssue.companyId !== companyId ||
                 lockedIssue.status !== "blocked" ||
                 lockedIssue.assigneeAgentId !== agentId
-              ) return false;
+              ) return "not_repaired";
 
               const lockedReadiness = (await issuesSvc.listDependencyReadiness(
                 companyId,
@@ -5322,7 +5323,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                 !lockedReadiness ||
                 !lockedReadiness.isDependencyReady ||
                 lockedReadiness.blockerIssueIds.length === 0
-              ) return false;
+              ) return "not_repaired";
 
               const lockedWake = await findExistingIssueBlockersResolvedWakeForReadyState(
                 tx as unknown as Db,
@@ -5335,8 +5336,21 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                   lockForUpdate: true,
                 },
               );
-              if (!lockedWake || lockedWake.status === "completed") return false;
+              if (!lockedWake || lockedWake.status === "completed") return "not_repaired";
 
+              if (await hasPendingWakeInteraction(companyId, candidate.id, tx as unknown as Db)) {
+                return "interaction_suppressed";
+              }
+              if (await isAutomaticRecoverySuppressedByPauseHold(
+                tx as unknown as Db,
+                companyId,
+                candidate.id,
+                issueTreeControlService(tx as unknown as Db),
+              )) {
+                return "pause_suppressed";
+              }
+
+              const now = new Date();
               const updated = await tx
                 .update(issues)
                 .set({
@@ -5356,7 +5370,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                   ),
                 )
                 .returning({ id: issues.id });
-              if (updated.length === 0) return false;
+              if (updated.length === 0) return "not_repaired";
 
               await logActivity(tx as unknown as Db, {
                 companyId,
@@ -5376,10 +5390,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                   blockerIssueIds: lockedReadiness.blockerIssueIds,
                 },
               });
-              return true;
+              return "repaired";
             });
             result.existingWakeSkipped += 1;
-            if (repaired) {
+            if (repairResult === "interaction_suppressed") {
+              result.interactionSkipped += 1;
+            } else if (repairResult === "pause_suppressed") {
+              result.pauseHoldSkipped += 1;
+            } else if (repairResult === "repaired") {
               result.healed += 1;
               result.issueIds.push(candidate.id);
             }

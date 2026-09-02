@@ -677,6 +677,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       "assigneeUserId",
       "blockedByIssueIds",
       "parentId",
+      "executionPolicy",
     ].some((key) =>
       Object.prototype.hasOwnProperty.call(details, key) ||
       Object.prototype.hasOwnProperty.call(changes, key),
