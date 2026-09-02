@@ -920,6 +920,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       .then((rows) => Boolean(rows[0]));
   }
 
+  async function hasPendingWakeApproval(companyId: string, issueId: string, queryDb: Db = db) {
+    return queryDb
+      .select({ id: issueApprovals.approvalId })
+      .from(issueApprovals)
+      .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+      .where(
+        and(
+          eq(issueApprovals.companyId, companyId),
+          eq(issueApprovals.issueId, issueId),
+          inArray(approvals.status, ["pending", "revision_requested"]),
+        ),
+      )
+      .limit(1)
+      .then((rows) => Boolean(rows[0]));
+  }
+
   async function hasPersistedDurableWaitPath(issue: typeof issues.$inferSelect) {
     if (issue.monitorNextCheckAt) return true;
 
@@ -5157,6 +5173,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       existingWakeSkipped: 0,
       livePathSkipped: 0,
       interactionSkipped: 0,
+      approvalSkipped: 0,
       pauseHoldSkipped: 0,
       notReadySkipped: 0,
       candidateLimitSkipped: 0,
@@ -5304,7 +5321,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           // a fresh bounded recovery wake for that stranded state.
           if (existingWake.status !== "completed") {
             const repairResult = await db.transaction(async (tx): Promise<
-              "repaired" | "interaction_suppressed" | "pause_suppressed" | "not_repaired"
+              "repaired" | "interaction_suppressed" | "approval_suppressed" | "pause_suppressed" | "not_repaired"
             > => {
               const lockedIssue = await issuesSvc.getByIdForUpdate(candidate.id, tx);
               if (
@@ -5340,6 +5357,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
               if (await hasPendingWakeInteraction(companyId, candidate.id, tx as unknown as Db)) {
                 return "interaction_suppressed";
+              }
+              if (await hasPendingWakeApproval(companyId, candidate.id, tx as unknown as Db)) {
+                return "approval_suppressed";
               }
               if (await isAutomaticRecoverySuppressedByPauseHold(
                 tx as unknown as Db,
@@ -5395,6 +5415,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             result.existingWakeSkipped += 1;
             if (repairResult === "interaction_suppressed") {
               result.interactionSkipped += 1;
+            } else if (repairResult === "approval_suppressed") {
+              result.approvalSkipped += 1;
             } else if (repairResult === "pause_suppressed") {
               result.pauseHoldSkipped += 1;
             } else if (repairResult === "repaired") {
@@ -5415,6 +5437,11 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
         if (await hasPendingWakeInteraction(companyId, candidate.id)) {
           result.interactionSkipped += 1;
+          continue;
+        }
+
+        if (await hasPendingWakeApproval(companyId, candidate.id)) {
+          result.approvalSkipped += 1;
           continue;
         }
 
@@ -5557,6 +5584,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       dependencyWakeExistingSkipped: 0,
       dependencyWakeLivePathSkipped: 0,
       dependencyWakeInteractionSkipped: 0,
+      dependencyWakeApprovalSkipped: 0,
       dependencyWakePauseHoldSkipped: 0,
       dependencyWakeNotReadySkipped: 0,
       dependencyWakeCandidateLimitSkipped: 0,
@@ -5576,6 +5604,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     result.dependencyWakeExistingSkipped = dependencyWakeBackstop.existingWakeSkipped;
     result.dependencyWakeLivePathSkipped = dependencyWakeBackstop.livePathSkipped;
     result.dependencyWakeInteractionSkipped = dependencyWakeBackstop.interactionSkipped;
+    result.dependencyWakeApprovalSkipped = dependencyWakeBackstop.approvalSkipped;
     result.dependencyWakePauseHoldSkipped = dependencyWakeBackstop.pauseHoldSkipped;
     result.dependencyWakeNotReadySkipped = dependencyWakeBackstop.notReadySkipped;
     result.dependencyWakeCandidateLimitSkipped = dependencyWakeBackstop.candidateLimitSkipped;

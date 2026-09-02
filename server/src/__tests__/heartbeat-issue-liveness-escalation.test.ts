@@ -6,6 +6,7 @@ import {
   agents,
   agentWakeupRequests,
   agentRuntimeState,
+  approvals,
   budgetPolicies,
   companies,
   companyMemberships,
@@ -16,6 +17,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueApprovals,
   issueRelations,
   issueThreadInteractions,
   issueTreeHoldMembers,
@@ -114,6 +116,8 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     await db.delete(workspaceOperations);
     await db.delete(issueComments);
     await db.delete(issueThreadInteractions);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(issueTreeHoldMembers);
     await db.delete(issueTreeHolds);
     await db.delete(issueRelations);
@@ -1049,7 +1053,7 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     expect(completedWake?.status).toBe("completed");
   });
 
-  it.each(["interaction", "pause"] as const)(
+  it.each(["interaction", "approval", "pause"] as const)(
     "keeps an existing-wake dependent blocked under an active %s suppression gate",
     async (gate) => {
       const { companyId, agentId, blockedIssueId, blockerIssueId } =
@@ -1080,6 +1084,18 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
           continuationPolicy: "wake_assignee",
           payload: { version: 1, prompt: "Continue dependency recovery?" },
         });
+      } else if (gate === "approval") {
+        const [approval] = await db.insert(approvals).values({
+          companyId,
+          type: "dependency_recovery_review",
+          status: "pending",
+          payload: {},
+        }).returning({ id: approvals.id });
+        await db.insert(issueApprovals).values({
+          companyId,
+          issueId: blockedIssueId,
+          approvalId: approval!.id,
+        });
       } else {
         await db.insert(issueTreeHolds).values({
           companyId,
@@ -1095,14 +1111,136 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
 
       expect(result.dependencyWakesHealed).toBe(0);
       expect(result.dependencyWakeExistingSkipped).toBe(1);
-      expect(gate === "interaction" ? result.dependencyWakeInteractionSkipped : result.dependencyWakePauseHoldSkipped)
-        .toBe(1);
+      expect(
+        gate === "interaction"
+          ? result.dependencyWakeInteractionSkipped
+          : gate === "approval"
+            ? result.dependencyWakeApprovalSkipped
+            : result.dependencyWakePauseHoldSkipped,
+      ).toBe(1);
       const [dependent] = await db.select({ status: issues.status })
         .from(issues)
         .where(eq(issues.id, blockedIssueId));
       expect(dependent?.status).toBe("blocked");
     },
   );
+
+  it.each(["interaction", "approval"] as const)(
+    "does not make a dependency-ready issue runnable while a pending %s remains",
+    async (gate) => {
+      const { companyId, agentId, blockedIssueId, blockerIssueId } =
+        await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      if (gate === "interaction") {
+        await db.insert(issueThreadInteractions).values({
+          companyId,
+          issueId: blockedIssueId,
+          kind: "request_confirmation",
+          status: "pending",
+          continuationPolicy: "wake_assignee",
+          payload: { version: 1, prompt: "Continue dependency recovery?" },
+        });
+      } else {
+        const [approval] = await db.insert(approvals).values({
+          companyId,
+          type: "dependency_recovery_review",
+          status: "pending",
+          payload: {},
+        }).returning({ id: approvals.id });
+        await db.insert(issueApprovals).values({
+          companyId,
+          issueId: blockedIssueId,
+          approvalId: approval!.id,
+        });
+      }
+      const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: blockedIssueId,
+        blockerIssueIds: [blockerIssueId],
+      });
+
+      const run = await heartbeatService(db).wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_blockers_resolved",
+        payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerIssueId },
+        idempotencyKey,
+        contextSnapshot: { issueId: blockedIssueId, taskId: blockedIssueId },
+      });
+
+      expect(run).toBeNull();
+      const [dependent] = await db.select({ status: issues.status })
+        .from(issues)
+        .where(eq(issues.id, blockedIssueId));
+      expect(dependent?.status).toBe("blocked");
+      const [skipped] = await db.select({ reason: agentWakeupRequests.reason })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, idempotencyKey));
+      expect(skipped?.reason).toBe("issue_blockers_resolved_wait_gate");
+    },
+  );
+
+  it("rejects a dependency wake from an earlier blocked cycle", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const firstCycle = new Date("2026-08-04T10:00:00.000Z");
+    const secondCycle = new Date("2026-08-04T10:05:00.000Z");
+    await db.update(issues)
+      .set({ blockedTransitionAt: firstCycle })
+      .where(eq(issues.id, blockedIssueId));
+    const staleKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerIssueId],
+      blockedTransitionAt: firstCycle,
+    });
+
+    let signalLockAcquired!: () => void;
+    const lockAcquired = new Promise<void>((resolve) => { signalLockAcquired = resolve; });
+    let releaseIssueLock!: () => void;
+    const issueLockRelease = new Promise<void>((resolve) => { releaseIssueLock = resolve; });
+    const concurrentCycle = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id })
+        .from(issues)
+        .where(eq(issues.id, blockedIssueId))
+        .for("update");
+      signalLockAcquired();
+      await issueLockRelease;
+      await tx.update(issues)
+        .set({
+          status: "blocked",
+          blockedTransitionAt: secondCycle,
+          unblockDescriptor: { owner: "board", action: "Wait for the current blocked cycle" },
+        })
+        .where(eq(issues.id, blockedIssueId));
+    });
+    await lockAcquired;
+
+    const wake = heartbeatService(db).wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerIssueId },
+      idempotencyKey: staleKey,
+      contextSnapshot: { issueId: blockedIssueId, taskId: blockedIssueId },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    releaseIssueLock();
+    await concurrentCycle;
+    expect(await wake).toBeNull();
+
+    const [dependent] = await db.select({
+      status: issues.status,
+      blockedTransitionAt: issues.blockedTransitionAt,
+      unblockDescriptor: issues.unblockDescriptor,
+    }).from(issues).where(eq(issues.id, blockedIssueId));
+    expect(dependent).toMatchObject({
+      status: "blocked",
+      blockedTransitionAt: secondCycle,
+      unblockDescriptor: { owner: "board", action: "Wait for the current blocked cycle" },
+    });
+    const [skipped] = await db.select({ reason: agentWakeupRequests.reason })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.idempotencyKey, staleKey));
+    expect(skipped?.reason).toBe("issue_blockers_resolved_stale_cycle");
+  });
 
   it("timestamps an existing-wake repair after waiting for the dependent lock", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =

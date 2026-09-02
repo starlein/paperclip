@@ -171,7 +171,10 @@ import { authorizationService, type AuthorizationActor } from "./authorization.j
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
+import {
+  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  buildIssueBlockersResolvedWakeStateKey,
+} from "./issue-dependency-wakeups.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -18833,6 +18836,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             executionWorkspacePreference: issues.executionWorkspacePreference,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
             assigneeAgentId: issues.assigneeAgentId,
+            blockedTransitionAt: issues.blockedTransitionAt,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
             createdAt: issues.createdAt,
@@ -19089,12 +19093,93 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           [issue.id],
           tx,
         ).then((rows) => rows.get(issue.id) ?? null);
-        const isResolvedDependencyAssigneeWake =
+        const isResolvedDependencyAssigneeCandidate =
           reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON &&
           issue.status === "blocked" &&
           issue.assigneeAgentId === agentId &&
           dependencyReadiness?.isDependencyReady === true &&
           dependencyReadiness.blockerIssueIds.length > 0;
+        const currentResolvedDependencyWakeKey = isResolvedDependencyAssigneeCandidate
+          ? buildIssueBlockersResolvedWakeStateKey({
+              dependentIssueId: issue.id,
+              blockerIssueIds: dependencyReadiness.blockerIssueIds,
+              blockedTransitionAt: issue.blockedTransitionAt,
+            })
+          : null;
+        const [pendingDependencyInteraction, pendingDependencyApproval, activeDependencyPauseHold] =
+          isResolvedDependencyAssigneeCandidate
+            ? await Promise.all([
+                tx
+                  .select({ id: issueThreadInteractions.id })
+                  .from(issueThreadInteractions)
+                  .where(and(
+                    eq(issueThreadInteractions.companyId, issue.companyId),
+                    eq(issueThreadInteractions.issueId, issue.id),
+                    eq(issueThreadInteractions.status, "pending"),
+                    inArray(issueThreadInteractions.continuationPolicy, [
+                      "wake_assignee",
+                      "wake_assignee_on_accept",
+                    ]),
+                  ))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null),
+                tx
+                  .select({ id: issueApprovals.approvalId })
+                  .from(issueApprovals)
+                  .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+                  .where(and(
+                    eq(issueApprovals.companyId, issue.companyId),
+                    eq(issueApprovals.issueId, issue.id),
+                    inArray(approvals.status, ["pending", "revision_requested"]),
+                  ))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null),
+                issueTreeControlService(tx as unknown as Db)
+                  .getActivePauseHoldGate(issue.companyId, issue.id),
+              ])
+            : [null, null, null];
+        const resolvedDependencySuppressionReason = pendingDependencyInteraction
+          ? "pending_interaction"
+          : pendingDependencyApproval
+            ? "pending_approval"
+            : activeDependencyPauseHold
+              ? "active_pause_hold"
+              : null;
+        const isResolvedDependencyAssigneeWake =
+          isResolvedDependencyAssigneeCandidate &&
+          opts.idempotencyKey === currentResolvedDependencyWakeKey &&
+          resolvedDependencySuppressionReason === null;
+
+        if (isResolvedDependencyAssigneeCandidate && !isResolvedDependencyAssigneeWake) {
+          const skipReason = resolvedDependencySuppressionReason
+            ? "issue_blockers_resolved_wait_gate"
+            : "issue_blockers_resolved_stale_cycle";
+          await tx.insert(agentWakeupRequests).values({
+            companyId: agent.companyId,
+            agentId,
+            source,
+            triggerDetail,
+            reason: skipReason,
+            payload: {
+              ...(payload ?? {}),
+              heartbeatSkip: {
+                reason: resolvedDependencySuppressionReason
+                  ? "A pending issue wait still suppresses dependency recovery."
+                  : "The blocked issue cycle changed before the dependency wake could be queued.",
+                issueId: issue.id,
+                suppressionReason: resolvedDependencySuppressionReason,
+                requestedIdempotencyKey: opts.idempotencyKey ?? null,
+                currentIdempotencyKey: currentResolvedDependencyWakeKey,
+              },
+            },
+            status: "skipped",
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+            finishedAt: new Date(),
+          });
+          return { kind: "skipped" as const };
+        }
         let resolvedDependencyDispositionMoved = false;
         const moveResolvedDependencyToRunnableDisposition = async () => {
           if (!isResolvedDependencyAssigneeWake || resolvedDependencyDispositionMoved) return;
