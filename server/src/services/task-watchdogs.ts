@@ -619,7 +619,12 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   );
   if (!currentWatchedSource) return false;
 
-  const [blockerEdge, issueRecoveryActivities, approvalRecoveryActivities] = await Promise.all([
+  const [
+    blockerEdge,
+    issueRecoveryActivities,
+    approvalRecoveryActivities,
+    watchedIssueInteractions,
+  ] = await Promise.all([
     input.db
       .select({
         createdByActorType: issueRelations.createdByActorType,
@@ -682,6 +687,17 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
         eq(issueApprovals.issueId, input.watchedIssueId),
         gte(activityLog.createdAt, input.watchdogTriggeredAt),
       )),
+    input.db
+      .select({
+        id: issueThreadInteractions.id,
+        continuationPolicy: issueThreadInteractions.continuationPolicy,
+        effectiveResolverPolicy: issueThreadInteractions.effectiveResolverPolicy,
+      })
+      .from(issueThreadInteractions)
+      .where(and(
+        eq(issueThreadInteractions.companyId, input.companyId),
+        eq(issueThreadInteractions.issueId, input.watchedIssueId),
+      )),
   ]);
 
   if (
@@ -694,12 +710,27 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     blockerEdge.blockerOriginId !== input.watchedIssueId
   ) return false;
 
+  const materialInteractionIds = new Set(
+    watchedIssueInteractions
+      .filter((interaction) =>
+        (interaction.continuationPolicy === "wake_assignee" ||
+          interaction.continuationPolicy === "wake_assignee_on_accept") &&
+        (interaction.effectiveResolverPolicy === "anyone" ||
+          interaction.effectiveResolverPolicy === "not_creator" ||
+          interaction.effectiveResolverPolicy === "human_only"),
+      )
+      .map((interaction) => interaction.id),
+  );
   const materialRecoveryActivities = [
     ...issueRecoveryActivities,
     ...approvalRecoveryActivities,
   ].filter((activity) => {
-    if (activity.action !== "issue.updated") return true;
     const details = parseObject(activity.details);
+    if (activity.action.startsWith("issue.thread_interaction_")) {
+      const interactionId = typeof details.interactionId === "string" ? details.interactionId : null;
+      return interactionId != null && materialInteractionIds.has(interactionId);
+    }
+    if (activity.action !== "issue.updated") return true;
     if (details.source === "recovery.reconcile_continuation_waiting_on_review") return true;
     const changes = parseObject(details.changes);
     return [

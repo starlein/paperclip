@@ -1242,6 +1242,74 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
     expect(skipped?.reason).toBe("issue_blockers_resolved_stale_cycle");
   });
 
+  it.each(["reassigned", "done"] as const)(
+    "rejects a dependency wake after the dependent is %s before lock acquisition",
+    async (mutation) => {
+      const { companyId, agentId, mentionAgentId, blockedIssueId, blockerIssueId } =
+        await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+      const blockedTransitionAt = new Date("2026-08-04T11:00:00.000Z");
+      await db.update(issues)
+        .set({ blockedTransitionAt })
+        .where(eq(issues.id, blockedIssueId));
+      const wakeKey = buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: blockedIssueId,
+        blockerIssueIds: [blockerIssueId],
+        blockedTransitionAt,
+      });
+
+      let signalLockAcquired!: () => void;
+      const lockAcquired = new Promise<void>((resolve) => { signalLockAcquired = resolve; });
+      let releaseIssueLock!: () => void;
+      const issueLockRelease = new Promise<void>((resolve) => { releaseIssueLock = resolve; });
+      const concurrentMutation = db.transaction(async (tx) => {
+        await tx.select({ id: issues.id })
+          .from(issues)
+          .where(eq(issues.id, blockedIssueId))
+          .for("update");
+        signalLockAcquired();
+        await issueLockRelease;
+        await tx.update(issues)
+          .set(mutation === "reassigned"
+            ? { assigneeAgentId: mentionAgentId }
+            : { status: "done" })
+          .where(eq(issues.id, blockedIssueId));
+      });
+      await lockAcquired;
+
+      const wake = heartbeatService(db).wakeup(agentId, {
+        source: "automation",
+        triggerDetail: "system",
+        reason: "issue_blockers_resolved",
+        payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerIssueId },
+        idempotencyKey: wakeKey,
+        contextSnapshot: { issueId: blockedIssueId, taskId: blockedIssueId },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      releaseIssueLock();
+      await concurrentMutation;
+      expect(await wake).toBeNull();
+
+      const [dependent] = await db.select({
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+      }).from(issues).where(eq(issues.id, blockedIssueId));
+      expect(dependent).toMatchObject(mutation === "reassigned"
+        ? { status: "blocked", assigneeAgentId: mentionAgentId }
+        : { status: "done", assigneeAgentId: agentId });
+      const [skipped] = await db.select({ reason: agentWakeupRequests.reason })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, wakeKey));
+      expect(skipped?.reason).toBe("issue_blockers_resolved_state_mismatch");
+      const oldAssigneeRuns = await db.select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, agentId),
+        ));
+      expect(oldAssigneeRuns).toHaveLength(0);
+    },
+  );
+
   it("timestamps an existing-wake repair after waiting for the dependent lock", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });

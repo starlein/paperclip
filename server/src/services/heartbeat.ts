@@ -19150,10 +19150,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           opts.idempotencyKey === currentResolvedDependencyWakeKey &&
           resolvedDependencySuppressionReason === null;
 
-        if (isResolvedDependencyAssigneeCandidate && !isResolvedDependencyAssigneeWake) {
-          const skipReason = resolvedDependencySuppressionReason
-            ? "issue_blockers_resolved_wait_gate"
-            : "issue_blockers_resolved_stale_cycle";
+        if (reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON && !isResolvedDependencyAssigneeWake) {
+          const skipReason = !isResolvedDependencyAssigneeCandidate
+            ? "issue_blockers_resolved_state_mismatch"
+            : resolvedDependencySuppressionReason
+              ? "issue_blockers_resolved_wait_gate"
+              : "issue_blockers_resolved_stale_cycle";
           await tx.insert(agentWakeupRequests).values({
             companyId: agent.companyId,
             agentId,
@@ -19163,10 +19165,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             payload: {
               ...(payload ?? {}),
               heartbeatSkip: {
-                reason: resolvedDependencySuppressionReason
-                  ? "A pending issue wait still suppresses dependency recovery."
-                  : "The blocked issue cycle changed before the dependency wake could be queued.",
+                reason: !isResolvedDependencyAssigneeCandidate
+                  ? "The issue is no longer blocked and dependency-ready for the requested assignee."
+                  : resolvedDependencySuppressionReason
+                    ? "A pending issue wait still suppresses dependency recovery."
+                    : "The blocked issue cycle changed before the dependency wake could be queued.",
                 issueId: issue.id,
+                actualStatus: issue.status,
+                actualAssigneeAgentId: issue.assigneeAgentId,
                 suppressionReason: resolvedDependencySuppressionReason,
                 requestedIdempotencyKey: opts.idempotencyKey ?? null,
                 currentIdempotencyKey: currentResolvedDependencyWakeKey,

@@ -178,6 +178,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     const blockerId = randomUUID();
     const blockedIssueId = randomUUID();
     const readyIssueId = randomUUID();
+    const blockedTransitionAt = new Date("2026-09-02T08:00:00.000Z");
 
     await db.insert(companies).values({
       id: companyId,
@@ -215,10 +216,11 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         id: blockedIssueId,
         companyId,
         title: "Mission 2",
-        status: "todo",
+        status: "blocked",
         priority: "medium",
         assigneeAgentId: agentId,
         responsibleUserId: "responsible-user",
+        blockedTransitionAt,
       },
       {
         id: readyIssueId,
@@ -362,6 +364,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       dependencyBlockedInteraction: true,
       unresolvedBlockerIssueIds: [blockerId],
     });
+    await db.update(issueThreadInteractions)
+      .set({ status: "accepted", resolvedAt: new Date() })
+      .where(eq(issueThreadInteractions.id, pendingInteractionId));
 
     let finishReadyRun!: () => void;
     const readyRunCanFinish = new Promise<void>((resolve) => {
@@ -420,18 +425,31 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       .set({ status: "done", updatedAt: new Date() })
       .where(eq(issues.id, blockerId));
 
+    const promotedWakeKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerId],
+      blockedTransitionAt,
+    });
+
     const promotedWake = await heartbeat.wakeup(agentId, {
       source: "automation",
       triggerDetail: "system",
       reason: "issue_blockers_resolved",
       payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerId },
+      idempotencyKey: promotedWakeKey,
       contextSnapshot: {
         issueId: blockedIssueId,
         wakeReason: "issue_blockers_resolved",
         resolvedBlockerIssueId: blockerId,
       },
     });
-    expect(promotedWake).not.toBeNull();
+    const promotedWakeRequests = await db.select({
+      status: agentWakeupRequests.status,
+      reason: agentWakeupRequests.reason,
+      payload: agentWakeupRequests.payload,
+    }).from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.idempotencyKey, promotedWakeKey));
+    expect(promotedWake, JSON.stringify(promotedWakeRequests)).not.toBeNull();
 
     await waitForCondition(async () => {
       const run = await db

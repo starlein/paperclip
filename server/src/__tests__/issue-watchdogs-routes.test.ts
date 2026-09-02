@@ -18,6 +18,7 @@ import {
   issueComments,
   issueApprovals,
   issueRelations,
+  issueThreadInteractions,
   issueWatchdogs,
   issues,
   principalPermissionGrants,
@@ -80,6 +81,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     runningProcesses.clear();
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     await db.delete(activityLog);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueComments);
     await db.delete(issueApprovals);
     await db.delete(approvals);
@@ -1017,6 +1019,18 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
         createdAt: new Date(Date.now() - 5_000),
       });
+      const interactionId = _kind === "interaction" ? randomUUID() : null;
+      if (interactionId) {
+        await db.insert(issueThreadInteractions).values({
+          id: interactionId,
+          companyId: fixture.companyId,
+          issueId: fixture.sourceIssueId,
+          kind: "request_confirmation",
+          status: "accepted",
+          continuationPolicy: "wake_assignee_on_accept",
+          payload: { version: 1, prompt: "Continue?" },
+        });
+      }
       await db.insert(activityLog).values([
         {
           companyId: fixture.companyId,
@@ -1025,7 +1039,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
           action: openedAction,
           entityType: "issue",
           entityId: fixture.sourceIssueId,
-          details: {},
+          details: interactionId ? { interactionId } : {},
           createdAt: new Date(Date.now() - 2_000),
         },
         {
@@ -1035,7 +1049,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
           action: closedAction,
           entityType: "issue",
           entityId: fixture.sourceIssueId,
-          details: {},
+          details: interactionId ? { interactionId } : {},
           createdAt: new Date(Date.now() - 1_000),
         },
       ]);
@@ -1049,6 +1063,52 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       expect(source?.executionPolicy).toEqual({ mode: "auto" });
     },
   );
+
+  it("keeps recovery authority across a non-waking interaction lifecycle", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId: fixture.companyId,
+      issueId: fixture.sourceIssueId,
+      kind: "request_confirmation",
+      status: "accepted",
+      continuationPolicy: "none",
+      payload: { version: 1, prompt: "Informational only" },
+    });
+    await db.insert(activityLog).values([
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.thread_interaction_created",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { interactionId },
+        createdAt: new Date(Date.now() - 2_000),
+      },
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.thread_interaction_accepted",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { interactionId },
+        createdAt: new Date(Date.now() - 1_000),
+      },
+    ]);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.executionPolicy).toBeNull();
+  });
 
   it("rejects recovery provenance superseded by a linked approval decision cycle", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({
