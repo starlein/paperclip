@@ -361,6 +361,133 @@ function parseStopSnapshot(value: unknown): TaskWatchdogStopSnapshot | null {
   return candidate as TaskWatchdogStopSnapshot;
 }
 
+function verifiedStopSnapshot(input: {
+  snapshot: TaskWatchdogStopSnapshot | null;
+  companyId: string;
+  watchedIssueId: string;
+  stopFingerprint: string;
+}) {
+  const { snapshot, companyId, watchedIssueId, stopFingerprint } = input;
+  if (!snapshot || snapshot.fingerprint !== stopFingerprint) return null;
+  const materialLeaves: TaskWatchdogMaterialLeaf[] = [];
+  for (const leaf of snapshot.materialLeaves) {
+    if (
+      typeof leaf.issueId !== "string" ||
+      typeof leaf.status !== "string" ||
+      (leaf.assigneeAgentId !== null && typeof leaf.assigneeAgentId !== "string") ||
+      (leaf.assigneeUserId !== null && typeof leaf.assigneeUserId !== "string") ||
+      !Array.isArray(leaf.blockerIssueIds) ||
+      !leaf.blockerIssueIds.every((id) => typeof id === "string") ||
+      !Array.isArray(leaf.pendingInteractionIds) ||
+      !leaf.pendingInteractionIds.every((id) => typeof id === "string") ||
+      !Array.isArray(leaf.pendingApprovalIds) ||
+      !leaf.pendingApprovalIds.every((id) => typeof id === "string")
+    ) return null;
+    materialLeaves.push({
+      issueId: leaf.issueId,
+      status: leaf.status,
+      assigneeAgentId: leaf.assigneeAgentId,
+      assigneeUserId: leaf.assigneeUserId,
+      blockerIssueIds: [...leaf.blockerIssueIds].sort(),
+      pendingInteractionIds: [...leaf.pendingInteractionIds].sort(),
+      pendingApprovalIds: [...leaf.pendingApprovalIds].sort(),
+    });
+  }
+  materialLeaves.sort((left, right) => left.issueId.localeCompare(right.issueId));
+  const waitsByIssueId: TaskWatchdogWaitsByIssueId = {};
+  for (const [issueId, waits] of Object.entries(snapshot.waitsByIssueId).sort(([left], [right]) =>
+    left.localeCompare(right))) {
+    if (
+      !Array.isArray(waits.pendingInteractionIds) ||
+      !waits.pendingInteractionIds.every((id) => typeof id === "string") ||
+      !Array.isArray(waits.pendingApprovalIds) ||
+      !waits.pendingApprovalIds.every((id) => typeof id === "string")
+    ) return null;
+    waitsByIssueId[issueId] = {
+      pendingInteractionIds: [...waits.pendingInteractionIds].sort(),
+      pendingApprovalIds: [...waits.pendingApprovalIds].sort(),
+    };
+  }
+  const fingerprint = stableStopFingerprint({
+    companyId,
+    watchedIssueId,
+    materialLeaves,
+    waitsByIssueId,
+  });
+  return fingerprint === stopFingerprint
+    ? { version: 2 as const, fingerprint, materialLeaves, waitsByIssueId }
+    : null;
+}
+
+function stopSnapshotFromRunContext(input: {
+  contextSnapshot: unknown;
+  companyId: string;
+  watchedIssueId: string;
+  stopFingerprint: string;
+}) {
+  const context = parseObject(input.contextSnapshot);
+  const taskWatchdog = parseObject(context.taskWatchdog);
+  if (!Array.isArray(taskWatchdog.terminalLeafSummaries)) return null;
+  const materialLeaves: TaskWatchdogMaterialLeaf[] = [];
+  for (const value of taskWatchdog.terminalLeafSummaries) {
+    const leaf = parseObject(value);
+    if (typeof leaf.issueId !== "string" || typeof leaf.status !== "string") return null;
+    if (isTerminalIssueStatus(leaf.status)) continue;
+    if (
+      (leaf.assigneeAgentId !== null && typeof leaf.assigneeAgentId !== "string") ||
+      (leaf.assigneeUserId !== null && typeof leaf.assigneeUserId !== "string") ||
+      !Array.isArray(leaf.blockerIssueIds) ||
+      !leaf.blockerIssueIds.every((id) => typeof id === "string") ||
+      !Array.isArray(leaf.pendingInteractionIds) ||
+      !leaf.pendingInteractionIds.every((id) => typeof id === "string") ||
+      !Array.isArray(leaf.pendingApprovalIds) ||
+      !leaf.pendingApprovalIds.every((id) => typeof id === "string")
+    ) return null;
+    materialLeaves.push({
+      issueId: leaf.issueId,
+      status: leaf.status,
+      assigneeAgentId: leaf.assigneeAgentId,
+      assigneeUserId: leaf.assigneeUserId,
+      blockerIssueIds: [...leaf.blockerIssueIds].sort(),
+      pendingInteractionIds: [...leaf.pendingInteractionIds].sort(),
+      pendingApprovalIds: [...leaf.pendingApprovalIds].sort(),
+    });
+  }
+
+  const interactionsByIssueId = parseObject(taskWatchdog.pendingInteractions);
+  const approvalsByIssueId = parseObject(taskWatchdog.pendingApprovals);
+  const waitsByIssueId: TaskWatchdogWaitsByIssueId = {};
+  for (const issueId of new Set([
+    ...Object.keys(interactionsByIssueId),
+    ...Object.keys(approvalsByIssueId),
+  ])) {
+    const interactionValues = interactionsByIssueId[issueId] ?? [];
+    const approvalValues = approvalsByIssueId[issueId] ?? [];
+    if (!Array.isArray(interactionValues) || !Array.isArray(approvalValues)) return null;
+    const pendingInteractionIds = interactionValues.map((value) => parseObject(value).id);
+    if (
+      !pendingInteractionIds.every((id) => typeof id === "string") ||
+      !approvalValues.every((id) => typeof id === "string")
+    ) return null;
+    waitsByIssueId[issueId] = {
+      pendingInteractionIds: (pendingInteractionIds as string[]).sort(),
+      pendingApprovalIds: [...approvalValues].sort() as string[],
+    };
+  }
+
+  return verifiedStopSnapshot({
+    snapshot: {
+      version: 2,
+      fingerprint: input.stopFingerprint,
+      materialLeaves,
+      waitsByIssueId,
+    },
+    companyId: input.companyId,
+    watchedIssueId: input.watchedIssueId,
+    stopFingerprint: input.stopFingerprint,
+  });
+}
+
 // Snapshots loaded from jsonb columns come back with Postgres's normalized key
 // order, so equality checks against freshly built snapshots must not depend on
 // object key order.
@@ -385,6 +512,51 @@ function isShrinkOfReviewedSnapshot(
     const previous = reviewedLeaves.get(leaf.issueId);
     return previous != null && canonicalJson(previous) === canonicalJson(leaf);
   });
+}
+
+function isServerOwnedWatchdogBlockerTransition(input: {
+  observed: TaskWatchdogStopSnapshot | null;
+  current: TaskWatchdogStopSnapshot;
+  watchedIssueId: string;
+  watchdogIssueId: string | null;
+  stopFingerprint: string;
+}) {
+  const { observed, current, watchedIssueId, watchdogIssueId, stopFingerprint } = input;
+  if (
+    !observed ||
+    !watchdogIssueId ||
+    observed.fingerprint !== stopFingerprint ||
+    canonicalJson(observed.waitsByIssueId) !== canonicalJson(current.waitsByIssueId) ||
+    observed.materialLeaves.length !== current.materialLeaves.length
+  ) return false;
+
+  const observedLeaves = new Map(observed.materialLeaves.map((leaf) => [leaf.issueId, leaf]));
+  let acceptedSelfBlocker = false;
+  for (const leaf of current.materialLeaves) {
+    const previous = observedLeaves.get(leaf.issueId);
+    if (!previous) return false;
+    if (leaf.issueId !== watchedIssueId) {
+      if (canonicalJson(previous) !== canonicalJson(leaf)) return false;
+      continue;
+    }
+
+    const expectedBlockerIssueIds = [...new Set([
+      ...previous.blockerIssueIds,
+      watchdogIssueId,
+    ])].sort();
+    if (
+      previous.blockerIssueIds.includes(watchdogIssueId) ||
+      canonicalJson(leaf.blockerIssueIds) !== canonicalJson(expectedBlockerIssueIds) ||
+      (leaf.status !== previous.status && leaf.status !== "blocked") ||
+      leaf.assigneeAgentId !== previous.assigneeAgentId ||
+      leaf.assigneeUserId !== previous.assigneeUserId ||
+      canonicalJson(leaf.pendingInteractionIds) !== canonicalJson(previous.pendingInteractionIds) ||
+      canonicalJson(leaf.pendingApprovalIds) !== canonicalJson(previous.pendingApprovalIds)
+    ) return false;
+    acceptedSelfBlocker = true;
+  }
+
+  return acceptedSelfBlocker;
 }
 
 export function classifyTaskWatchdogSubtree(input: TaskWatchdogClassifierInput): TaskWatchdogClassifierResult {
@@ -1803,6 +1975,40 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
       return { allowed: true as const, classification };
+    }
+    if (classification.state === "stopped") {
+      // Reconciliation can persist the server-added watchdog blocker before
+      // this run writes. The immutable wake context is the run's baseline;
+      // the watchdog row may already contain the newer self-blocked snapshot.
+      const run = scope.runId
+        ? await db
+          .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+          .from(heartbeatRuns)
+          .where(and(
+            eq(heartbeatRuns.id, scope.runId),
+            eq(heartbeatRuns.companyId, watchdog.companyId),
+            eq(heartbeatRuns.agentId, watchdog.watchdogAgentId),
+          ))
+          .then((rows) => rows[0] ?? null)
+        : null;
+      const observed = stopSnapshotFromRunContext({
+        contextSnapshot: run?.contextSnapshot,
+        companyId: watchdog.companyId,
+        watchedIssueId: watchdog.issueId,
+        stopFingerprint: scope.stopFingerprint,
+      }) ?? verifiedStopSnapshot({
+        snapshot: parseStopSnapshot(watchdog.lastObservedStopSnapshot),
+        companyId: watchdog.companyId,
+        watchedIssueId: watchdog.issueId,
+        stopFingerprint: scope.stopFingerprint,
+      });
+      if (isServerOwnedWatchdogBlockerTransition({
+        observed,
+        current: classification.stopSnapshot,
+        watchedIssueId: watchdog.issueId,
+        watchdogIssueId: watchdog.watchdogIssueId,
+        stopFingerprint: scope.stopFingerprint,
+      })) return { allowed: true as const, classification };
     }
 
     return {
