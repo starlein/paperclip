@@ -628,6 +628,7 @@ async function loadMaterialWatchdogRecoveryActivities(input: {
   observedStopSnapshot: TaskWatchdogStopSnapshot;
   current: TaskWatchdogStopSnapshot;
   watchdogTriggeredAt: Date;
+  watchdogRunId?: string | null;
 }) {
   const [issueRecoveryActivities, subtreeInteractions] = await Promise.all([
     input.db
@@ -765,6 +766,11 @@ async function loadMaterialWatchdogRecoveryActivities(input: {
     ...issueRecoveryActivities,
     ...approvalRecoveryActivities,
   ].filter((activity) => {
+    // A watchdog recovery run is allowed to apply a bounded batch of
+    // mutations. Its own earlier writes are not concurrent subtree evidence;
+    // only activity from another actor/run invalidates the immutable wake
+    // snapshot for the next mutation in that batch.
+    if (input.watchdogRunId && activity.runId === input.watchdogRunId) return false;
     const details = parseObject(activity.details);
     if (activity.action.startsWith("issue.thread_interaction_")) {
       const interactionId = typeof details.interactionId === "string" ? details.interactionId : null;
@@ -864,6 +870,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   observedWatchedSource: TaskWatchdogMaterialLeaf;
   current: TaskWatchdogStopSnapshot;
   watchdogTriggeredAt: Date;
+  watchdogRunId?: string | null;
 }) {
   const currentWatchedSource = input.current.materialLeaves.find(
     (leaf) => leaf.issueId === input.watchedIssueId,
@@ -877,6 +884,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     observedStopSnapshot: input.observedStopSnapshot,
     current: input.current,
     watchdogTriggeredAt: input.watchdogTriggeredAt,
+    watchdogRunId: input.watchdogRunId,
   });
   return latestMaterialBoundaryIsServerOwnedWatchdogTransition({
     db: input.db,
@@ -2314,7 +2322,21 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   } = {}) {
     const queryDb = options.queryDb ?? db;
     if (options.lockIssueIds && options.lockIssueIds.length > 0) {
-      const issueIds = [...new Set(options.lockIssueIds)].sort();
+      // Discover the current mutable subtree, then lock every row in stable
+      // order before collecting any classifier or activity state. The initial
+      // discovery is not used for classification: after competing writers
+      // commit and these locks are acquired, collectClassifierInput reloads
+      // the subtree under the locks. This prevents a write to an untargeted
+      // sibling/descendant from committing between revalidation and mutation.
+      const mutableSubtree = await loadWatchdogSubtreeIssues(
+        scope.companyId,
+        scope.watchedIssueId,
+        queryDb,
+      );
+      const issueIds = [...new Set([
+        ...mutableSubtree.map((issue) => issue.id),
+        ...options.lockIssueIds,
+      ])].sort();
       const lockedIssues = await queryDb
         .select({ id: issues.id })
         .from(issues)
@@ -2405,6 +2427,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           observedStopSnapshot: observedRunState.stopSnapshot,
           current: classification.stopSnapshot,
           watchdogTriggeredAt: observedRunState.triggeredAt,
+          watchdogRunId: scope.runId,
         });
         if (materialRecoveryActivities.length === 0) {
           return { allowed: true as const, classification };
@@ -2477,6 +2500,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           observedWatchedSource: observedRunState.watchedSource,
           current: classification.stopSnapshot,
           watchdogTriggeredAt: observedRunState.triggeredAt,
+          watchdogRunId: scope.runId,
         })
       ) return { allowed: true as const, classification };
     }

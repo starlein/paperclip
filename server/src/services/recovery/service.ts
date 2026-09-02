@@ -4498,8 +4498,23 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
                 : null;
               const wakeHasLiveDelivery = lockedWake.runId
                 ? Boolean(lockedWakeRun && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(lockedWakeRun.status))
-                : lockedWake.status !== "claimed";
-              if (!wakeHasLiveDelivery) return "stale_wake";
+                : lockedWake.status === "deferred_issue_execution";
+              if (!wakeHasLiveDelivery) {
+                // A queued/claimed dependency wake without a linked run cannot
+                // deliver anything. Retire the orphan while holding its row
+                // lock so the fresh bounded wake below is not suppressed by a
+                // generic queued-wake check.
+                await tx
+                  .update(agentWakeupRequests)
+                  .set({
+                    status: "failed",
+                    finishedAt: new Date(),
+                    error: "Dependency wake had no live linked assignee run during reconciliation",
+                    updatedAt: new Date(),
+                  })
+                  .where(eq(agentWakeupRequests.id, lockedWake.id));
+                return "stale_wake";
+              }
 
               if (await hasPendingWakeInteraction(companyId, candidate.id, tx as unknown as Db)) {
                 return "interaction_suppressed";

@@ -23841,11 +23841,20 @@ export function heartbeatService(
                   existingDependencyRun &&
                   !isHeartbeatRunTerminalStatus(existingDependencyRun.status),
                 )
-              : existingDependencyWake.status !== "claimed";
+              : existingDependencyWake.status === "deferred_issue_execution";
             if (wakeHasLiveDelivery) {
               await moveResolvedDependencyToRunnableDisposition();
               return { kind: "deferred" as const };
             }
+            await tx
+              .update(agentWakeupRequests)
+              .set({
+                status: "failed",
+                finishedAt: new Date(),
+                error: "Dependency wake had no live linked assignee run during enqueue",
+                updatedAt: new Date(),
+              })
+              .where(eq(agentWakeupRequests.id, existingDependencyWake.id));
           }
         }
 

@@ -857,6 +857,35 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     });
   });
 
+  it("keeps the same watchdog run authorized across its bounded recovery batch", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    const first = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+
+    const second = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "watchdog-recovery" });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+    expect(second.body).toMatchObject({
+      priority: "high",
+      billingCode: "watchdog-recovery",
+    });
+
+    const ownActivities = await db
+      .select({ runId: activityLog.runId })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.entityId, fixture.sourceIssueId),
+        eq(activityLog.action, "issue.updated"),
+        eq(activityLog.runId, fixture.watchdogRunId),
+      ));
+    expect(ownActivities).toHaveLength(2);
+  });
+
   it("rejects recovery provenance superseded by a later user source transition", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
@@ -911,6 +940,60 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .from(issues)
       .where(eq(issues.id, fixture.sourceChildId!));
     expect(child?.priority).toBe("high");
+  });
+
+  it("locks every mutable descendant before transactional watchdog revalidation", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      sourceChild: true,
+    });
+    const untargetedDescendantId = fixture.sourceChildId!;
+
+    let requestSettled = false;
+    let watchdogRequest!: Promise<request.Response>;
+    await db.transaction(async (tx) => {
+      await tx
+        .select({ id: issues.id })
+        .from(issues)
+        .where(eq(issues.id, untargetedDescendantId))
+        .for("update");
+
+      watchdogRequest = request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ priority: "low" })
+        .then((response) => {
+          requestSettled = true;
+          return response;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(requestSettled).toBe(false);
+
+      const boundaryAt = new Date();
+      await tx.update(issues)
+        .set({ priority: "high", updatedAt: boundaryAt })
+        .where(eq(issues.id, untargetedDescendantId));
+      await tx.insert(activityLog).values({
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "concurrent-board-user",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: untargetedDescendantId,
+        details: { priority: "high" },
+        createdAt: boundaryAt,
+      });
+    });
+
+    const res = await watchdogRequest;
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [target, sibling] = await Promise.all([
+      db.select({ priority: issues.priority }).from(issues)
+        .where(eq(issues.id, fixture.sourceIssueId)).then((rows) => rows[0]),
+      db.select({ priority: issues.priority }).from(issues)
+        .where(eq(issues.id, untargetedDescendantId)).then((rows) => rows[0]),
+    ]);
+    expect(target?.priority).toBe("medium");
+    expect(sibling?.priority).toBe("high");
   });
 
   it("rejects recovery provenance superseded by a later unrelated agent run transition", async () => {
