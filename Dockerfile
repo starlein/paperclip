@@ -35,6 +35,7 @@ COPY packages/adapter-utils/package.json packages/adapter-utils/
 COPY packages/google-sheets-mcp-server/package.json packages/google-sheets-mcp-server/
 COPY packages/kv-demo-mcp-server/package.json packages/kv-demo-mcp-server/
 COPY packages/mcp-server/package.json packages/mcp-server/
+COPY packages/paperclip-eval-kernel/package.json packages/paperclip-eval-kernel/
 COPY packages/paperclip-runner/package.json packages/paperclip-runner/
 COPY packages/skills-catalog/package.json packages/skills-catalog/
 COPY packages/tailscale-https-broker/package.json packages/tailscale-https-broker/
@@ -66,8 +67,11 @@ FROM rust:1.97.1-slim-trixie AS rust-toolchain
 
 FROM base AS build
 WORKDIR /app
+# Copy the compiler from the version-pinned official Rust stage above. The C
+# toolchain remains explicit because Rust build scripts require a linker and
+# pkg-config even though Rust itself no longer comes from apt.
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends build-essential \
+  && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
 COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup

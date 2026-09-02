@@ -756,15 +756,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
           },
         },
         runtimeConfig: {
-          modelProfiles: {
-            cheap: {
-              adapterConfig: {
-                env: {
-                  ROUTINE_ASSIGNEE_RUNTIME_SECRET: { type: "plain", value: sentinelSecret },
-                },
-              },
-            },
-          },
+          privateRuntimeSetting: { token: sentinelSecret },
         },
       })
       .where(eq(agents.id, agentId));
@@ -1243,7 +1235,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
     ]);
   });
 
-  it("applies a built-in routine's cheap model profile to its execution issue", async () => {
+  it("ignores a legacy built-in routine model profile on its execution issue", async () => {
     const { companyId, routine, svc } = await seedFixture();
     await db.insert(builtInManagedResources).values({
       companyId,
@@ -1262,7 +1254,7 @@ describeEmbeddedPostgres("routine service live-execution coalescing", () => {
       .from(issues)
       .where(eq(issues.id, run.linkedIssueId!));
 
-    expect(executionIssue?.assigneeAdapterOverrides).toEqual({ modelProfile: "cheap" });
+    expect(executionIssue?.assigneeAdapterOverrides).toBeNull();
   });
 
   it("records the manual board runner on fresh routine issues so they appear in that user's inbox", async () => {
