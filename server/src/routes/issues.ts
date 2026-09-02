@@ -10445,10 +10445,7 @@ export function issueRoutes(
     ) => {
       if (!persistReviewActivityTransactionally) return;
       const changes = updated.changes ?? {};
-      const hasExecutionPolicyChange = Object.prototype.hasOwnProperty.call(changes, "executionPolicy");
-      const hasReviewStatusChange =
-        enteringReviewRequested && Object.prototype.hasOwnProperty.call(changes, "status");
-      if (!hasExecutionPolicyChange && !hasReviewStatusChange && !reviewInteractionId) return;
+      if (Object.keys(changes).length === 0 && !reviewInteractionId) return;
       const previous = Object.fromEntries(
         Object.entries(changes).map(([key, change]) => [key, change.from]),
       );
