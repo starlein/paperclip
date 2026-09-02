@@ -622,7 +622,6 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   const [
     blockerEdge,
     issueRecoveryActivities,
-    approvalRecoveryActivities,
     watchedIssueInteractions,
   ] = await Promise.all([
     input.db
@@ -649,6 +648,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       .then((rows) => rows[0] ?? null),
     input.db
       .select({
+        id: activityLog.id,
         action: activityLog.action,
         actorType: activityLog.actorType,
         actorId: activityLog.actorId,
@@ -663,28 +663,6 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
         inArray(activityLog.action, TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS),
         eq(activityLog.entityType, "issue"),
         eq(activityLog.entityId, input.watchedIssueId),
-        gte(activityLog.createdAt, input.watchdogTriggeredAt),
-      )),
-    input.db
-      .select({
-        action: activityLog.action,
-        actorType: activityLog.actorType,
-        actorId: activityLog.actorId,
-        agentId: activityLog.agentId,
-        runId: activityLog.runId,
-        details: activityLog.details,
-        createdAt: activityLog.createdAt,
-      })
-      .from(activityLog)
-      .innerJoin(issueApprovals, and(
-        eq(issueApprovals.companyId, activityLog.companyId),
-        sql`${activityLog.entityId} = ${issueApprovals.approvalId}::text`,
-      ))
-      .where(and(
-        eq(activityLog.companyId, input.companyId),
-        inArray(activityLog.action, TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS),
-        eq(activityLog.entityType, "approval"),
-        eq(issueApprovals.issueId, input.watchedIssueId),
         gte(activityLog.createdAt, input.watchdogTriggeredAt),
       )),
     input.db
@@ -721,6 +699,91 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       )
       .map((interaction) => interaction.id),
   );
+  const issueApprovalActivities = issueRecoveryActivities.filter((activity) =>
+    activity.action === "issue.approval_linked" || activity.action === "issue.approval_unlinked"
+  );
+  const watchedApprovalIds = [...new Set([
+    ...input.observedWatchedSource.pendingApprovalIds,
+    ...currentWatchedSource.pendingApprovalIds,
+    ...issueApprovalActivities.flatMap((activity) => {
+      const approvalId = parseObject(activity.details).approvalId;
+      return typeof approvalId === "string" ? [approvalId] : [];
+    }),
+  ])];
+  const [watchedApprovalStates, approvalRecoveryActivities] = watchedApprovalIds.length === 0
+    ? [[], []]
+    : await Promise.all([
+        input.db
+          .select({ id: approvals.id, status: approvals.status })
+          .from(approvals)
+          .where(and(
+            eq(approvals.companyId, input.companyId),
+            inArray(approvals.id, watchedApprovalIds),
+          )),
+        input.db
+          .select({
+            id: activityLog.id,
+            entityId: activityLog.entityId,
+            action: activityLog.action,
+            actorType: activityLog.actorType,
+            actorId: activityLog.actorId,
+            agentId: activityLog.agentId,
+            runId: activityLog.runId,
+            details: activityLog.details,
+            createdAt: activityLog.createdAt,
+          })
+          .from(activityLog)
+          .where(and(
+            eq(activityLog.companyId, input.companyId),
+            inArray(activityLog.action, TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS),
+            eq(activityLog.entityType, "approval"),
+            inArray(activityLog.entityId, watchedApprovalIds),
+            gte(activityLog.createdAt, input.watchdogTriggeredAt),
+          )),
+      ]);
+  const currentApprovalPendingState = new Map(
+    watchedApprovalStates.map((approval) => [
+      approval.id,
+      approval.status === "pending" || approval.status === "revision_requested",
+    ]),
+  );
+  const materialApprovalActivityIds = new Set<string>();
+  for (const approvalId of watchedApprovalIds) {
+    const approvalStateActivities = approvalRecoveryActivities.filter(
+      (activity) => activity.entityId === approvalId,
+    );
+    // Every decision action in this allowlist originates in a pending or
+    // revision-requested state. Walk backward from the persisted state to
+    // recover whether linking the approval could affect the stop snapshot at
+    // each point in the lifecycle.
+    let pending = currentApprovalPendingState.get(approvalId) === true;
+    if (approvalStateActivities.length > 0) pending = true;
+
+    let waiting = input.observedWatchedSource.pendingApprovalIds.includes(approvalId);
+    const timeline = [
+      ...issueApprovalActivities
+        .filter((activity) => parseObject(activity.details).approvalId === approvalId),
+      ...approvalStateActivities,
+    ].sort((left, right) =>
+      left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id)
+    );
+    for (const activity of timeline) {
+      if (activity.action === "issue.approval_linked") {
+        if (pending && !waiting) materialApprovalActivityIds.add(activity.id);
+        if (pending) waiting = true;
+      } else if (activity.action === "issue.approval_unlinked") {
+        if (waiting) materialApprovalActivityIds.add(activity.id);
+        waiting = false;
+      } else if (activity.action === "approval.approved" || activity.action === "approval.rejected") {
+        if (waiting) materialApprovalActivityIds.add(activity.id);
+        pending = false;
+        waiting = false;
+      } else {
+        if (waiting) materialApprovalActivityIds.add(activity.id);
+        pending = true;
+      }
+    }
+  }
   const materialRecoveryActivities = [
     ...issueRecoveryActivities,
     ...approvalRecoveryActivities,
@@ -730,6 +793,12 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
       const interactionId = typeof details.interactionId === "string" ? details.interactionId : null;
       return interactionId != null && materialInteractionIds.has(interactionId);
     }
+    if (activity.action === "issue.approval_linked" || activity.action === "issue.approval_unlinked") {
+      return materialApprovalActivityIds.has(activity.id);
+    }
+    if (TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS.includes(
+      activity.action as (typeof TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS)[number],
+    )) return materialApprovalActivityIds.has(activity.id);
     if (activity.action !== "issue.updated") return true;
     if (details.source === "recovery.reconcile_continuation_waiting_on_review") return true;
     const changes = parseObject(details.changes);

@@ -1020,6 +1020,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         createdAt: new Date(Date.now() - 5_000),
       });
       const interactionId = _kind === "interaction" ? randomUUID() : null;
+      const approvalId = _kind === "approval" ? randomUUID() : null;
       if (interactionId) {
         await db.insert(issueThreadInteractions).values({
           id: interactionId,
@@ -1031,6 +1032,15 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
           payload: { version: 1, prompt: "Continue?" },
         });
       }
+      if (approvalId) {
+        await db.insert(approvals).values({
+          id: approvalId,
+          companyId: fixture.companyId,
+          type: "task",
+          status: "pending",
+          payload: {},
+        });
+      }
       await db.insert(activityLog).values([
         {
           companyId: fixture.companyId,
@@ -1039,7 +1049,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
           action: openedAction,
           entityType: "issue",
           entityId: fixture.sourceIssueId,
-          details: interactionId ? { interactionId } : {},
+          details: interactionId ? { interactionId } : { approvalId },
           createdAt: new Date(Date.now() - 2_000),
         },
         {
@@ -1049,7 +1059,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
           action: closedAction,
           entityType: "issue",
           entityId: fixture.sourceIssueId,
-          details: interactionId ? { interactionId } : {},
+          details: interactionId ? { interactionId } : { approvalId },
           createdAt: new Date(Date.now() - 1_000),
         },
       ]);
@@ -1109,6 +1119,50 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.executionPolicy).toBeNull();
   });
+
+  it.each([
+    ["an already-approved link", "approved", false, "issue.approval_linked"],
+    ["a repeated pending link", "pending", true, "issue.approval_linked"],
+    ["a missing pending unlink", "pending", false, "issue.approval_unlinked"],
+  ] as const)(
+    "keeps recovery authority across %s that does not change a wait",
+    async (_label, approvalStatus, sourcePendingApproval, action) => {
+      const fixture = await seedWatchdogMutationWithStaleOwnership({
+        sourceStatus: "in_progress",
+        sourcePendingApproval,
+      });
+      await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+        createdAt: new Date(Date.now() - 5_000),
+      });
+      const approvalId = fixture.sourceApprovalId ?? randomUUID();
+      if (!fixture.sourceApprovalId) {
+        await db.insert(approvals).values({
+          id: approvalId,
+          companyId: fixture.companyId,
+          type: "task",
+          status: approvalStatus,
+          payload: {},
+        });
+      }
+      await db.insert(activityLog).values({
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action,
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { approvalId },
+        createdAt: new Date(Date.now() - 1_000),
+      });
+
+      const res = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ executionPolicy: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.executionPolicy).toBeNull();
+    },
+  );
 
   it("rejects recovery provenance superseded by a linked approval decision cycle", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({
