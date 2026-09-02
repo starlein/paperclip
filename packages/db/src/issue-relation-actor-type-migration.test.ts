@@ -18,7 +18,7 @@ afterEach(async () => {
 
 async function migrationStatements(): Promise<string[]> {
   const migrationSql = await readFile(
-    fileURLToPath(new URL("./migrations/0234_rapid_firebird.sql", import.meta.url)),
+    fileURLToPath(new URL("./migrations/0237_rapid_firebird.sql", import.meta.url)),
     "utf8",
   );
   return migrationSql
