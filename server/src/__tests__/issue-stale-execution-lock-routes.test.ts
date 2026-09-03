@@ -20,7 +20,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
-import { heartbeatService } from "../services/heartbeat.js";
+import {
+  heartbeatService,
+  mergeHeartbeatRunContextSnapshot,
+} from "../services/heartbeat.js";
 import { issueRoutes } from "../routes/issues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -471,6 +474,24 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
       issueId,
       taskId: issueId,
       checkoutContextSource: "issue.checkout",
+    });
+
+    await mergeHeartbeatRunContextSnapshot(db, currentRunId, {
+      paperclipRuntimeServices: [{ name: "preview", url: "https://preview.example.test" }],
+      paperclipRuntimePrimaryUrl: "https://preview.example.test",
+    });
+    const contextAfterRuntimeReport = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, currentRunId))
+      .then((rows) => rows[0]?.contextSnapshot);
+    expect(contextAfterRuntimeReport).toMatchObject({
+      wakeReason: "heartbeat_timer",
+      source: "timer",
+      issueId,
+      taskId: issueId,
+      checkoutContextSource: "issue.checkout",
+      paperclipRuntimePrimaryUrl: "https://preview.example.test",
     });
 
     const comment = await request(app)

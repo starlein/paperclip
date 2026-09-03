@@ -7660,6 +7660,27 @@ export async function persistHeartbeatRunProcessMetadata(
     .then((rows) => rows[0] ?? null);
 }
 
+export async function mergeHeartbeatRunContextSnapshot(
+  db: Db,
+  runId: string,
+  contextPatch: Record<string, unknown>,
+) {
+  const serializedPatch = JSON.stringify(contextPatch);
+  return db
+    .update(heartbeatRuns)
+    .set({
+      contextSnapshot: sql`(
+        case
+          when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+            then ${heartbeatRuns.contextSnapshot}
+          else '{}'::jsonb
+        end
+      ) || ${serializedPatch}::jsonb`,
+      updatedAt: new Date(),
+    })
+    .where(eq(heartbeatRuns.id, runId));
+}
+
 async function terminateHeartbeatRunProcess(input: {
   pid: number | null | undefined;
   processGroupId: number | null | undefined;
@@ -19711,13 +19732,10 @@ export function heartbeatService(
           context.paperclipRuntimePrimaryUrl =
             runtimeServices.find((service) => readNonEmptyString(service.url))
               ?.url ?? null;
-          await db
-            .update(heartbeatRuns)
-            .set({
-              contextSnapshot: context,
-              updatedAt: new Date(),
-            })
-            .where(eq(heartbeatRuns.id, run.id));
+          await mergeHeartbeatRunContextSnapshot(db, run.id, {
+            paperclipRuntimeServices: context.paperclipRuntimeServices,
+            paperclipRuntimePrimaryUrl: context.paperclipRuntimePrimaryUrl,
+          });
         }
         if (
           issueId &&
@@ -20876,13 +20894,10 @@ export function heartbeatService(
             combinedRuntimeServices.find((service) =>
               readNonEmptyString(service.url),
             )?.url ?? null;
-          await db
-            .update(heartbeatRuns)
-            .set({
-              contextSnapshot: context,
-              updatedAt: new Date(),
-            })
-            .where(eq(heartbeatRuns.id, run.id));
+          await mergeHeartbeatRunContextSnapshot(db, run.id, {
+            paperclipRuntimeServices: context.paperclipRuntimeServices,
+            paperclipRuntimePrimaryUrl: context.paperclipRuntimePrimaryUrl,
+          });
           if (issueId) {
             try {
               await postWorkspaceReadyComment({
