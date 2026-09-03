@@ -418,6 +418,113 @@ describeEmbeddedPostgres("stale issue execution lock routes", () => {
     expect(checkoutActivity).toHaveLength(0);
   });
 
+  it("binds an unscoped timer run to one checkout through comment and terminal status writes", async () => {
+    const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
+    const issueId = randomUUID();
+    const unrelatedIssueId = randomUUID();
+    await db.update(heartbeatRuns)
+      .set({
+        invocationSource: "timer",
+        triggerDetail: "heartbeat_timer",
+        contextSnapshot: { wakeReason: "heartbeat_timer", source: "timer" },
+      })
+      .where(eq(heartbeatRuns.id, currentRunId));
+    await db.insert(issues).values([
+      {
+        id: issueId,
+        companyId,
+        title: "Timer checkout target",
+        status: "todo",
+        priority: "high",
+        assigneeAgentId: agentId,
+      },
+      {
+        id: unrelatedIssueId,
+        companyId,
+        title: "Unrelated assigned issue",
+        status: "todo",
+        priority: "high",
+        assigneeAgentId: agentId,
+      },
+    ]);
+
+    const app = createApp(agentActor(companyId, agentId, currentRunId));
+    const checkout = await request(app)
+      .post(`/api/issues/${issueId}/checkout`)
+      .send({ agentId, expectedStatuses: ["todo"] });
+    expect(checkout.status, JSON.stringify(checkout.body)).toBe(200);
+    expect(checkout.body).toMatchObject({
+      id: issueId,
+      status: "in_progress",
+      checkoutRunId: currentRunId,
+      executionRunId: currentRunId,
+    });
+
+    const run = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, currentRunId))
+      .then((rows) => rows[0]);
+    expect(run?.contextSnapshot).toMatchObject({
+      wakeReason: "heartbeat_timer",
+      source: "timer",
+      issueId,
+      taskId: issueId,
+      checkoutContextSource: "issue.checkout",
+    });
+
+    const comment = await request(app)
+      .post(`/api/issues/${issueId}/comments`)
+      .send({ body: "Timer run verdict" });
+    expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+
+    const terminal = await request(app)
+      .patch(`/api/issues/${issueId}`)
+      .send({ status: "done" });
+    expect(terminal.status, JSON.stringify(terminal.body)).toBe(200);
+    expect(terminal.body.status).toBe("done");
+
+    const unrelatedCheckout = await request(app)
+      .post(`/api/issues/${unrelatedIssueId}/checkout`)
+      .send({ agentId, expectedStatuses: ["todo"] });
+    expect(unrelatedCheckout.status, JSON.stringify(unrelatedCheckout.body)).toBe(409);
+    expect(unrelatedCheckout.body).toMatchObject({
+      error: "Heartbeat run is already bound to another issue",
+      details: { checkoutRunId: currentRunId, sourceIssueId: issueId },
+    });
+
+    const unrelatedIssue = await db
+      .select({
+        status: issues.status,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, unrelatedIssueId))
+      .then((rows) => rows[0]);
+    expect(unrelatedIssue).toEqual({
+      status: "todo",
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+
+    const contextAfterRejectedCheckout = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, currentRunId))
+      .then((rows) => rows[0]?.contextSnapshot);
+    expect(contextAfterRejectedCheckout).toMatchObject({ issueId, taskId: issueId });
+
+    const audit = await db
+      .select({ action: activityLog.action, entityId: activityLog.entityId, runId: activityLog.runId })
+      .from(activityLog);
+    expect(audit).toEqual(expect.arrayContaining([
+      { action: "issue.checked_out", entityId: issueId, runId: currentRunId },
+      { action: "issue.comment_added", entityId: issueId, runId: currentRunId },
+      { action: "issue.updated", entityId: issueId, runId: currentRunId },
+    ]));
+  });
+
   it("preserves a live owner's checkout through policy setup and the review handoff", async () => {
     const { companyId, agentId, currentRunId } = await seedCompanyAgentAndRuns();
     const reviewerAgentId = randomUUID();
