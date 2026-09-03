@@ -52,6 +52,12 @@ describe("paperclip MCP tools", () => {
     );
   });
 
+  it("does not advertise watchdogDiscovery on the issue update tool", () => {
+    const tool = getTool("paperclipUpdateIssue");
+
+    expect(tool.schema.shape).not.toHaveProperty("watchdogDiscovery");
+  });
+
   it("lists the company skill library with the default company id", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       mockJsonResponse([{ key: "paperclipai/bundled/product/wireframe", name: "wireframe" }]),

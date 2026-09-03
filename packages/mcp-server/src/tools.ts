@@ -134,7 +134,7 @@ const createIssueToolSchema = z.object({
 
 const updateIssueToolSchema = z.object({
   issueId: issueIdSchema,
-}).merge(updateIssueSchema);
+}).merge(updateIssueSchema.omit({ watchdogDiscovery: true }));
 
 const checkoutIssueToolSchema = z.object({
   issueId: issueIdSchema,

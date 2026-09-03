@@ -175,6 +175,14 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("does not advertise watchdogDiscovery on issue updates", () => {
+    const spec = buildOpenApiSpec() as any;
+    const patchSchema = spec.paths["/api/issues/{id}"].patch.requestBody
+      .content["application/json"].schema;
+
+    expect(patchSchema.properties).not.toHaveProperty("watchdogDiscovery");
+  });
+
   it("serves the generated OpenAPI document", async () => {
     const res = await request(createApp()).get("/api/openapi.json");
 

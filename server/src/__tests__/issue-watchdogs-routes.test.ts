@@ -845,6 +845,112 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     });
   });
 
+  it("rejects watchdog-discovered product bug creation from a non-watchdog agent run", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent(companyId, { name: "Ordinary agent" });
+    const sourceIssueId = await seedIssue(companyId, { title: "Ordinary source issue" });
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: { issueId: sourceIssueId },
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({
+        title: "Unauthorized watchdog discovery",
+        watchdogDiscovery: {
+          kind: "platform_bug",
+          evidenceMarkdown: "This run has no persisted watchdog scope.",
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe(
+      "Only task-watchdog runs can create watchdog-discovered product bug follow-ups",
+    );
+    const created = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, companyId),
+        eq(issues.title, "Unauthorized watchdog discovery"),
+      ));
+    expect(created).toHaveLength(0);
+  });
+
+  it("rejects watchdogDiscovery on issue PATCH without applying accompanying mutations", async () => {
+    const companyId = await seedCompany();
+    const watchdogAgentId = await seedAgent(companyId, { name: "Product Bug Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Watched root" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .patch(`/api/issues/${watchdogIssueId}`)
+      .send({
+        title: "Silently accepted mutation",
+        comment: "This comment must not be applied when discovery is rejected.",
+        watchdogDiscovery: {
+          kind: "platform_bug",
+          evidenceMarkdown: "PATCH must fail closed instead of dropping this discovery.",
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(400);
+    expect(res.body).toMatchObject({
+      error: "Validation error",
+      details: expect.arrayContaining([
+        expect.objectContaining({ path: ["watchdogDiscovery"] }),
+      ]),
+    });
+    const [storedIssue] = await db.select().from(issues).where(eq(issues.id, watchdogIssueId));
+    expect(storedIssue?.title).toBe("Reusable watchdog issue");
+    const comments = await db
+      .select({ body: issueComments.body })
+      .from(issueComments)
+      .where(eq(issueComments.issueId, watchdogIssueId));
+    expect(comments.map((comment) => comment.body)).not.toContain(
+      "This comment must not be applied when discovery is rejected.",
+    );
+    const followUps = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, companyId),
+        eq(issues.originKind, "task_watchdog_product_bug"),
+      ));
+    expect(followUps).toHaveLength(0);
+  });
+
   it("rejects watchdog interaction-resolution attempts outside the persisted watched subtree", async () => {
     const companyId = await seedCompany();
     const watchdogAgentId = await seedAgent(companyId, { name: "Interaction Watchdog" });

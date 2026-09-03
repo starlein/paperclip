@@ -595,6 +595,7 @@ export const updateIssueSchema = objectWithoutDefaults(
   createIssueBaseSchema.omit({
     createdByUserId: true,
     responsibleUserId: true,
+    watchdogDiscovery: true,
     watchdog: true,
   }),
 ).partial().extend({
@@ -608,6 +609,7 @@ export const updateIssueSchema = objectWithoutDefaults(
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),
   hiddenAt: z.string().datetime().nullable().optional(),
+  watchdogDiscovery: z.never().optional(),
 });
 
 export type UpdateIssue = z.infer<typeof updateIssueSchema>;
