@@ -140,6 +140,44 @@ describe("approvalService resolution idempotency", () => {
     expect(mockNotifyHireApproved).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["approved", "approval.approved", "approve"],
+    ["rejected", "approval.rejected", "reject"],
+  ] as const)(
+    "persists %s decision activity before the locked transaction commits",
+    async (status, action, method) => {
+      const resolved = createApproval(status);
+      const dbStub = createDbStub([[createApproval("pending")]], [resolved]);
+      mockLogActivity.mockImplementation(async (_tx, _input, publications) => {
+        expect(dbStub.isTransactionActive()).toBe(true);
+        publications.push({ companyId: "company-1", payload: {}, pluginEvent: null });
+      });
+      mockPublishActivity.mockImplementation(() => {
+        expect(dbStub.isTransactionActive()).toBe(false);
+      });
+
+      const result = await approvalService(dbStub.db as any)[method](
+        "approval-1",
+        "board-user",
+        "Decision note",
+      );
+
+      expect(result.applied).toBe(true);
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        dbStub.db,
+        expect.objectContaining({
+          actorType: "user",
+          actorId: "board-user",
+          action,
+          entityId: "approval-1",
+          details: expect.objectContaining({ linkedIssueIds: [] }),
+        }),
+        expect.any(Array),
+      );
+      expect(mockPublishActivity).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("creates the agent from payload when approval does not reference a pending agent", async () => {
     const approved = {
       ...createApproval("approved"),
@@ -192,6 +230,43 @@ describe("approvalService resolution idempotency", () => {
         actorId: "board-user",
         action: "approval.revision_requested",
         entityId: "approval-1",
+      }),
+      expect.any(Array),
+    );
+    expect(mockPublishActivity).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists cancellation activity before the locked transaction commits", async () => {
+    const cancelled = createApproval("cancelled");
+    const dbStub = createDbStub([[createApproval("pending")]], [cancelled]);
+    mockLogActivity.mockImplementation(async (_tx, _input, publications) => {
+      expect(dbStub.isTransactionActive()).toBe(true);
+      publications.push({ companyId: "company-1", payload: {}, pluginEvent: null });
+    });
+    mockPublishActivity.mockImplementation(() => {
+      expect(dbStub.isTransactionActive()).toBe(false);
+    });
+
+    const result = await approvalService(dbStub.db as any).cancel(
+      "approval-1",
+      "Duplicate cleanup",
+      {
+        actorType: "system",
+        actorId: "built-in-agents",
+        agentId: null,
+        runId: null,
+      },
+    );
+
+    expect(result?.status).toBe("cancelled");
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      dbStub.db,
+      expect.objectContaining({
+        actorType: "system",
+        actorId: "built-in-agents",
+        action: "approval.cancelled",
+        entityId: "approval-1",
+        details: expect.objectContaining({ reason: "Duplicate cleanup" }),
       }),
       expect.any(Array),
     );

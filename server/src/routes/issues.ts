@@ -5020,6 +5020,19 @@ export function issueRoutes(
     res: Response,
     issue: { id: string; companyId: string },
   ) {
+    if (req.actor.type === "agent") {
+      const watchdogScope = await resolveTaskWatchdogMutationScope(db, req.actor);
+      if (watchdogScope.kind !== "none") {
+        res.status(403).json({
+          error: "Task-watchdog runs cannot update issue documents, attachments, or deliverable artifacts",
+          details: {
+            issueId: issue.id,
+            watchdogId: watchdogScope.kind === "watchdog" ? watchdogScope.watchdogId : null,
+          },
+        });
+        return false;
+      }
+    }
     const run = await loadActorRunContext(req, issue.companyId);
     if (!run) return true;
     if (!isStatusOnlyRecoveryContext(run.contextSnapshot)) return true;
@@ -10528,14 +10541,50 @@ export function issueRoutes(
       finalIssueStatus: () => issue?.status,
     });
     const decision = transition.decision && decisionId ? transition.decision : null;
+    const transactionalWatchdogScope = req.actor.type === "agent"
+      ? await resolveTaskWatchdogMutationScope(db, req.actor)
+      : { kind: "none" as const };
+    const requiresLockedWatchdogRevalidation =
+      transactionalWatchdogScope.kind === "watchdog"
+      && transactionalWatchdogScope.watchdogIssueId !== existing.id;
     const shouldUseTransactionalIssueUpdate =
       Boolean(decision)
       || shouldRelayStop
       || persistReviewActivityTransactionally
-      || reviewPolicySensitiveMutationRequested;
+      || reviewPolicySensitiveMutationRequested
+      || requiresLockedWatchdogRevalidation;
     try {
       if (shouldUseTransactionalIssueUpdate) {
         issue = await db.transaction(async (tx) => {
+          if (requiresLockedWatchdogRevalidation) {
+            // Dependency writers take the dependent advisory lock before any
+            // issue-row locks. Preserve that global order here so a watchdog
+            // blocker edit cannot deadlock with completion/finalization wake
+            // reconciliation, which follows the same advisory -> row order.
+            if (Array.isArray(req.body.blockedByIssueIds)) {
+              await svc.lockDependencyStateForUpdate(existing.companyId, existing.id, tx);
+            }
+            const revalidated = await taskWatchdogsSvc.revalidateMutationScope(
+              transactionalWatchdogScope,
+              {
+                queryDb: tx as unknown as Db,
+                lockIssueIds: [transactionalWatchdogScope.watchedIssueId, existing.id],
+                skipStaleOwnershipReconciliation: true,
+              },
+            );
+            if (!revalidated.allowed) {
+              throw conflict(revalidated.reason, {
+                watchedIssueId: transactionalWatchdogScope.watchedIssueId,
+                watchdogId: transactionalWatchdogScope.watchdogId,
+                runStopFingerprint: transactionalWatchdogScope.stopFingerprint,
+                currentState: revalidated.classification?.state ?? null,
+                currentStopFingerprint:
+                  revalidated.classification && "stopFingerprint" in revalidated.classification
+                    ? revalidated.classification.stopFingerprint
+                    : null,
+              });
+            }
+          }
           if (
             reviewPolicySensitiveMutationRequested
             && !(await assertLockedReviewPolicyAllowsMutation(tx))
@@ -14191,23 +14240,12 @@ export function issueRoutes(
       originalFilename: stored.originalFilename,
       createdByAgentId: actor.agentId,
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
-    });
-
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      agentApiKeyId: actor.agentApiKeyId,
-      action: "issue.attachment_added",
-      entityType: "issue",
-      entityId: issueId,
-      details: {
-        attachmentId: attachment.id,
-        originalFilename: attachment.originalFilename,
-        contentType: attachment.contentType,
-        byteSize: attachment.byteSize,
+      activityActor: {
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
       },
     });
 
@@ -14296,33 +14334,27 @@ export function issueRoutes(
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
 
-    try {
-      await storage.deleteObject(attachment.companyId, attachment.objectKey);
-    } catch (err) {
-      logger.warn({ err, attachmentId }, "storage delete failed while removing attachment");
-    }
-
-    const removed = await svc.removeAttachment(attachmentId);
-    if (!removed) {
-      res.status(404).json({ error: "Attachment not found" });
-      return;
-    }
-
     const actor = getActorInfo(req);
-    await logActivity(db, {
-      companyId: removed.companyId,
+    const removed = await svc.removeAttachment(attachmentId, {
       actorType: actor.actorType,
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
       agentApiKeyId: actor.agentApiKeyId,
-      action: "issue.attachment_removed",
-      entityType: "issue",
-      entityId: removed.issueId,
-      details: {
-        attachmentId: removed.id,
-      },
     });
+    if (!removed) {
+      res.status(404).json({ error: "Attachment not found" });
+      return;
+    }
+
+    // Metadata is the authoritative object reference. Delete storage only
+    // after its transaction commits so rollback cannot restore an attachment
+    // whose underlying object is already gone.
+    try {
+      await storage.deleteObject(removed.companyId, removed.objectKey);
+    } catch (err) {
+      logger.warn({ err, attachmentId }, "storage delete failed after removing attachment metadata");
+    }
 
     res.json({ ok: true });
   });

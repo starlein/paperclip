@@ -55,13 +55,13 @@ export function approvalService(db: Db) {
 
   async function withLockedLinkedIssues<T>(
     id: string,
-    mutation: (tx: any, existing: ApprovalRecord) => Promise<T>,
+    mutation: (tx: any, existing: ApprovalRecord, linkedIssueIds: string[]) => Promise<T>,
   ): Promise<T> {
     return db.transaction(async (tx) => {
       // Approval links take issue locks before the approval lock. Match that
       // order here so dependency recovery's issue lock serializes every change
       // to an approval gate without introducing an issue/approval deadlock.
-      await tx
+      const linkedIssues = await tx
         .select({ id: issues.id })
         .from(issueApprovals)
         .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
@@ -69,7 +69,7 @@ export function approvalService(db: Db) {
         .orderBy(asc(issues.id))
         .for("update", { of: issues });
       const existing = await getExistingApproval(id, tx, true);
-      return mutation(tx, existing);
+      return mutation(tx, existing, linkedIssues.map((issue: { id: string }) => issue.id));
     });
   }
 
@@ -79,7 +79,8 @@ export function approvalService(db: Db) {
     decidedByUserId: string,
     decisionNote: string | null | undefined,
   ): Promise<ResolutionResult> {
-    return withLockedLinkedIssues(id, async (tx, existing) => {
+    const activityPublications: ActivityPublication[] = [];
+    const result = await withLockedLinkedIssues(id, async (tx, existing, linkedIssueIds) => {
       if (!canResolveStatuses.has(existing.status)) {
         if (existing.status === targetStatus) {
           return { approval: existing, applied: false };
@@ -104,6 +105,19 @@ export function approvalService(db: Db) {
         .then((rows: ApprovalRecord[]) => rows[0] ?? null);
 
       if (updated) {
+        await logActivity(tx as Db, {
+          companyId: updated.companyId,
+          actorType: "user",
+          actorId: decidedByUserId,
+          action: targetStatus === "approved" ? "approval.approved" : "approval.rejected",
+          entityType: "approval",
+          entityId: updated.id,
+          details: {
+            type: updated.type,
+            requestedByAgentId: updated.requestedByAgentId,
+            linkedIssueIds,
+          },
+        }, activityPublications);
         return { approval: updated, applied: true };
       }
 
@@ -116,6 +130,8 @@ export function approvalService(db: Db) {
         `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
       );
     });
+    for (const publication of activityPublications) publishActivity(publication);
+    return result;
   }
 
   return {
@@ -157,10 +173,20 @@ export function approvalService(db: Db) {
     // Cancel an open (pending/revision_requested) approval without a board
     // decision — e.g. when its paired agent is terminated during duplicate
     // cleanup. Idempotent: a no-op on already-resolved approvals.
-    cancel: async (id: string, reason?: string | null) => {
-      return withLockedLinkedIssues(id, async (tx) => {
+    cancel: async (
+      id: string,
+      reason?: string | null,
+      actor: ApprovalActivityActor = {
+        actorType: "system",
+        actorId: "approval-service",
+        agentId: null,
+        runId: null,
+      },
+    ) => {
+      const activityPublications: ActivityPublication[] = [];
+      const updated = await withLockedLinkedIssues(id, async (tx) => {
         const now = new Date();
-        return tx
+        const approval = await tx
           .update(approvals)
           .set({
             status: "cancelled",
@@ -171,7 +197,20 @@ export function approvalService(db: Db) {
           .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
           .returning()
           .then((rows: ApprovalRecord[]) => rows[0] ?? null);
+        if (approval) {
+          await logActivity(tx as Db, {
+            companyId: approval.companyId,
+            ...actor,
+            action: "approval.cancelled",
+            entityType: "approval",
+            entityId: approval.id,
+            details: { type: approval.type, reason: reason ?? null },
+          }, activityPublications);
+        }
+        return approval;
       });
+      for (const publication of activityPublications) publishActivity(publication);
+      return updated;
     },
 
     approve: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {

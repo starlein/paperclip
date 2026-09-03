@@ -801,7 +801,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     });
   });
 
-  it("does not duplicate an existing dependency wake keyed to any resolved blocker", async () => {
+  it("does not duplicate an existing deferred dependency wake keyed to any resolved blocker", async () => {
     const { companyId, agentId, blockedIssueId, blockerIssueId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
     const secondBlockerIssueId = randomUUID();
@@ -837,7 +837,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
         issueId: blockedIssueId,
         resolvedBlockerIssueId: blockerIdNotUsedByBackstop,
       },
-      status: "queued",
+      status: "deferred_issue_execution",
       idempotencyKey: `issue_blockers_resolved:${blockedIssueId}:${blockerIdNotUsedByBackstop}`,
     });
 
@@ -863,6 +863,64 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .where(eq(issues.id, blockedIssueId))
       .then((rows) => rows[0]);
     expect(dependent?.status).toBe("todo");
+  });
+
+  it("replaces an orphaned queued dependency wake that has no linked assignee run", async () => {
+    const { companyId, agentId, blockedIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerIssueId],
+    });
+    const [orphanedWake] = await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: blockedIssueId,
+        resolvedBlockerIssueId: blockerIssueId,
+        blockerIssueIds: [blockerIssueId],
+      },
+      status: "queued",
+      idempotencyKey,
+    }).returning({ id: agentWakeupRequests.id });
+
+    const result = await heartbeatService(db).reconcileResolvedDependencyWakes();
+
+    expect(result.healed).toBe(1);
+    expect(result.existingWakeSkipped).toBe(0);
+    const [dependent] = await db.select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, blockedIssueId));
+    expect(dependent?.status).toBe("todo");
+
+    const wakes = await db
+      .select({
+        id: agentWakeupRequests.id,
+        status: agentWakeupRequests.status,
+        runId: agentWakeupRequests.runId,
+        error: agentWakeupRequests.error,
+      })
+      .from(agentWakeupRequests)
+      .where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.agentId, agentId),
+        eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+      ));
+    expect(wakes).toHaveLength(2);
+    expect(wakes.find((wake) => wake.id === orphanedWake!.id)).toMatchObject({
+      status: "failed",
+      runId: null,
+      error: "Dependency wake had no live linked assignee run during reconciliation",
+    });
+    expect(wakes.filter((wake) => wake.id !== orphanedWake!.id)).toEqual([
+      expect.objectContaining({
+        runId: expect.any(String),
+        status: expect.stringMatching(/^(queued|claimed|completed)$/),
+      }),
+    ]);
   });
 
   it.each(["claimed", "queued"] as const)(
@@ -1073,7 +1131,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     async (gate) => {
       const { companyId, agentId, blockedIssueId, blockerIssueId } =
         await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
-      await db.insert(agentWakeupRequests).values({
+      const [orphanedWake] = await db.insert(agentWakeupRequests).values({
         companyId,
         agentId,
         source: "automation",
@@ -1089,7 +1147,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
           dependentIssueId: blockedIssueId,
           blockerIssueIds: [blockerIssueId],
         }),
-      });
+      }).returning({ id: agentWakeupRequests.id });
       if (gate === "interaction") {
         await db.insert(issueThreadInteractions).values({
           companyId,
@@ -1125,7 +1183,7 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       const result = await heartbeatService(db).reconcileIssueGraphLiveness();
 
       expect(result.dependencyWakesHealed).toBe(0);
-      expect(result.dependencyWakeExistingSkipped).toBe(1);
+      expect(result.dependencyWakeExistingSkipped).toBe(0);
       expect(
         gate === "interaction"
           ? result.dependencyWakeInteractionSkipped
@@ -1137,6 +1195,11 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
         .from(issues)
         .where(eq(issues.id, blockedIssueId));
       expect(dependent?.status).toBe("blocked");
+      const [retiredWake] = await db
+        .select({ status: agentWakeupRequests.status, runId: agentWakeupRequests.runId })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, orphanedWake!.id));
+      expect(retiredWake).toEqual({ status: "failed", runId: null });
     },
   );
 
