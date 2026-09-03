@@ -17,6 +17,7 @@ import { agentService } from "./agents.js";
 import { approvalService } from "./approvals.js";
 import { logActivity } from "./activity-log.js";
 import { agentInstructionsService } from "./agent-instructions.js";
+import { reconcileManagedAgentInstructionPolicy } from "./managed-agent-instruction-policy.js";
 
 const MANAGED_AGENT_ENTITY_TYPE = "managed_agent";
 const DEFAULT_MANAGED_AGENT_ADAPTER_TYPE = "process";
@@ -182,6 +183,92 @@ export function pluginManagedAgentService(
   const approvalSvc = approvalService(db);
   const instructions = agentInstructionsService();
 
+  async function companyInstructionPolicy(companyId: string) {
+    const companyCeos = await db
+      .select()
+      .from(agents)
+      .where(and(
+        eq(agents.companyId, companyId),
+        eq(agents.role, "ceo"),
+        ne(agents.status, "terminated"),
+      ));
+    if (companyCeos.length === 0) return null;
+
+    const policyContents = await Promise.all(companyCeos.map(async (companyCeo) => {
+      const exported = await instructions.exportFiles(companyCeo as Agent).catch(() => null);
+      return exported?.files[exported.entryFile] ?? null;
+    }));
+    const readablePolicies = policyContents.filter((content): content is string => content !== null);
+    return readablePolicies.length > 0 ? readablePolicies.join("\n\n") : null;
+  }
+
+  async function applyCompanyPolicyToDeclaredInstructions(
+    companyId: string,
+    declared: ReturnType<typeof declaredInstructionFiles>,
+  ) {
+    if (!declared) return null;
+    const companyInstructions = await companyInstructionPolicy(companyId);
+    if (!companyInstructions) return declared;
+    const entryContent = declared.files[declared.entryFile] ?? "";
+    const reconciled = reconcileManagedAgentInstructionPolicy({
+      agentInstructions: entryContent,
+      companyInstructions,
+    });
+    return {
+      ...declared,
+      files: {
+        ...declared.files,
+        [declared.entryFile]: reconciled.content,
+      },
+    };
+  }
+
+  async function reconcileActiveCompanyPolicy(
+    companyId: string,
+    declaration: PluginManagedAgentDeclaration,
+    agent: Agent,
+  ) {
+    if (declaration.role === "ceo" || agent.role === "ceo") return agent;
+    const companyInstructions = await companyInstructionPolicy(companyId);
+    if (!companyInstructions) return agent;
+
+    const bundle = await instructions.getBundle(agent).catch(() => null);
+    if (bundle?.mode !== "managed") return agent;
+    const exported = await instructions.exportFiles(agent).catch(() => null);
+    if (!exported) return agent;
+    const currentContent = exported.files[exported.entryFile];
+    if (currentContent === undefined) return agent;
+    const reconciled = reconcileManagedAgentInstructionPolicy({
+      agentInstructions: currentContent,
+      companyInstructions,
+    });
+    if (!reconciled.changed) return agent;
+
+    const written = await instructions.writeFile(agent, exported.entryFile, reconciled.content);
+    const updated = await agentSvc.update(agent.id, {
+      adapterConfig: written.adapterConfig,
+    }, {
+      recordRevision: {
+        source: `plugin:${optionsForRevisionSource()}:company-instruction-policy`,
+      },
+    });
+    await logActivity(db, {
+      companyId,
+      actorType: "plugin",
+      actorId: options.pluginId,
+      action: "plugin.managed_agent.company_instruction_policy_reconciled",
+      entityType: "agent",
+      entityId: agent.id,
+      details: {
+        sourcePluginKey: options.pluginKey,
+        managedResourceKey: declaration.agentKey,
+        companyImplementationPrCap: reconciled.authoritativeLimit,
+        replacedImplementationPrLimits: reconciled.replacedLimits,
+      },
+    });
+    return (updated as Agent | null) ?? { ...agent, adapterConfig: written.adapterConfig };
+  }
+
   function declarationFor(agentKey: string) {
     const declaration = options.manifest?.agents?.find((agent) => agent.agentKey === agentKey);
     if (!declaration) {
@@ -333,7 +420,10 @@ export function pluginManagedAgentService(
     materializeOptions: { replaceExisting: boolean },
   ): Promise<Agent> {
     const variables = await optionsForInstructionVariables(companyId);
-    const declared = declaredInstructionFiles(declaration, variables);
+    const declared = await applyCompanyPolicyToDeclaredInstructions(
+      companyId,
+      declaredInstructionFiles(declaration, variables),
+    );
     if (!declared) return agent;
 
     const materialized = await instructions.materializeManagedBundle(
@@ -362,7 +452,10 @@ export function pluginManagedAgentService(
   ): Promise<PluginManagedAgentResolution["defaultDrift"]> {
     if (!agent) return null;
     const variables = await optionsForInstructionVariables(companyId);
-    const declared = declaredInstructionFiles(declaration, variables);
+    const declared = await applyCompanyPolicyToDeclaredInstructions(
+      companyId,
+      declaredInstructionFiles(declaration, variables),
+    );
     if (!declared) return null;
 
     let exported: Awaited<ReturnType<typeof instructions.exportFiles>>;
@@ -564,7 +657,12 @@ export function pluginManagedAgentService(
       const declaration = declarationFor(agentKey);
       const current = await get(agentKey, companyId);
       if (current.agent) {
-        const agent = await backfillManagedPauseReason(companyId, declaration, current.agent);
+        const policyReconciled = await reconcileActiveCompanyPolicy(
+          companyId,
+          declaration,
+          current.agent,
+        );
+        const agent = await backfillManagedPauseReason(companyId, declaration, policyReconciled);
         await upsertBinding(companyId, declaration, agent.id);
         return resolution(companyId, declaration, agent, current.status, current.approvalId);
       }
@@ -574,10 +672,15 @@ export function pluginManagedAgentService(
         await upsertBinding(companyId, declaration, relinkCandidate.id);
         const relinkedAgent = await agentSvc.getById(relinkCandidate.id) as Agent | null;
         if (!relinkedAgent) throw notFound("Managed agent not found");
-        const agent = await backfillManagedPauseReason(
+        const policyReconciled = await reconcileActiveCompanyPolicy(
           companyId,
           declaration,
           relinkedAgent,
+        );
+        const agent = await backfillManagedPauseReason(
+          companyId,
+          declaration,
+          policyReconciled,
         );
         return resolution(companyId, declaration, agent, "relinked");
       }

@@ -23,6 +23,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { buildHostServices } from "../services/plugin-host-services.js";
 import { agentService } from "../services/agents.js";
+import { agentInstructionsService } from "../services/agent-instructions.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -376,6 +377,102 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       else process.env.PAPERCLIP_INSTANCE_ID = previousInstance;
       await fs.rm(tempHome, { recursive: true, force: true });
       await fs.rm(wikiRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles a stale managed Release DevOps cap to the company policy", async () => {
+    const previousHome = process.env.PAPERCLIP_HOME;
+    const previousInstance = process.env.PAPERCLIP_INSTANCE_ID;
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-agent-policy-"));
+    process.env.PAPERCLIP_HOME = tempHome;
+    process.env.PAPERCLIP_INSTANCE_ID = "test";
+    try {
+      const pluginManifest = manifest();
+      pluginManifest.agents![0] = {
+        ...pluginManifest.agents![0]!,
+        agentKey: "release-devops",
+        displayName: "Release DevOps",
+        role: "devops",
+        adapterConfig: {},
+        instructions: {
+          entryFile: "AGENTS.md",
+          content: [
+            "# Release DevOps",
+            "",
+            "Drive each repository to at most two open implementation PRs.",
+            "Preserve the full owner/repo#number identity.",
+          ].join("\n"),
+        },
+      };
+      const { companyId, services } = await seedCompanyAndPlugin({ manifest: pluginManifest });
+      const ceo = await agentService(db).create(companyId, {
+        name: "CEO",
+        role: "ceo",
+        status: "idle",
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+        budgetMonthlyCents: 0,
+        spentMonthlyCents: 0,
+        lastHeartbeatAt: null,
+      });
+      const ceoInstructions = await agentInstructionsService().materializeManagedBundle(
+        ceo,
+        {
+          "AGENTS.md": [
+            "# Company delivery policy",
+            "",
+            "Enforce a WIP limit of at most 5 open implementation PRs per repository.",
+          ].join("\n"),
+        },
+      );
+      await agentService(db).update(ceo.id, { adapterConfig: ceoInstructions.adapterConfig });
+
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      const instructionsPath = created.agent?.adapterConfig.instructionsFilePath as string;
+      await expect(fs.readFile(instructionsPath, "utf8")).resolves.toContain(
+        "at most 5 open implementation PRs",
+      );
+
+      await fs.writeFile(
+        instructionsPath,
+        [
+          "# Release DevOps",
+          "",
+          "Drive each repository to at most two open implementation PRs.",
+          "Preserve the full owner/repo#number identity.",
+        ].join("\n"),
+        "utf8",
+      );
+
+      await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+
+      const reconciled = await fs.readFile(instructionsPath, "utf8");
+      expect(reconciled).toContain("at most 5 open implementation PRs");
+      expect(reconciled).not.toContain("at most two open implementation PRs");
+      expect(reconciled).toContain("Preserve the full owner/repo#number identity.");
+      const policyEvents = await db
+        .select()
+        .from(activityLog)
+        .where(eq(activityLog.action, "plugin.managed_agent.company_instruction_policy_reconciled"));
+      expect(policyEvents).toHaveLength(1);
+      expect(policyEvents[0]?.details).toMatchObject({
+        companyImplementationPrCap: 5,
+        replacedImplementationPrLimits: [2],
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousHome;
+      if (previousInstance === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousInstance;
+      await fs.rm(tempHome, { recursive: true, force: true });
     }
   });
 
