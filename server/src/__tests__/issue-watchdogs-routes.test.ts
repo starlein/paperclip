@@ -19,6 +19,8 @@ import {
   issueWatchdogs,
   issues,
   principalPermissionGrants,
+  goals,
+  projects,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -86,6 +88,8 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     await db.delete(issueRelations);
     await db.delete(issueWatchdogs);
     await db.delete(issues);
+    await db.delete(projects);
+    await db.delete(goals);
     await db.delete(agents);
     await db.delete(companySkills);
     await db.delete(principalPermissionGrants);
@@ -842,6 +846,104 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         sourceIssueId: watchedRootId,
         watchdogIssueId,
       },
+    });
+  });
+
+  it("derives watchdog-discovered product bug scope from the source issue instead of caller overrides", async () => {
+    const companyId = await seedCompany();
+    const foreignCompanyId = await seedCompany("Foreign company");
+    const sourceGoalId = randomUUID();
+    const foreignGoalId = randomUUID();
+    const sourceProjectId = randomUUID();
+    const foreignProjectId = randomUUID();
+    await db.insert(goals).values([
+      {
+        id: sourceGoalId,
+        companyId,
+        title: "Source goal",
+        level: "company",
+        status: "active",
+      },
+      {
+        id: foreignGoalId,
+        companyId: foreignCompanyId,
+        title: "Foreign goal",
+        level: "company",
+        status: "active",
+      },
+    ]);
+    await db.insert(projects).values([
+      {
+        id: sourceProjectId,
+        companyId,
+        goalId: sourceGoalId,
+        name: "Source project",
+        status: "in_progress",
+      },
+      {
+        id: foreignProjectId,
+        companyId: foreignCompanyId,
+        goalId: foreignGoalId,
+        name: "Foreign project",
+        status: "in_progress",
+      },
+    ]);
+    const watchdogAgentId = await seedAgent(companyId, { name: "Scoped Product Bug Watchdog" });
+    const watchedRootId = await seedIssue(companyId, {
+      title: "Watched root",
+      projectId: sourceProjectId,
+      goalId: sourceGoalId,
+    });
+    await db.update(issues).set({ billingCode: "source-billing" }).where(eq(issues.id, watchedRootId));
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({
+        title: "Scoped watchdog discovery",
+        projectId: foreignProjectId,
+        goalId: foreignGoalId,
+        billingCode: "caller-billing",
+        watchdogDiscovery: {
+          kind: "product_bug",
+          evidenceMarkdown: "Caller-supplied scope must not cross the source boundary.",
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body).toMatchObject({
+      companyId,
+      projectId: sourceProjectId,
+      goalId: sourceGoalId,
+      billingCode: "source-billing",
+      originKind: "task_watchdog_product_bug",
+      originId: watchedRootId,
+    });
+    const [persisted] = await db.select().from(issues).where(eq(issues.id, res.body.id));
+    expect(persisted).toMatchObject({
+      companyId,
+      projectId: sourceProjectId,
+      goalId: sourceGoalId,
+      billingCode: "source-billing",
     });
   });
 

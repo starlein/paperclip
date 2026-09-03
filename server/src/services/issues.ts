@@ -1435,6 +1435,23 @@ async function getProjectDefaultGoalId(
   return row?.goalId ?? null;
 }
 
+async function assertValidProject(
+  db: ProjectGoalReader,
+  companyId: string,
+  projectId: string | null | undefined,
+) {
+  if (!projectId) return;
+  const project = await db
+    .select({ id: projects.id, companyId: projects.companyId })
+    .from(projects)
+    .where(eq(projects.id, projectId))
+    .then((rows) => rows[0] ?? null);
+  if (!project) throw notFound("Project not found");
+  if (project.companyId !== companyId) {
+    throw unprocessable("Project must belong to same company");
+  }
+}
+
 async function getWorkspaceInheritanceIssue(
   db: DbReader,
   companyId: string,
@@ -7258,6 +7275,8 @@ export function issueService(db: Db) {
         throw unprocessable("in_progress issues require an assignee");
       }
       return db.transaction(async (tx) => {
+        const requestedProjectId = issueData.projectId;
+        await assertValidProject(tx, companyId, requestedProjectId);
         const idempotencyKey = rawIdempotencyKey?.trim() || null;
         const normalizedTitle = normalizeCreateIssueTitle(issueData.title);
         if (allowDuplicate === false) {
@@ -7387,6 +7406,9 @@ export function issueService(db: Db) {
         if (issueData.projectId == null && executionWorkspaceId) {
           const workspace = await assertValidExecutionWorkspace(companyId, null, executionWorkspaceId, tx);
           issueData.projectId = workspace.projectId;
+        }
+        if (issueData.projectId !== requestedProjectId) {
+          await assertValidProject(tx, companyId, issueData.projectId);
         }
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);
         // Cache the project policy lookup for this insert so the default
@@ -7956,6 +7978,7 @@ export function issueService(db: Db) {
         nextProjectId = workspace.projectId;
         patch.projectId = workspace.projectId;
       }
+      await assertValidProject(dbOrTx, existing.companyId, nextProjectId);
       if (nextProjectWorkspaceId) {
         if (!validatedProjectWorkspace) {
           await assertValidProjectWorkspace(existing.companyId, nextProjectId, nextProjectWorkspaceId);

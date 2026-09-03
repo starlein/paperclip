@@ -2832,6 +2832,78 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await tempDb?.cleanup();
   });
 
+  it("rejects issue creation with a project owned by another company", async () => {
+    const companyId = randomUUID();
+    const foreignCompanyId = randomUUID();
+    const foreignProjectId = randomUUID();
+    await db.insert(companies).values([
+      {
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: foreignCompanyId,
+        name: "Foreign company",
+        issuePrefix: `F${foreignCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+    await db.insert(projects).values({
+      id: foreignProjectId,
+      companyId: foreignCompanyId,
+      name: "Foreign project",
+      status: "in_progress",
+    });
+
+    await expect(svc.create(companyId, {
+      title: "Cross-company issue",
+      projectId: foreignProjectId,
+    })).rejects.toMatchObject({
+      status: 422,
+      message: "Project must belong to same company",
+    });
+
+    const persisted = await db.select().from(issues).where(eq(issues.companyId, companyId));
+    expect(persisted).toHaveLength(0);
+  });
+
+  it("rejects issue updates that move an issue to another company's project", async () => {
+    const companyId = randomUUID();
+    const foreignCompanyId = randomUUID();
+    const foreignProjectId = randomUUID();
+    await db.insert(companies).values([
+      {
+        id: companyId,
+        name: "Paperclip",
+        issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+      {
+        id: foreignCompanyId,
+        name: "Foreign company",
+        issuePrefix: `F${foreignCompanyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+        requireBoardApprovalForNewAgents: false,
+      },
+    ]);
+    await db.insert(projects).values({
+      id: foreignProjectId,
+      companyId: foreignCompanyId,
+      name: "Foreign project",
+      status: "in_progress",
+    });
+    const issue = await svc.create(companyId, { title: "Company-scoped issue" });
+
+    await expect(svc.update(issue.id, { projectId: foreignProjectId })).rejects.toMatchObject({
+      status: 422,
+      message: "Project must belong to same company",
+    });
+
+    const [persisted] = await db.select().from(issues).where(eq(issues.id, issue.id));
+    expect(persisted?.projectId).toBeNull();
+  });
+
   it("inherits the parent issue workspace linkage when child workspace fields are omitted", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();
