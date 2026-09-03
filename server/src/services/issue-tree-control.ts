@@ -607,10 +607,10 @@ export function issueTreeControlService(db: Db) {
       .sort((a, b) => a.issueId.localeCompare(b.issueId) || a.createdAt.getTime() - b.createdAt.getTime());
   }
 
-  async function activeHoldsByIssueId(companyId: string, issueIds: string[]) {
+  async function activeHoldsByIssueId(companyId: string, issueIds: string[], dbOrTx: Db = db) {
     const byIssueId = new Map<string, { all: string[]; pause: string[] }>();
     if (issueIds.length === 0) return byIssueId;
-    const rows = await db
+    const rows = await dbOrTx
       .select({
         issueId: issueTreeHoldMembers.issueId,
         holdId: issueTreeHolds.id,
@@ -922,33 +922,64 @@ export function issueTreeControlService(db: Db) {
         throw notFound("One or more issues in the subtree no longer exist");
       }
 
-      // A dependency recovery transaction may have queued work while this
-      // pause waited for the same issue lock. Refresh active runs after the
-      // lock so the caller cancels that newly committed work as part of hold
-      // creation instead of relying on the stale pre-lock preview.
-      if (input.mode === "pause") {
+      // Status, active runs, and existing holds can all change while this
+      // transaction waits for the issue locks. Rebuild the status-dependent
+      // preview from the locked rows before persisting either a pause or cancel
+      // snapshot so reopened work is not retained as a stale terminal skip.
+      if (input.mode === "pause" || input.mode === "cancel") {
         const depthByIssueId = new Map(holdPreview.issues.map((issue) => [issue.id, issue.depth]));
-        const refreshedRuns = (await activeRunsForTree(
-          companyId,
-          lockedIssues.map((issue) => ({ ...issue, depth: depthByIssueId.get(issue.id) ?? 0 })),
-          tx as unknown as Db,
-        )).map(toPreviewRun);
-        const runByIssueId = new Map(refreshedRuns.map((run) => [run.issueId, run]));
-        const refreshedIssues = holdPreview.issues.map((issue) => ({
+        const lockedTreeIssues = lockedIssues.map((issue) => ({
           ...issue,
-          activeRun: runByIssueId.get(issue.id) ?? null,
+          depth: depthByIssueId.get(issue.id) ?? 0,
         }));
+        const [refreshedRunRows, refreshedHolds] = await Promise.all([
+          activeRunsForTree(companyId, lockedTreeIssues, tx as unknown as Db),
+          activeHoldsByIssueId(companyId, issueIds, tx as unknown as Db),
+        ]);
+        const refreshedRuns = refreshedRunRows.map(toPreviewRun);
+        const runByIssueId = new Map(refreshedRuns.map((run) => [run.issueId, run]));
+        const lockedIssueById = new Map(lockedTreeIssues.map((issue) => [issue.id, issue]));
+        const refreshedIssues = holdPreview.issues.map((issue) => {
+          const lockedIssue = lockedIssueById.get(issue.id)!;
+          const holdState = refreshedHolds.get(issue.id) ?? { all: [], pause: [] };
+          const skipReason = issueSkipReason({
+            mode: input.mode,
+            issue: lockedIssue,
+            activePauseHoldIds: holdState.pause,
+          });
+          return {
+            ...issue,
+            status: coerceIssueStatus(lockedIssue.status),
+            parentId: lockedIssue.parentId,
+            assigneeAgentId: lockedIssue.assigneeAgentId,
+            assigneeUserId: lockedIssue.assigneeUserId,
+            activeRun: runByIssueId.get(issue.id) ?? null,
+            activeHoldIds: holdState.all,
+            skipped: skipReason !== null,
+            skipReason,
+          };
+        });
+        const skippedIssues = refreshedIssues.filter((issue) => issue.skipped);
+        const affectedAgents = buildAffectedAgents(refreshedIssues);
+        const countsByStatus: Partial<Record<IssueStatus, number>> = {};
+        for (const issue of refreshedIssues) {
+          countsByStatus[issue.status] = (countsByStatus[issue.status] ?? 0) + 1;
+        }
         holdPreview = {
           ...holdPreview,
           generatedAt: new Date(),
           issues: refreshedIssues,
+          skippedIssues,
           activeRuns: refreshedRuns,
-          affectedAgents: buildAffectedAgents(refreshedIssues),
+          affectedAgents,
+          countsByStatus,
           totals: {
             ...holdPreview.totals,
+            affectedIssues: refreshedIssues.length - skippedIssues.length,
+            skippedIssues: skippedIssues.length,
             activeRuns: refreshedRuns.filter((run) => run.status === "running").length,
             queuedRuns: refreshedRuns.filter((run) => run.status === "queued").length,
-            affectedAgents: buildAffectedAgents(refreshedIssues).length,
+            affectedAgents: affectedAgents.length,
           },
           warnings: buildWarnings({
             mode: input.mode,

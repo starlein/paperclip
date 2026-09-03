@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentWakeupRequests,
@@ -173,8 +173,15 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const agentId = await seedAgent(companyId);
     await seedWatchdog(companyId, sourceId, agentId);
     const { service, wakes } = createService();
+    const transactionSpy = vi.spyOn(db, "transaction");
 
     const result = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(transactionSpy).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+    transactionSpy.mockRestore();
 
     expect(result).toMatchObject({ checked: 1, triggered: 1 });
     expect(wakes).toHaveLength(1);

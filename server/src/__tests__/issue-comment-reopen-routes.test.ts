@@ -1158,6 +1158,7 @@ describe.sequential("issue comment reopen routes", () => {
         presentation: { kind: "system_notice", tone: "warning", detailsDefaultOpen: false },
         metadata,
         sourceTrust: null,
+        postCommitActivityPublications: expect.any(Array),
       },
       mockTx,
     );

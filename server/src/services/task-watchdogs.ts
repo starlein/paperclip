@@ -34,6 +34,7 @@ const TASK_WATCHDOG_SUBTREE_MAX_DEPTH = 100;
 const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"] as const;
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
+  "issue.created",
   "issue.updated",
   "issue.comment_added",
   "issue.approval_linked",
@@ -58,6 +59,7 @@ const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
   "issue.thread_interaction_expired",
 ] as const;
 const TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS = [
+  "issue.created",
   "issue.updated",
   "issue.comment_added",
   "issue.document_created",
@@ -857,31 +859,18 @@ async function countCommitOrderedWatchdogActivities(input: {
   mutableIssueIds: string[];
   watchdogRunId?: string | null;
 }) {
-  const [currentApprovalLinks, historicalApprovalLinks] = await Promise.all([
-    input.db
-      .selectDistinct({ approvalId: issueApprovals.approvalId })
-      .from(issueApprovals)
-      .where(and(
-        eq(issueApprovals.companyId, input.companyId),
-        inArray(issueApprovals.issueId, input.mutableIssueIds),
-      )),
-    input.db
-      .select({ details: activityLog.details })
-      .from(activityLog)
-      .where(and(
-        eq(activityLog.companyId, input.companyId),
-        eq(activityLog.entityType, "issue"),
-        inArray(activityLog.entityId, input.mutableIssueIds),
-        inArray(activityLog.action, ["issue.approval_linked", "issue.approval_unlinked"]),
-      )),
-  ]);
-  const linkedApprovalIds = [...new Set([
-    ...currentApprovalLinks.map((row) => row.approvalId),
-    ...historicalApprovalLinks.flatMap((row) => {
-      const approvalId = parseObject(row.details).approvalId;
-      return typeof approvalId === "string" ? [approvalId] : [];
-    }),
-  ])];
+  // The immutable boundary covers approvals that are gates for the subtree at
+  // the instant it is sampled. Historical links that were already detached do
+  // not belong to the stopped snapshot: counting their later state changes can
+  // otherwise revoke an unrelated watchdog run forever.
+  const currentApprovalLinks = await input.db
+    .selectDistinct({ approvalId: issueApprovals.approvalId })
+    .from(issueApprovals)
+    .where(and(
+      eq(issueApprovals.companyId, input.companyId),
+      inArray(issueApprovals.issueId, input.mutableIssueIds),
+    ));
+  const linkedApprovalIds = currentApprovalLinks.map((row) => row.approvalId);
   const [issueRows, approvalRows] = await Promise.all([
     input.db
       .select({ count: sql<number>`count(*)::int` })
@@ -2124,28 +2113,43 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       return { state: "skipped" as const, reason: "watched_issue_not_applicable" };
     }
 
-    // Capture an append-only database visibility boundary before collecting
-    // the stopped snapshot. A transaction that later commits an activity with
-    // an older `created_at` still increases this count, so revalidation cannot
-    // mistake transaction-start time for commit order.
-    const boundaryIssueIds = (await loadWatchdogSubtreeIssues(
-      watchdog.companyId,
-      watchdog.issueId,
-    )).map((issue) => issue.id);
-    const recoveryActivityBoundary = {
-      version: 1 as const,
-      issueActivityCount: await countCommitOrderedWatchdogActivities({
-        db,
-        companyId: watchdog.companyId,
-        mutableIssueIds: boundaryIssueIds,
-      }),
-    };
-    // Keep the legacy timestamp after the database visibility boundary and
-    // before the stopped-subtree snapshot. Timestamp-filtered interaction and
-    // approval provenance therefore cannot reclassify activity already
-    // included in the boundary as a later competing mutation.
-    const triggeredAt = new Date();
-    const input = await collectClassifierInput(watchdog.companyId, watchdog);
+    // Capture the append-only activity boundary and stopped classifier input
+    // from one repeatable-read snapshot. A material transaction can otherwise
+    // commit between the count and classifier reads: its state would appear in
+    // the stopped snapshot while its activity was missing from the boundary,
+    // causing the later recovery run to reject its own valid wake context.
+    const stableSnapshot = await db.transaction(async (tx) => {
+      const snapshotDb = tx as unknown as Db;
+      const boundaryIssueIds = (await loadWatchdogSubtreeIssues(
+        watchdog.companyId,
+        watchdog.issueId,
+        snapshotDb,
+      )).map((issue) => issue.id);
+      const recoveryActivityBoundary = {
+        version: 1 as const,
+        issueActivityCount: await countCommitOrderedWatchdogActivities({
+          db: snapshotDb,
+          companyId: watchdog.companyId,
+          mutableIssueIds: boundaryIssueIds,
+        }),
+      };
+      // Keep the legacy timestamp after the database visibility boundary and
+      // before the stopped-subtree snapshot. Timestamp-filtered interaction
+      // provenance therefore cannot reclassify activity already included in
+      // this same database snapshot as a later competing mutation.
+      const triggeredAt = new Date();
+      const classifierInput = await collectClassifierInput(
+        watchdog.companyId,
+        watchdog,
+        snapshotDb,
+      );
+      return { classifierInput, recoveryActivityBoundary, triggeredAt };
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+    const {
+      classifierInput: input,
+      recoveryActivityBoundary,
+      triggeredAt,
+    } = stableSnapshot;
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state !== "stopped") {
       return { state: classification.state, reason: classification.reason, classification };
@@ -2461,6 +2465,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     watchdogId: string;
     companyId: string;
     watchedIssueId: string;
+    watchdogIssueId?: string | null;
     stopFingerprint: string | null;
     runId?: string | null;
   }, options: {
@@ -2481,6 +2486,16 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         scope.watchedIssueId,
         queryDb,
       );
+      const permittedIssueIds = new Set([
+        ...mutableSubtree.map((issue) => issue.id),
+        ...(scope.watchdogIssueId ? [scope.watchdogIssueId] : []),
+      ]);
+      if (options.lockIssueIds.some((issueId) => !permittedIssueIds.has(issueId))) {
+        return {
+          allowed: false as const,
+          reason: "Task-watchdog mutation target is outside the current watched subtree.",
+        };
+      }
       const issueIds = [...new Set([
         ...mutableSubtree.map((issue) => issue.id),
         ...options.lockIssueIds,

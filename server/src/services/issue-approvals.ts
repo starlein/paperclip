@@ -74,14 +74,14 @@ export function issueApprovalService(db: Db) {
     approvalId: string,
     lock = false,
   ) {
-    // Issue first, approval second is the global lock order shared with approval
-    // status mutation. Dependency recovery already owns the issue row, so a new
-    // pending link cannot appear between its wait-gate read and disposition.
-    const issue = await getIssue(dbOrTx, issueId, lock);
-    if (!issue) throw notFound("Issue not found");
-
+    // The approval row is the global serialization point for decisions and
+    // link-set changes. Taking it first makes the linked issue set stable for
+    // approval resolution before any issue locks are discovered.
     const approval = await getApproval(dbOrTx, approvalId, lock);
     if (!approval) throw notFound("Approval not found");
+
+    const issue = await getIssue(dbOrTx, issueId, lock);
+    if (!issue) throw notFound("Issue not found");
 
     if (issue.companyId !== approval.companyId) {
       throw unprocessable("Issue and approval must belong to the same company");
@@ -212,6 +212,9 @@ export function issueApprovalService(db: Db) {
       const uniqueIssueIds = Array.from(new Set(issueIds));
       const publications: ActivityPublication[] = [];
       await db.transaction(async (tx) => {
+        const approval = await getApproval(tx, approvalId, true);
+        if (!approval) throw notFound("Approval not found");
+
         const rows = await tx
           .select({
             id: issues.id,
@@ -225,9 +228,6 @@ export function issueApprovalService(db: Db) {
         if (rows.length !== uniqueIssueIds.length) {
           throw notFound("One or more issues not found");
         }
-
-        const approval = await getApproval(tx, approvalId, true);
-        if (!approval) throw notFound("Approval not found");
         for (const row of rows) {
           if (row.companyId !== approval.companyId) {
             throw unprocessable("Issue and approval must belong to the same company");

@@ -9153,6 +9153,7 @@ export function issueService(db: Db) {
         authorizationReason?: string | null;
         sourceTrust?: typeof issueComments.$inferInsert.sourceTrust;
         createdAt?: Date | string | null;
+        postCommitActivityPublications?: ActivityPublication[];
       },
       dbOrTx: any = db,
     ) => {
@@ -9249,7 +9250,7 @@ export function issueService(db: Db) {
               source: "issue.comment.service",
               result: interaction.result ?? null,
             },
-          });
+          }, options?.postCommitActivityPublications);
         }
       }
 

@@ -171,6 +171,22 @@ function createRunContextDb(contextSnapshot: Record<string, unknown>) {
   };
 }
 
+function createMutationDb() {
+  const mutationDb: any = {
+    select: vi.fn(() => {
+      const query: any = {
+        from: vi.fn(() => query),
+        where: vi.fn(() => query),
+        for: vi.fn(() => query),
+        then: async (resolve: (rows: unknown[]) => unknown) => resolve([{ id: issueId }]),
+      };
+      return query;
+    }),
+  };
+  mutationDb.transaction = vi.fn(async (callback: (tx: typeof mutationDb) => Promise<unknown>) => callback(mutationDb));
+  return mutationDb;
+}
+
 async function createApp(
   actor: Express.Request["actor"] = {
     type: "board",
@@ -179,7 +195,7 @@ async function createApp(
     source: "local_implicit",
     isInstanceAdmin: false,
   },
-  db: unknown = {},
+  db: unknown = createMutationDb(),
 ) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
@@ -341,6 +357,7 @@ describe("issue document revision routes", () => {
           revisionNumber: 3,
         }),
       }),
+      expect.any(Array),
     );
     expect(res.body).toEqual(expect.objectContaining({
       key: "plan",

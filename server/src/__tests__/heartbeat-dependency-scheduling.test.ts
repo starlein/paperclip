@@ -898,6 +898,62 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(unlinkActivities).toHaveLength(1);
   });
 
+  it("stabilizes the approval link set before recording a decision", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `L${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Concurrently linked approval gate",
+      status: "blocked",
+      priority: "high",
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "test",
+      status: "pending",
+      payload: {},
+    });
+
+    let releaseApproval!: () => void;
+    const approvalCanUnlock = new Promise<void>((resolve) => { releaseApproval = resolve; });
+    let approvalLocked!: () => void;
+    const approvalIsLocked = new Promise<void>((resolve) => { approvalLocked = resolve; });
+    const holder = db.transaction(async (tx) => {
+      await tx.select({ id: approvals.id }).from(approvals).where(eq(approvals.id, approvalId)).for("update");
+      approvalLocked();
+      await approvalCanUnlock;
+    });
+    await approvalIsLocked;
+
+    const link = issueApprovalService(db).link(issueId, approvalId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const decision = approvalService(db).approve(approvalId, "board-user");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseApproval();
+    await holder;
+    await link;
+    await decision;
+
+    const [decisionActivity] = await db
+      .select({ details: activityLog.details })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.entityType, "approval"),
+        eq(activityLog.entityId, approvalId),
+        eq(activityLog.action, "approval.approved"),
+      ));
+    expect(decisionActivity?.details).toMatchObject({ linkedIssueIds: [issueId] });
+  });
+
   it("waits for an in-flight blocker edge addition before evaluating readiness", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

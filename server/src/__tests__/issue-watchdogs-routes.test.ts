@@ -16,10 +16,12 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueDocuments,
   issueApprovals,
   issueRelations,
   issueThreadInteractions,
   issueWatchdogs,
+  issueWorkProducts,
   issues,
   principalPermissionGrants,
 } from "@paperclipai/db";
@@ -34,6 +36,7 @@ import { heartbeatService } from "../services/heartbeat.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { taskWatchdogService } from "../services/task-watchdogs.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -274,6 +277,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       ...(stopSnapshot?.materialLeaves ?? []).map((leaf) => leaf.issueId),
     ]);
     const commitOrderedActions = new Set([
+      "issue.created",
       "issue.updated",
       "issue.comment_added",
       "issue.document_created",
@@ -297,13 +301,6 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .select({ entityId: activityLog.entityId, action: activityLog.action, details: activityLog.details })
       .from(activityLog)
       .where(eq(activityLog.companyId, input.companyId));
-    for (const activity of boundaryActivities) {
-      if (activity.action !== "issue.approval_linked" && activity.action !== "issue.approval_unlinked") {
-        continue;
-      }
-      const details = activity.details as Record<string, unknown> | null;
-      if (typeof details?.approvalId === "string") boundaryApprovalIds.add(details.approvalId);
-    }
     const issueActivityCount = boundaryActivities.filter((activity) =>
       commitOrderedActions.has(activity.action) &&
       (boundaryIssueIds.has(activity.entityId) || boundaryApprovalIds.has(activity.entityId))
@@ -1040,6 +1037,41 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(ownActivities).toHaveLength(3);
   });
 
+  it("serializes concurrent watchdog comments at the recovery mutation cap", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" })
+      .expect(200);
+    await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "watchdog-recovery" })
+      .expect(200);
+
+    const concurrent = await Promise.all([
+      request(fixture.app)
+        .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+        .send({ body: "First concurrent disposition." }),
+      request(fixture.app)
+        .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+        .send({ body: "Second concurrent disposition." }),
+    ]);
+    expect(concurrent.map((response) => response.status).sort()).toEqual([201, 409]);
+
+    const ownRecoveryActivities = await db
+      .select({ action: activityLog.action })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.runId, fixture.watchdogRunId),
+        eq(activityLog.entityType, "issue"),
+      ));
+    expect(ownRecoveryActivities.filter((activity) =>
+      activity.action === "issue.updated" || activity.action === "issue.comment_added"
+    )).toHaveLength(3);
+  });
+
   it("rolls back a watchdog PATCH when its locked activity receipt cannot persist", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     const constraintName = `watchdog_activity_${randomUUID().replace(/-/g, "")}`;
@@ -1094,6 +1126,21 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       sourceUnresolvedBlocker: true,
     });
     const boardApp = createApp(fixture.companyId);
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId: fixture.companyId,
+      issueId: fixture.sourceIssueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "wake_assignee_on_accept",
+      payload: { version: 1, prompt: "Continue?", supersedeOnUserComment: true },
+    });
+    const liveEvents: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeCompanyLiveEvents(
+      fixture.companyId,
+      (event) => liveEvents.push(event),
+    );
     const constraintName = `watchdog_comment_${randomUUID().replace(/-/g, "")}`;
     await db.execute(sql.raw(
       `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
@@ -1111,6 +1158,69 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         .from(issueComments)
         .where(eq(issueComments.issueId, fixture.sourceIssueId));
       expect(comments).toHaveLength(0);
+      const [interaction] = await db
+        .select({ status: issueThreadInteractions.status })
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interactionId));
+      expect(interaction?.status).toBe("pending");
+      expect(liveEvents).not.toContainEqual(expect.objectContaining({
+        type: "activity.logged",
+        payload: expect.objectContaining({
+          action: "issue.thread_interaction_expired",
+          entityId: fixture.sourceIssueId,
+        }),
+      }));
+    } finally {
+      unsubscribe();
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
+  it("rolls back a document write when its material activity boundary cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardApp = createApp(fixture.companyId);
+    const constraintName = `watchdog_document_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (entity_id IS DISTINCT FROM '${fixture.sourceIssueId}' OR action <> 'issue.document_created')`,
+    ));
+
+    try {
+      const response = await request(boardApp)
+        .put(`/api/issues/${fixture.sourceIssueId}/documents/recovery-evidence`)
+        .send({ format: "markdown", body: "# Must roll back" });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const documents = await db
+        .select({ id: issueDocuments.id })
+        .from(issueDocuments)
+        .where(eq(issueDocuments.issueId, fixture.sourceIssueId));
+      expect(documents).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
+  it("rolls back a work-product write when its material activity boundary cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardApp = createApp(fixture.companyId);
+    const constraintName = `watchdog_work_product_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (entity_id IS DISTINCT FROM '${fixture.sourceIssueId}' OR action <> 'issue.work_product_created')`,
+    ));
+
+    try {
+      const response = await request(boardApp)
+        .post(`/api/issues/${fixture.sourceIssueId}/work-products`)
+        .send({ type: "artifact", provider: "test", title: "Must roll back" });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const products = await db
+        .select({ id: issueWorkProducts.id })
+        .from(issueWorkProducts)
+        .where(eq(issueWorkProducts.issueId, fixture.sourceIssueId));
+      expect(products).toHaveLength(0);
     } finally {
       await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
     }
@@ -1173,6 +1283,27 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .from(issues)
       .where(eq(issues.id, fixture.sourceChildId!));
     expect(child?.priority).toBe("high");
+  });
+
+  it("treats an externally created descendant as a recovery boundary", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardApp = createApp(fixture.companyId);
+
+    const created = await request(boardApp)
+      .post(`/api/issues/${fixture.sourceIssueId}/children`)
+      .send({ title: "Operator-created recovery path" });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+
+    const watchdogMutation = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(watchdogMutation.status, JSON.stringify(watchdogMutation.body)).toBe(409);
+
+    const [source] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
   });
 
   it("locks every mutable descendant before transactional watchdog revalidation", async () => {
@@ -1794,6 +1925,57 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(409);
     const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("ignores state changes for an approval detached before the watchdog trigger", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const detachedApprovalId = randomUUID();
+    await db.insert(approvals).values({
+      id: detachedApprovalId,
+      companyId: fixture.companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: { title: "Detached historical approval" },
+    });
+    await db.insert(activityLog).values([
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.approval_linked",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { approvalId: detachedApprovalId },
+        createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 2_000),
+      },
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.approval_unlinked",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { approvalId: detachedApprovalId },
+        createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 1_000),
+      },
+    ]);
+    await db.update(approvals)
+      .set({ status: "approved" })
+      .where(eq(approvals.id, detachedApprovalId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "approval.approved",
+      entityType: "approval",
+      entityId: detachedApprovalId,
+      details: {},
+    });
+
+    const response = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
   });
 
   it("rejects recovery provenance superseded by a linked approval cancellation", async () => {

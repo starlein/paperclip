@@ -423,6 +423,61 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     });
   });
 
+  it("refreshes a reopened issue before persisting a cancel hold snapshot", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Concurrently reopened issue",
+      status: "done",
+      priority: "high",
+    });
+
+    let releaseReopen!: () => void;
+    const reopenCanUnlock = new Promise<void>((resolve) => { releaseReopen = resolve; });
+    let reopenLocked!: () => void;
+    const reopenIsLocked = new Promise<void>((resolve) => { reopenLocked = resolve; });
+    const reopen = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId)).for("update");
+      await tx.update(issues).set({ status: "todo", completedAt: null }).where(eq(issues.id, issueId));
+      reopenLocked();
+      await reopenCanUnlock;
+    });
+    await reopenIsLocked;
+
+    let holdSettled = false;
+    const holdPromise = issueTreeControlService(db).createHold(companyId, issueId, {
+      mode: "cancel",
+      reason: "operator requested cancellation",
+      actor: { actorType: "user", actorId: "board-user", userId: "board-user" },
+    }).finally(() => { holdSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(holdSettled).toBe(false);
+
+    releaseReopen();
+    await reopen;
+    const created = await holdPromise;
+    expect(created.preview.issues[0]).toMatchObject({
+      id: issueId,
+      status: "todo",
+      skipped: false,
+      skipReason: null,
+    });
+    expect(created.hold.members?.[0]).toMatchObject({
+      issueId,
+      issueStatus: "todo",
+      skipped: false,
+      skipReason: null,
+    });
+  });
+
   it("cancels non-terminal issue statuses and restores from the cancel snapshot", async () => {
     const companyId = randomUUID();
     const rootIssueId = randomUUID();

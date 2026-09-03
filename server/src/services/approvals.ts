@@ -58,9 +58,10 @@ export function approvalService(db: Db) {
     mutation: (tx: any, existing: ApprovalRecord, linkedIssueIds: string[]) => Promise<T>,
   ): Promise<T> {
     return db.transaction(async (tx) => {
-      // Approval links take issue locks before the approval lock. Match that
-      // order here so dependency recovery's issue lock serializes every change
-      // to an approval gate without introducing an issue/approval deadlock.
+      // The approval row is the serialization point for both decisions and
+      // link-set changes. Lock it before discovering linked issues so a link
+      // cannot commit between the discovery query and the decision.
+      const existing = await getExistingApproval(id, tx, true);
       const linkedIssues = await tx
         .select({ id: issues.id })
         .from(issueApprovals)
@@ -68,7 +69,6 @@ export function approvalService(db: Db) {
         .where(eq(issueApprovals.approvalId, id))
         .orderBy(asc(issues.id))
         .for("update", { of: issues });
-      const existing = await getExistingApproval(id, tx, true);
       return mutation(tx, existing, linkedIssues.map((issue: { id: string }) => issue.id));
     });
   }
