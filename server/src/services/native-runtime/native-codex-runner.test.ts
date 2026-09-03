@@ -55,7 +55,6 @@ describe("buildNativeRunnerPreparePayload", () => {
       },
     })).toMatchObject({
       provider: {
-        kind: "codex",
         provider: "codex",
         driver: "codex_app_server",
         providerSessionId: "thread-1",

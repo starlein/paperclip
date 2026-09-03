@@ -19,7 +19,6 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "../../__tests__/helpers/embedded-postgres.js";
-import { drainHeartbeatRunsToQuiescence } from "../../__tests__/helpers/drain-heartbeat-runs.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import {
   deliverNativeQuestionResponse,
@@ -50,7 +49,6 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("native question bridge", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let db: ReturnType<typeof createDb>;
-  let heartbeat: ReturnType<typeof heartbeatService>;
   let companyId: string;
   let issueId: string;
   let agentId: string;
@@ -61,17 +59,9 @@ describeEmbeddedPostgres("native question bridge", () => {
   beforeAll(async () => {
     temporary = await startEmbeddedPostgresTestDatabase("paperclip-native-question-");
     db = createDb(temporary.connectionString);
-    heartbeat = heartbeatService(db);
   }, 20_000);
 
   afterEach(async () => {
-    // A cancelled or reaped run can promote and dispatch its agent's next
-    // queued run fire-and-forget (see startNextQueuedRunForAgent in
-    // heartbeat.ts), so that dispatch can still be writing heartbeat_runs,
-    // issues, or activity_log rows when this hook starts. Drain every
-    // in-flight run to quiescence first, or its late write races the
-    // TRUNCATE below and can deadlock.
-    await drainHeartbeatRunsToQuiescence(db, heartbeat);
     nativeQuestionBridgeInternals.resetForTests();
     await db.execute(sql.raw(`
       TRUNCATE TABLE
@@ -392,7 +382,7 @@ describeEmbeddedPostgres("native question bridge", () => {
     });
 
     // Simulate process exit before executeIssuePostCommitActions can run.
-    await heartbeat.reapOrphanedRuns();
+    await heartbeatService(db).reapOrphanedRuns();
 
     const [persistedRun] = await db.select({
       status: heartbeatRuns.status,
@@ -441,7 +431,7 @@ describeEmbeddedPostgres("native question bridge", () => {
       },
     });
 
-    await heartbeat.reapOrphanedRuns();
+    await heartbeatService(db).reapOrphanedRuns();
 
     const [cancelledRun] = await db.select({
       status: heartbeatRuns.status,

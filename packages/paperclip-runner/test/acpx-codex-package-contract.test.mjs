@@ -54,9 +54,8 @@ test("the server can resolve the vendored runner production dependencies", () =>
   );
 });
 
-test("the package exposes only the reviewed runner CLI binaries", () => {
+test("the package exposes only the reviewed provider transport binaries", () => {
   assert.deepEqual(runnerPackage.bin, {
-    "paperclip-runner-eval-session": "./dist/cli/eval-session.js",
     "paperclip-runner-codex-proxy":
       "./dist/cli/codex-app-server-unix-proxy.js",
     "paperclip-runner-acpx-sidecar": "./dist/cli/acpx-runtime-sidecar.js",
