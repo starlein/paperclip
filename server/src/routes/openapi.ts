@@ -2346,7 +2346,7 @@ registry.registerPath({
   summary: "Update an issue",
   request: {
     params: z.object({ id: z.string() }),
-    body: jsonBody(updateIssueSchema.partial()),
+    body: jsonBody(updateIssueSchema.omit({ watchdogDiscovery: true }).partial()),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound, 422: r.unprocessable },
 });

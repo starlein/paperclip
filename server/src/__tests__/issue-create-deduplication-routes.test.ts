@@ -11,6 +11,7 @@ import {
   heartbeatRuns,
   issueCreateIdempotencyKeys,
   issues,
+  projects,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -48,6 +49,7 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
     await db.delete(activityLog);
     await db.delete(issueCreateIdempotencyKeys);
     await db.delete(issues);
+    await db.delete(projects);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
@@ -113,6 +115,41 @@ describeEmbeddedPostgres("issue create deduplication routes", () => {
       deduplicationReason: "idempotency_key",
     });
     expect(await db.select().from(issueCreateIdempotencyKeys)).toHaveLength(1);
+  });
+
+  it("replays an idempotent create before validating changed project input", async () => {
+    const companyId = await seedCompany();
+    const foreignCompanyId = await seedCompany();
+    const foreignProjectId = randomUUID();
+    await db.insert(projects).values({
+      id: foreignProjectId,
+      companyId: foreignCompanyId,
+      name: "Foreign project",
+      status: "in_progress",
+    });
+    const parent = await seedParent(companyId);
+    const app = createApp();
+
+    const first = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({ parentId: parent.id, title: "Prepare release", idempotencyKey: "run-1:project-replay" })
+      .expect(201);
+    const replay = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({
+        parentId: parent.id,
+        title: "Changed retry payload",
+        projectId: foreignProjectId,
+        idempotencyKey: "run-1:project-replay",
+      })
+      .expect(200);
+
+    expect(replay.body).toMatchObject({
+      id: first.body.id,
+      projectId: null,
+      deduplicated: true,
+      deduplicationReason: "idempotency_key",
+    });
   });
 
   it("expires old idempotency keys before replay lookup", async () => {
