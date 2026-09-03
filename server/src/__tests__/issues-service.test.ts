@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   assets,
   companies,
@@ -3966,6 +3967,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(issueRelations);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
+    await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(workspaceOperations);
     await db.delete(executionWorkspaces);
@@ -4458,6 +4460,81 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         id: blockedIssueId,
         assigneeAgentId,
         blockerIssueIds: expect.arrayContaining([blockerA, blockerB]),
+      }),
+    ]);
+  });
+
+  it("persists the last-blocker dependency wake intent before the completion transaction commits", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const blockerId = randomUUID();
+    const dependentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Durable dependency wake",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "Dependent owner",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Last blocker", status: "todo", priority: "high" },
+      {
+        id: dependentId,
+        companyId,
+        title: "Blocked dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId,
+        blockedTransitionAt: new Date(),
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: dependentId,
+      type: "blocks",
+    });
+
+    const postCommitActions: Parameters<typeof svc.update>[4] = [];
+    await db.transaction(async (tx) => {
+      const updated = await svc.update(
+        blockerId,
+        { status: "done" },
+        tx,
+        undefined,
+        postCommitActions,
+      );
+      expect(updated?.status).toBe("done");
+      await expect(tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.agentId, assigneeAgentId),
+        eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+      ))).resolves.toEqual([
+        expect.objectContaining({
+          status: "queued",
+          runId: null,
+          requestedByActorId: "issue-blockers-resolved-intent",
+        }),
+      ]);
+      await expect(tx.select({ status: issues.status }).from(issues).where(eq(issues.id, dependentId)))
+        .resolves.toEqual([{ status: "blocked" }]);
+    });
+
+    expect(postCommitActions).toEqual([
+      expect.objectContaining({
+        type: "dispatch_dependency_wake_intents",
+        companyId,
+        wakeupRequestIds: [expect.any(String)],
       }),
     ]);
   });

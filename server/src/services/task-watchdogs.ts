@@ -35,6 +35,7 @@ const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"]
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
   "issue.created",
+  "issue.child_created",
   "issue.updated",
   "issue.comment_added",
   "issue.approval_linked",
@@ -60,6 +61,7 @@ const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
 ] as const;
 const TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS = [
   "issue.created",
+  "issue.child_created",
   "issue.updated",
   "issue.comment_added",
   "issue.document_created",
@@ -89,6 +91,7 @@ const TASK_WATCHDOG_RECOVERY_MUTATION_ACTIVITY_ACTIONS = [
   "issue.updated",
   "issue.comment_added",
   "issue.created",
+  "issue.child_created",
   "issue.thread_interaction_created",
   "issue.thread_interaction_accepted",
   "issue.thread_interaction_rejected",
@@ -2472,6 +2475,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     queryDb?: Db;
     lockIssueIds?: string[];
     skipStaleOwnershipReconciliation?: boolean;
+    plannedMutationCount?: number;
   } = {}) {
     const queryDb = options.queryDb ?? db;
     if (options.lockIssueIds && options.lockIssueIds.length > 0) {
@@ -2597,10 +2601,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           watchdogRunId: scope.runId,
         }),
       ]);
-      if (consumedMutations >= TASK_WATCHDOG_RECOVERY_MUTATION_LIMIT) {
+      const plannedMutationCount = Math.max(1, Math.trunc(options.plannedMutationCount ?? 1));
+      if (consumedMutations + plannedMutationCount > TASK_WATCHDOG_RECOVERY_MUTATION_LIMIT) {
         return {
           allowed: false as const,
-          reason: `Task-watchdog recovery batch is exhausted after ${TASK_WATCHDOG_RECOVERY_MUTATION_LIMIT} mutations.`,
+          reason: `Task-watchdog recovery batch cannot exceed ${TASK_WATCHDOG_RECOVERY_MUTATION_LIMIT} mutations.`,
           classification,
         };
       }

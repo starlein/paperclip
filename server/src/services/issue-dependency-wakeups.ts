@@ -4,6 +4,12 @@ import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, heartbeatRuns } from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
+export const ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID =
+  "issue-blockers-resolved-intent";
+
+export function isIssueBlockersResolvedWakeIntentActorId(value: string | null | undefined) {
+  return value === ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID;
+}
 
 // A wake counts as "already delivered or in flight for the current ready state"
 // for these statuses. The level-triggered state key uses this full set so that
@@ -232,6 +238,7 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
       runStatus: heartbeatRuns.status,
       idempotencyKey: agentWakeupRequests.idempotencyKey,
       requestedAt: agentWakeupRequests.requestedAt,
+      requestedByActorId: agentWakeupRequests.requestedByActorId,
     })
     .from(agentWakeupRequests)
     .leftJoin(
@@ -261,7 +268,11 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
       blockedTransitionAt,
     })) return false;
     if (row.status === "completed") return true;
-    if (!row.runId) return row.status !== "claimed";
+    if (!row.runId) {
+      return row.status !== "claimed" ||
+        row.requestedByActorId === ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID ||
+        row.requestedByActorId === "native-status-committer";
+    }
     return Boolean(
       row.runStatus && !TERMINAL_DEPENDENCY_WAKE_RUN_STATUS_SET.has(row.runStatus),
     );

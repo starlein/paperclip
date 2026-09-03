@@ -32,7 +32,10 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
-import { buildIssueBlockersResolvedWakeStateKey } from "../services/issue-dependency-wakeups.ts";
+import {
+  buildIssueBlockersResolvedWakeStateKey,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+} from "../services/issue-dependency-wakeups.ts";
 import { approvalService } from "../services/approvals.ts";
 import { issueApprovalService } from "../services/issue-approvals.ts";
 import { issueService } from "../services/issues.ts";
@@ -267,6 +270,127 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       expect.objectContaining({ status: "coalesced", runId: dispatchedRun!.id }),
     ]));
     expect(dispatchedRequests[0]).toMatchObject({ runId: dispatchedRun!.id });
+  });
+
+  it("dispatches a persisted dependency intent to the assignee despite an unrelated mention run", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const mentionedAgentId = randomUUID();
+    const blockerId = randomUUID();
+    const dependentId = randomUUID();
+    const blockedTransitionAt = new Date("2026-09-03T12:00:00.000Z");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Dependency intent dispatch",
+      issuePrefix: `D${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "DependentAssignee",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      },
+      {
+        id: mentionedAgentId,
+        companyId,
+        name: "MentionParticipant",
+        role: "reviewer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Completed blocker", status: "done", priority: "high" },
+      {
+        id: dependentId,
+        companyId,
+        title: "Ready dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId,
+        responsibleUserId: "responsible-user",
+        blockedTransitionAt,
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: dependentId,
+      type: "blocks",
+    });
+    const [mentionRequest] = await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId: mentionedAgentId,
+      source: "automation",
+      triggerDetail: "mention",
+      reason: "issue_comment_mentioned",
+      payload: { issueId: dependentId, commentId: randomUUID() },
+      status: "queued",
+    }).returning();
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: mentionedAgentId,
+      invocationSource: "automation",
+      triggerDetail: "mention",
+      status: "queued",
+      responsibleUserId: "responsible-user",
+      wakeupRequestId: mentionRequest!.id,
+      contextSnapshot: { issueId: dependentId },
+    });
+    const [intent] = await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId: assigneeAgentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: dependentId,
+        taskId: dependentId,
+        resolvedBlockerIssueId: blockerId,
+        blockerIssueIds: [blockerId],
+        _paperclipWakeContext: { issueId: dependentId, taskId: dependentId },
+      },
+      status: "queued",
+      requestedByActorType: "system",
+      requestedByActorId: ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: dependentId,
+        blockerIssueIds: [blockerId],
+        blockedTransitionAt,
+      }),
+    }).returning();
+
+    const result = await heartbeat.dispatchPendingNativeStatusWakeups({
+      companyId,
+      requestIds: [intent!.id],
+    });
+    expect(result).toMatchObject({ scanned: 1, dispatched: 1 });
+    await heartbeat.drainActiveRunExecutions();
+
+    const [runnableDependent] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, dependentId));
+    expect(["todo", "in_progress"]).toContain(runnableDependent?.status);
+    const dependencyDispatches = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.agentId, assigneeAgentId),
+      eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+      sql`${agentWakeupRequests.requestedByActorId} like 'dependency-wake-dispatch:%'`,
+    ));
+    expect(dependencyDispatches).toHaveLength(1);
+    expect(dependencyDispatches[0]?.runId).toEqual(expect.any(String));
   });
 
   it("keeps blocked descendants idle until their blockers resolve", async () => {

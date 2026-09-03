@@ -350,6 +350,66 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     expect(released.members).toHaveLength(1);
   });
 
+  it("revalidates active pause holds after a concurrent release commits", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Concurrent hold release",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: rootIssueId,
+      companyId,
+      title: "Root",
+      status: "todo",
+      priority: "medium",
+    });
+    const svc = issueTreeControlService(db);
+    const first = await svc.createHold(companyId, rootIssueId, {
+      mode: "pause",
+      reason: "first pause",
+      actor: { actorType: "user", actorId: "board-user", userId: "board-user" },
+    });
+
+    let releaseCommit!: () => void;
+    const releaseCanCommit = new Promise<void>((resolve) => { releaseCommit = resolve; });
+    let releaseLocked!: () => void;
+    const releaseHasLock = new Promise<void>((resolve) => { releaseLocked = resolve; });
+    const release = db.transaction(async (tx) => {
+      await tx.select({ id: issueTreeHolds.id })
+        .from(issueTreeHolds)
+        .where(eq(issueTreeHolds.id, first.hold.id))
+        .for("update");
+      await tx.update(issueTreeHolds).set({ status: "released", releasedAt: new Date() })
+        .where(eq(issueTreeHolds.id, first.hold.id));
+      releaseLocked();
+      await releaseCanCommit;
+    });
+    await releaseHasLock;
+
+    let createSettled = false;
+    const create = svc.createHold(companyId, rootIssueId, {
+      mode: "pause",
+      reason: "replacement pause",
+      actor: { actorType: "user", actorId: "board-user", userId: "board-user" },
+    }).finally(() => { createSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(createSettled).toBe(false);
+
+    releaseCommit();
+    await release;
+    const replacement = await create;
+    expect(replacement.hold.status).toBe("active");
+    expect(replacement.hold.members?.[0]).toMatchObject({
+      issueId: rootIssueId,
+      skipped: false,
+      skipReason: null,
+    });
+    expect(replacement.preview.issues[0]?.activeHoldIds).not.toContain(first.hold.id);
+  });
+
   it("waits for dependency recovery and refreshes newly queued runs before creating a pause hold", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

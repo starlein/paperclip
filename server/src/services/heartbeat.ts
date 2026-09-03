@@ -246,7 +246,9 @@ import { toolAccessService } from "./tool-access.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
   buildIssueBlockersResolvedWakeStateKey,
+  isIssueBlockersResolvedWakeIntentActorId,
 } from "./issue-dependency-wakeups.js";
 import {
   buildIssueMonitorClearedPatch,
@@ -23783,6 +23785,7 @@ export function heartbeatService(
               id: agentWakeupRequests.id,
               status: agentWakeupRequests.status,
               runId: agentWakeupRequests.runId,
+              requestedByActorId: agentWakeupRequests.requestedByActorId,
             })
             .from(agentWakeupRequests)
             .leftJoin(
@@ -23824,6 +23827,9 @@ export function heartbeatService(
             existingDependencyWake &&
             (existingDependencyWake.status !== "completed" || issue.status !== "blocked")
           ) {
+            const isDurableDependencyIntent =
+              !existingDependencyWake.runId &&
+              isIssueBlockersResolvedWakeIntentActorId(existingDependencyWake.requestedByActorId);
             const existingDependencyRun = existingDependencyWake.runId
               ? await tx
                   .select({ status: heartbeatRuns.status })
@@ -23846,15 +23852,17 @@ export function heartbeatService(
               await moveResolvedDependencyToRunnableDisposition();
               return { kind: "deferred" as const };
             }
-            await tx
-              .update(agentWakeupRequests)
-              .set({
-                status: "failed",
-                finishedAt: new Date(),
-                error: "Dependency wake had no live linked assignee run during enqueue",
-                updatedAt: new Date(),
-              })
-              .where(eq(agentWakeupRequests.id, existingDependencyWake.id));
+            if (!isDurableDependencyIntent) {
+              await tx
+                .update(agentWakeupRequests)
+                .set({
+                  status: "failed",
+                  finishedAt: new Date(),
+                  error: "Dependency wake had no live linked assignee run during enqueue",
+                  updatedAt: new Date(),
+                })
+                .where(eq(agentWakeupRequests.id, existingDependencyWake.id));
+            }
           }
         }
 
@@ -24711,6 +24719,7 @@ export function heartbeatService(
    */
   async function dispatchPendingNativeStatusWakeups(input: {
     companyId?: string;
+    requestIds?: string[];
     limit?: number;
     staleClaimMs?: number;
   } = {}) {
@@ -24723,8 +24732,14 @@ export function heartbeatService(
         input.companyId
           ? eq(agentWakeupRequests.companyId, input.companyId)
           : undefined,
+        input.requestIds && input.requestIds.length > 0
+          ? inArray(agentWakeupRequests.id, input.requestIds)
+          : undefined,
         eq(agentWakeupRequests.requestedByActorType, "system"),
-        eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
+        inArray(agentWakeupRequests.requestedByActorId, [
+          "native-status-committer",
+          ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+        ]),
         inArray(agentWakeupRequests.status, ["queued", "claimed"]),
         isNull(agentWakeupRequests.runId),
       ))
@@ -24737,7 +24752,10 @@ export function heartbeatService(
     const deliveredByIssueScope = new Map<string, { runId: string | null; status: string }>();
 
     for (const candidate of candidates) {
-      const dispatchActorId = `native-status-wake-dispatch:${candidate.id}`;
+      const dependencyIntent = isIssueBlockersResolvedWakeIntentActorId(candidate.requestedByActorId);
+      const dispatchActorId = dependencyIntent
+        ? `dependency-wake-dispatch:${candidate.id}`
+        : `native-status-wake-dispatch:${candidate.id}`;
       const existingDispatch = await db
         .select()
         .from(agentWakeupRequests)
@@ -24855,8 +24873,10 @@ export function heartbeatService(
             ...wakeContext,
             ...(issueId ? { issueId, taskId: issueId } : {}),
             wakeReason: candidate.reason,
-            source: "native_status_decision",
-            nativeStatusWakeIntentId: candidate.id,
+            source: dependencyIntent ? "issue_dependency_intent" : "native_status_decision",
+            ...(dependencyIntent
+              ? { dependencyWakeIntentId: candidate.id }
+              : { nativeStatusWakeIntentId: candidate.id }),
           },
         });
 

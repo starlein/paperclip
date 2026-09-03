@@ -7,6 +7,7 @@ import type { StorageService } from "../storage/types.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getByIdForUpdate: vi.fn(),
   getByIdentifier: vi.fn(),
   createAttachment: vi.fn(),
   getAttachmentById: vi.fn(),
@@ -172,7 +173,19 @@ async function createApp(storage: StorageService, options?: { companyIds?: strin
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, storage));
+  const lockedIssueQuery: any = {
+    from: () => lockedIssueQuery,
+    where: () => lockedIssueQuery,
+    for: () => lockedIssueQuery,
+    then: (resolve: (rows: Array<{ id: string }>) => unknown) => Promise.resolve([
+      { id: "11111111-1111-4111-8111-111111111111" },
+    ]).then(resolve),
+  };
+  const db: any = {
+    select: () => lockedIssueQuery,
+  };
+  db.transaction = async (callback: (tx: unknown) => unknown) => callback(db);
+  app.use("/api", issueRoutes(db as any, storage));
   app.use(errorHandler);
   return app;
 }
@@ -252,6 +265,7 @@ describe("issue attachment routes", () => {
       assigneeUserId: null,
       identifier: "PAP-1",
     });
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("text/plain", "report.txt"));
     mockIssueService.removeAttachment.mockResolvedValue(makeAttachment("text/plain", "report.txt"));
     mockCompanyService.getById.mockResolvedValue({

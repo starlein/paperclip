@@ -186,11 +186,6 @@ import {
   buildOnboardingGreeting,
   ONBOARDING_GREETING_AUTHORIZATION_REASON,
 } from "../services/onboarding-greeting.js";
-import {
-  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-  buildIssueBlockersResolvedWakeStateKey,
-  findExistingIssueBlockersResolvedWakeForReadyState,
-} from "../services/issue-dependency-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
   executionWorkspaceService as executionWorkspaceServiceDirect,
@@ -4270,6 +4265,7 @@ export function issueRoutes(
     options: {
       scope?: Awaited<ReturnType<typeof resolveTaskWatchdogMutationScope>>;
       lockNonWatchdog?: boolean;
+      plannedMutationCount?: number;
     } = {},
   ) {
     const scope = options.scope ?? (req.actor.type === "agent"
@@ -4286,6 +4282,7 @@ export function issueRoutes(
         queryDb: tx,
         lockIssueIds: [scope.watchedIssueId, issue.id],
         skipStaleOwnershipReconciliation: true,
+        plannedMutationCount: options.plannedMutationCount,
       });
       if (!revalidated.allowed) {
         throw conflict(revalidated.reason, {
@@ -10521,16 +10518,12 @@ export function issueRoutes(
     };
     const shouldCollectCompletionPublication =
       actor.actorType === "user" && existing.status !== "done" && updateFields.status === "done";
-    const shouldCollectTerminalIssueActions =
-      updateFields.status === "done" || updateFields.status === "cancelled";
     const updateIssue = (tx?: Parameters<typeof svc.update>[2]) => {
       if (tx) {
         if (shouldCollectCompletionPublication) {
           return svc.update(id, issueUpdateData, tx, postCommitActivityPublications, postCommitIssueActions);
         }
-        return shouldCollectTerminalIssueActions
-          ? svc.update(id, issueUpdateData, tx, undefined, postCommitIssueActions)
-          : svc.update(id, issueUpdateData, tx);
+        return svc.update(id, issueUpdateData, tx, undefined, postCommitIssueActions);
       }
       return shouldCollectCompletionPublication
         ? svc.update(id, issueUpdateData, db, postCommitActivityPublications)
@@ -10641,6 +10634,18 @@ export function issueRoutes(
       : { kind: "none" as const };
     const requiresLockedWatchdogRevalidation =
       transactionalWatchdogScope.kind === "watchdog";
+    const transactionalPatchCommentReferenceSummaryBefore =
+      requiresLockedWatchdogRevalidation && commentBody
+        ? (updateReferenceSummaryBefore ?? await issueReferencesSvc.listIssueReferenceSummary(existing.id))
+        : null;
+    const transactionalPatchCommentSourceTrust =
+      requiresLockedWatchdogRevalidation && commentBody
+        ? await sourceTrustForActorWrite(existing, actor)
+        : null;
+    let transactionalPatchCommentResult: {
+      insertedComment: Awaited<ReturnType<typeof svc.addComment>>;
+      referenceSummaryAfter: Awaited<ReturnType<typeof issueReferencesSvc.listIssueReferenceSummary>>;
+    } | null = null;
     const persistIssueActivityTransactionally =
       persistReviewActivityTransactionally || requiresLockedWatchdogRevalidation;
     const shouldUseTransactionalIssueUpdate =
@@ -10666,6 +10671,7 @@ export function issueRoutes(
                 queryDb: tx as unknown as Db,
                 lockIssueIds: [transactionalWatchdogScope.watchedIssueId, existing.id],
                 skipStaleOwnershipReconciliation: true,
+                plannedMutationCount: commentBody ? 2 : 1,
               },
             );
             if (!revalidated.allowed) {
@@ -10717,6 +10723,75 @@ export function issueRoutes(
             updated,
             persistIssueActivityTransactionally,
           );
+
+          if (
+            requiresLockedWatchdogRevalidation &&
+            commentBody &&
+            transactionalPatchCommentReferenceSummaryBefore
+          ) {
+            const insertedComment = await svc.addComment(id, commentBody, {
+              agentId: actor.agentId ?? undefined,
+              userId: actor.actorType === "user" ? actor.actorId : undefined,
+              runId: actor.runId,
+              onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+            }, {
+              authorizationReason: issueMutationAuthorizationReason,
+              sourceTrust: transactionalPatchCommentSourceTrust,
+              postCommitActivityPublications,
+            }, tx);
+            const transactionalReferences = issueReferenceService(tx as unknown as Db);
+            if (titleOrDescriptionChanged) {
+              await transactionalReferences.syncIssue(updated.id);
+            }
+            await transactionalReferences.syncComment(insertedComment.id);
+            const referenceSummaryAfter = await transactionalReferences.listIssueReferenceSummary(updated.id);
+            const referenceDiff = transactionalReferences.diffIssueReferenceSummary(
+              transactionalPatchCommentReferenceSummaryBefore,
+              referenceSummaryAfter,
+            );
+            const reopenedInTransaction =
+              effectiveMoveToTodoRequested &&
+              (isClosed || (isBlocked && !hasUnresolvedFirstClassBlockers)) &&
+              updated.status === "todo";
+            await logActivity(tx as unknown as Db, {
+              companyId: updated.companyId,
+              actorType: actor.actorType,
+              actorId: actor.actorId,
+              agentId: actor.agentId,
+              runId: actor.runId,
+              agentApiKeyId: actor.agentApiKeyId,
+              responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
+              action: "issue.comment_added",
+              entityType: "issue",
+              entityId: updated.id,
+              details: {
+                commentId: insertedComment.id,
+                bodySnippet: insertedComment.body.slice(0, 120),
+                identifier: updated.identifier,
+                issueTitle: updated.title,
+                authorizationReason: issueMutationAuthorizationReason,
+                ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+                ...(reopenedInTransaction
+                  ? { reopened: true, reopenedFrom: existing.status, source: "comment" }
+                  : {}),
+                ...(cancelledScheduledRetryRunId
+                  ? {
+                      scheduledRetrySupersededByComment: true,
+                      scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
+                      cancelledScheduledRetryRunId,
+                    }
+                  : {}),
+                ...(interruptedRunId ? { interruptedRunId } : {}),
+                ...(Object.keys(updated.changes ?? {}).length > 0 ? { updated: true } : {}),
+                ...summarizeIssueReferenceActivityDetails({
+                  addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
+                  removedReferencedIssues: referenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
+                  currentReferencedIssues: referenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
+                }),
+              },
+            }, postCommitActivityPublications);
+            transactionalPatchCommentResult = { insertedComment, referenceSummaryAfter };
+          }
 
           return updated;
         });
@@ -11150,67 +11225,71 @@ export function issueRoutes(
     let comment = null;
     let lostReviewPathRef: string | null = null;
     if (commentBody) {
-      const commentReferenceSummaryBefore = updateReferenceSummaryAfter
-        ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      const sourceTrust = await sourceTrustForActorWrite(issue, actor);
-      const postCommitCommentPublications: ActivityPublication[] = [];
-      const commentResult = await db.transaction(async (tx) => {
-        const lockedIssue = await svc.getByIdForUpdate(issue.id, tx);
-        if (!lockedIssue || lockedIssue.companyId !== issue.companyId) throw notFound("Issue not found");
-        const insertedComment = await svc.addComment(id, commentBody, {
-          agentId: actor.agentId ?? undefined,
-          userId: actor.actorType === "user" ? actor.actorId : undefined,
-          runId: actor.runId,
-          onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-        }, {
-          authorizationReason: issueMutationAuthorizationReason,
-          sourceTrust,
-        }, tx);
-        const transactionalReferences = issueReferenceService(tx as unknown as Db);
-        await transactionalReferences.syncComment(insertedComment.id);
-        const referenceSummaryAfter = await transactionalReferences.listIssueReferenceSummary(issue.id);
-        const referenceDiff = transactionalReferences.diffIssueReferenceSummary(
-          commentReferenceSummaryBefore,
-          referenceSummaryAfter,
-        );
-        await logActivity(tx as unknown as Db, {
-          companyId: issue.companyId,
-          actorType: actor.actorType,
-          actorId: actor.actorId,
-          agentId: actor.agentId,
-          runId: actor.runId,
-          agentApiKeyId: actor.agentApiKeyId,
-          responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
-          action: "issue.comment_added",
-          entityType: "issue",
-          entityId: issue.id,
-          details: {
-            commentId: insertedComment.id,
-            bodySnippet: insertedComment.body.slice(0, 120),
-            identifier: issue.identifier,
-            issueTitle: issue.title,
+      const commentResult = transactionalPatchCommentResult ?? await (async () => {
+        const commentReferenceSummaryBefore = updateReferenceSummaryAfter
+          ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
+        const sourceTrust = await sourceTrustForActorWrite(issue, actor);
+        const postCommitCommentPublications: ActivityPublication[] = [];
+        const result = await db.transaction(async (tx) => {
+          const lockedIssue = await svc.getByIdForUpdate(issue.id, tx);
+          if (!lockedIssue || lockedIssue.companyId !== issue.companyId) throw notFound("Issue not found");
+          const insertedComment = await svc.addComment(id, commentBody, {
+            agentId: actor.agentId ?? undefined,
+            userId: actor.actorType === "user" ? actor.actorId : undefined,
+            runId: actor.runId,
+            onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+          }, {
             authorizationReason: issueMutationAuthorizationReason,
-            ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
-            ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
-            ...(scheduledRetrySupersededByComment
-              ? {
-                  scheduledRetrySupersededByComment: true,
-                  scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
-                  ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
-                }
-              : {}),
-            ...(interruptedRunId ? { interruptedRunId } : {}),
-            ...(hasFieldChanges ? { updated: true } : {}),
-            ...summarizeIssueReferenceActivityDetails({
-              addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
-              removedReferencedIssues: referenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
-              currentReferencedIssues: referenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
-            }),
-          },
-        }, postCommitCommentPublications);
-        return { insertedComment, referenceSummaryAfter };
-      });
-      for (const publication of postCommitCommentPublications) publishActivity(publication);
+            sourceTrust,
+            postCommitActivityPublications: postCommitCommentPublications,
+          }, tx);
+          const transactionalReferences = issueReferenceService(tx as unknown as Db);
+          await transactionalReferences.syncComment(insertedComment.id);
+          const referenceSummaryAfter = await transactionalReferences.listIssueReferenceSummary(issue.id);
+          const referenceDiff = transactionalReferences.diffIssueReferenceSummary(
+            commentReferenceSummaryBefore,
+            referenceSummaryAfter,
+          );
+          await logActivity(tx as unknown as Db, {
+            companyId: issue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            agentApiKeyId: actor.agentApiKeyId,
+            responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
+            action: "issue.comment_added",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              commentId: insertedComment.id,
+              bodySnippet: insertedComment.body.slice(0, 120),
+              identifier: issue.identifier,
+              issueTitle: issue.title,
+              authorizationReason: issueMutationAuthorizationReason,
+              ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+              ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
+              ...(scheduledRetrySupersededByComment
+                ? {
+                    scheduledRetrySupersededByComment: true,
+                    scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
+                    ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
+                  }
+                : {}),
+              ...(interruptedRunId ? { interruptedRunId } : {}),
+              ...(hasFieldChanges ? { updated: true } : {}),
+              ...summarizeIssueReferenceActivityDetails({
+                addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
+                removedReferencedIssues: referenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
+                currentReferencedIssues: referenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
+              }),
+            },
+          }, postCommitCommentPublications);
+          return { insertedComment, referenceSummaryAfter };
+        });
+        for (const publication of postCommitCommentPublications) publishActivity(publication);
+        return result;
+      })();
       comment = commentResult.insertedComment;
       await externalObjectsSvc.syncCommentSafely(comment.id);
       const commentReferenceSummaryAfter = commentResult.referenceSummaryAfter;
@@ -11291,10 +11370,6 @@ export function issueRoutes(
     // Merge all wakeups from this update into one enqueue per agent to avoid duplicate runs.
     void (async () => {
       type WakeupRequest = NonNullable<Parameters<typeof heartbeat.wakeup>[1]>;
-      type DependencyReadinessProvider = {
-        getDependencyReadiness?: typeof svc.getDependencyReadiness;
-      };
-      const dependencyReadinessSvc = svc as DependencyReadinessProvider;
       const wakeups = new Map<string, { agentId: string; wakeup: WakeupRequest }>();
       const addWakeup = (agentId: string, wakeup: WakeupRequest) => {
         const wakeIssueId =
@@ -11303,59 +11378,6 @@ export function issueRoutes(
             : issue.id;
         wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
       };
-      const addDependencyResolvedWakeup = async (input: {
-        agentId: string;
-        dependentIssueId: string;
-        resolvedBlockerIssueId: string;
-        blockerIssueIds: string[];
-        blockedTransitionAt?: Date | string | null;
-        source: string;
-        mutation: string;
-      }) => {
-        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-          dependentIssueId: input.dependentIssueId,
-          blockerIssueIds: input.blockerIssueIds,
-          blockedTransitionAt: input.blockedTransitionAt,
-        });
-        try {
-          const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-            companyId: issue.companyId,
-            assigneeAgentId: input.agentId,
-            dependentIssueId: input.dependentIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            blockedTransitionAt: input.blockedTransitionAt,
-          });
-          if (existingWake) return;
-        } catch (err) {
-          logger.warn(
-            { err, issueId: input.dependentIssueId, idempotencyKey },
-            "failed to check existing dependency wake before issue update wake",
-          );
-        }
-        addWakeup(input.agentId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-          payload: {
-            issueId: input.dependentIssueId,
-            resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            mutation: input.mutation,
-          },
-          idempotencyKey,
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: input.dependentIssueId,
-            taskId: input.dependentIssueId,
-            wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-            source: input.source,
-            resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-          },
-        });
-      };
-
       if (executionStageWakeup) {
         addWakeup(executionStageWakeup.agentId, executionStageWakeup.wakeup);
       } else if (assigneeChanged && issue.assigneeAgentId && issue.status !== "backlog") {
@@ -11506,50 +11528,6 @@ export function issueRoutes(
         }
       }
 
-      const becameDone = existing.status !== "done" && issue.status === "done";
-      if (becameDone) {
-        const dependents = await svc.listWakeableBlockedDependents(issue.id);
-        for (const dependent of dependents) {
-          await addDependencyResolvedWakeup({
-            agentId: dependent.assigneeAgentId,
-            dependentIssueId: dependent.id,
-            resolvedBlockerIssueId: issue.id,
-            blockerIssueIds: dependent.blockerIssueIds,
-            blockedTransitionAt: dependent.blockedTransitionAt,
-            source: "issue.blockers_resolved",
-            mutation: "blocker_done",
-          });
-        }
-      }
-
-      const restoredBlockedReadyDependency =
-        issue.status === "blocked" &&
-        issue.assigneeAgentId &&
-        (
-          existing.status !== "blocked" ||
-          Array.isArray(req.body.blockedByIssueIds) ||
-          existing.assigneeAgentId !== issue.assigneeAgentId
-        );
-      if (restoredBlockedReadyDependency && typeof dependencyReadinessSvc.getDependencyReadiness === "function") {
-        const readiness = await dependencyReadinessSvc.getDependencyReadiness(issue.id);
-        const resolvedBlockerIssueId = readiness.blockerIssueIds[0] ?? null;
-        if (
-          resolvedBlockerIssueId &&
-          readiness.isDependencyReady &&
-          readiness.blockerIssueIds.length > 0
-        ) {
-          await addDependencyResolvedWakeup({
-            agentId: issue.assigneeAgentId!,
-            dependentIssueId: issue.id,
-            resolvedBlockerIssueId,
-            blockerIssueIds: readiness.blockerIssueIds,
-            blockedTransitionAt: issue.blockedTransitionAt,
-            source: "issue.blockers_restored",
-            mutation: "blocked_dependency_restored",
-          });
-        }
-      }
-
       const stopRelay = stopRelayResult.value;
       if (stopRelay) {
         await logActivity(db, {
@@ -11644,31 +11622,6 @@ export function issueRoutes(
       for (const { agentId, wakeup } of wakeups.values()) {
         heartbeat
           .wakeup(agentId, wakeup)
-          .then((wakeRun) => {
-            if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
-            const payload = wakeup.payload && typeof wakeup.payload === "object" ? wakeup.payload : {};
-            const dependentIssueId = typeof payload.issueId === "string" ? payload.issueId : issue.id;
-            return logActivity(db, {
-              companyId: issue.companyId,
-              actorType: "system",
-              actorId: "issue_update",
-              agentId,
-              runId: actor.runId,
-              agentApiKeyId: actor.agentApiKeyId,
-              action: "issue.blockers_resolved_wake_emitted",
-              entityType: "issue",
-              entityId: dependentIssueId,
-              details: {
-                source: wakeup.contextSnapshot?.source ?? "issue.update",
-                wakeupRunId: wakeRun?.id ?? null,
-                idempotencyKey: wakeup.idempotencyKey ?? null,
-                resolvedBlockerIssueId: typeof payload.resolvedBlockerIssueId === "string"
-                  ? payload.resolvedBlockerIssueId
-                  : null,
-                blockerIssueIds: Array.isArray(payload.blockerIssueIds) ? payload.blockerIssueIds : [],
-              },
-            });
-          })
           .catch((err) => logger.warn({ err, issueId: issue.id, agentId }, "failed to wake agent on issue update"));
       }
     })();
@@ -13357,10 +13310,10 @@ export function issueRoutes(
 
     let scheduledRetrySupersededByComment = false;
     let cancelledScheduledRetryRunId: string | null = null;
-    if (
+    const shouldMoveToTodoWithComment =
       effectiveMoveToTodoRequested &&
-      (isClosed || (isBlocked && !hasUnresolvedFirstClassBlockers) || shouldResumeInProgressScheduledRetry)
-    ) {
+      (isClosed || (isBlocked && !hasUnresolvedFirstClassBlockers) || shouldResumeInProgressScheduledRetry);
+    if (shouldMoveToTodoWithComment) {
       scheduledRetrySupersededByComment = shouldResumeInProgressScheduledRetry && issue.status === "in_progress";
       cancelledScheduledRetryRunId = scheduledRetrySupersededByComment
         ? await cancelScheduledRetrySupersededByComment({
@@ -13369,40 +13322,6 @@ export function issueRoutes(
             actor,
           })
         : null;
-      const reopenedIssue = await svc.update(id, { status: "todo" });
-      if (!reopenedIssue) {
-        res.status(404).json({ error: "Issue not found" });
-        return;
-      }
-      reopened = isClosed || (isBlocked && !hasUnresolvedFirstClassBlockers);
-      reopenFromStatus = reopened ? issue.status : null;
-      currentIssue = reopenedIssue;
-
-      await logActivity(db, {
-        companyId: currentIssue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "issue.updated",
-        entityType: "issue",
-        entityId: currentIssue.id,
-        details: {
-          status: "todo",
-          ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus } : {}),
-          ...(scheduledRetrySupersededByComment
-            ? {
-                scheduledRetrySupersededByComment: true,
-                scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
-                ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
-              }
-            : {}),
-          source: "comment",
-          ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
-          identifier: currentIssue.identifier,
-        },
-      });
     }
 
     if (interruptRequested) {
@@ -13571,6 +13490,7 @@ export function issueRoutes(
           await lockIssueMaterialMutationBoundary(req, currentIssue, tx as unknown as Db, {
             scope: transactionalCommentWatchdogScope,
             lockNonWatchdog: false,
+            plannedMutationCount: 2,
           });
           await lockCommentIssue(tx as unknown as Db);
           const insertedComment = await svc.addComment(
@@ -13674,8 +13594,42 @@ export function issueRoutes(
           await lockIssueMaterialMutationBoundary(req, currentIssue, tx as unknown as Db, {
             scope: transactionalCommentWatchdogScope,
             lockNonWatchdog: false,
+            plannedMutationCount: shouldMoveToTodoWithComment ? 2 : 1,
           });
-          await lockCommentIssue(tx as unknown as Db);
+          if (shouldMoveToTodoWithComment) {
+            const reopenedIssue = await svc.update(id, { status: "todo" }, tx);
+            if (!reopenedIssue) throw new AutoApprovalIssueMissingError();
+            reopened = isClosed || (isBlocked && !hasUnresolvedFirstClassBlockers);
+            reopenFromStatus = reopened ? issue.status : null;
+            currentIssue = reopenedIssue;
+            await logActivity(tx as unknown as Db, {
+              companyId: currentIssue.companyId,
+              actorType: actor.actorType,
+              actorId: actor.actorId,
+              agentId: actor.agentId,
+              runId: actor.runId,
+              agentApiKeyId: actor.agentApiKeyId,
+              action: "issue.updated",
+              entityType: "issue",
+              entityId: currentIssue.id,
+              details: {
+                status: "todo",
+                ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus } : {}),
+                ...(scheduledRetrySupersededByComment
+                  ? {
+                      scheduledRetrySupersededByComment: true,
+                      scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
+                      ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
+                    }
+                  : {}),
+                source: "comment",
+                ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+                identifier: currentIssue.identifier,
+              },
+            }, postCommitActivityPublications);
+          } else {
+            await lockCommentIssue(tx as unknown as Db);
+          }
           const insertedComment = await svc.addComment(id, req.body.body, {
             agentId: actor.agentId ?? undefined,
             userId: actor.actorType === "user" ? actor.actorId : undefined,
@@ -13775,57 +13729,6 @@ export function issueRoutes(
         if (wakeups.has(key)) return;
         wakeups.set(key, { agentId, wakeup });
       };
-      const addDependencyResolvedWakeup = async (input: {
-        agentId: string;
-        dependentIssueId: string;
-        resolvedBlockerIssueId: string;
-        blockerIssueIds: string[];
-        blockedTransitionAt?: Date | string | null;
-      }) => {
-        const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
-          dependentIssueId: input.dependentIssueId,
-          blockerIssueIds: input.blockerIssueIds,
-          blockedTransitionAt: input.blockedTransitionAt,
-        });
-        try {
-          const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(db, {
-            companyId: currentIssue.companyId,
-            assigneeAgentId: input.agentId,
-            dependentIssueId: input.dependentIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            blockedTransitionAt: input.blockedTransitionAt,
-          });
-          if (existingWake) return;
-        } catch (err) {
-          logger.warn(
-            { err, issueId: input.dependentIssueId, idempotencyKey },
-            "failed to check existing dependency wake before issue comment wake",
-          );
-        }
-        addWakeup(input.agentId, {
-          source: "automation",
-          triggerDetail: "system",
-          reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-          payload: {
-            issueId: input.dependentIssueId,
-            resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-            mutation: "comment",
-          },
-          idempotencyKey,
-          requestedByActorType: actor.actorType,
-          requestedByActorId: actor.actorId,
-          contextSnapshot: {
-            issueId: input.dependentIssueId,
-            taskId: input.dependentIssueId,
-            wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
-            source: "issue.blockers_resolved",
-            resolvedBlockerIssueId: input.resolvedBlockerIssueId,
-            blockerIssueIds: input.blockerIssueIds,
-          },
-        });
-      };
-
       if (commentDecisionStageWakeup) {
         addWakeup(commentDecisionStageWakeup.agentId, commentDecisionStageWakeup.wakeup);
       }
@@ -13955,20 +13858,6 @@ export function issueRoutes(
         });
       }
 
-      const becameDone = issueBeforeCommentDecision.status !== "done" && currentIssue.status === "done";
-      if (becameDone) {
-        const dependents = await svc.listWakeableBlockedDependents(currentIssue.id);
-        for (const dependent of dependents) {
-          await addDependencyResolvedWakeup({
-            agentId: dependent.assigneeAgentId,
-            dependentIssueId: dependent.id,
-            resolvedBlockerIssueId: currentIssue.id,
-            blockerIssueIds: dependent.blockerIssueIds,
-            blockedTransitionAt: dependent.blockedTransitionAt,
-          });
-        }
-      }
-
       const becameTerminal =
         !["done", "cancelled"].includes(issueBeforeCommentDecision.status) &&
         ["done", "cancelled"].includes(currentIssue.status);
@@ -14018,31 +13907,6 @@ export function issueRoutes(
       for (const { agentId, wakeup } of wakeups.values()) {
         heartbeat
           .wakeup(agentId, wakeup)
-          .then((wakeRun) => {
-            if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
-            const payload = wakeup.payload && typeof wakeup.payload === "object" ? wakeup.payload : {};
-            const dependentIssueId = typeof payload.issueId === "string" ? payload.issueId : currentIssue.id;
-            return logActivity(db, {
-              companyId: currentIssue.companyId,
-              actorType: "system",
-              actorId: "issue_comment",
-              agentId,
-              runId: actor.runId,
-              agentApiKeyId: actor.agentApiKeyId,
-              action: "issue.blockers_resolved_wake_emitted",
-              entityType: "issue",
-              entityId: dependentIssueId,
-              details: {
-                source: wakeup.contextSnapshot?.source ?? "issue.comment",
-                wakeupRunId: wakeRun?.id ?? null,
-                idempotencyKey: wakeup.idempotencyKey ?? null,
-                resolvedBlockerIssueId: typeof payload.resolvedBlockerIssueId === "string"
-                  ? payload.resolvedBlockerIssueId
-                  : null,
-                blockerIssueIds: Array.isArray(payload.blockerIssueIds) ? payload.blockerIssueIds : [],
-              },
-            });
-          })
           .catch((err) => logger.warn({ err, issueId: currentIssue.id, agentId }, "failed to wake agent on issue comment"));
       }
     })();

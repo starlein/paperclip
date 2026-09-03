@@ -607,10 +607,15 @@ export function issueTreeControlService(db: Db) {
       .sort((a, b) => a.issueId.localeCompare(b.issueId) || a.createdAt.getTime() - b.createdAt.getTime());
   }
 
-  async function activeHoldsByIssueId(companyId: string, issueIds: string[], dbOrTx: Db = db) {
+  async function activeHoldsByIssueId(
+    companyId: string,
+    issueIds: string[],
+    dbOrTx: Db = db,
+    options: { lockForUpdate?: boolean } = {},
+  ) {
     const byIssueId = new Map<string, { all: string[]; pause: string[] }>();
     if (issueIds.length === 0) return byIssueId;
-    const rows = await dbOrTx
+    const query = dbOrTx
       .select({
         issueId: issueTreeHoldMembers.issueId,
         holdId: issueTreeHolds.id,
@@ -626,6 +631,9 @@ export function issueTreeControlService(db: Db) {
         ),
       )
       .orderBy(asc(issueTreeHolds.createdAt), asc(issueTreeHolds.id));
+    const rows = options.lockForUpdate
+      ? await query.for("update", { of: issueTreeHolds })
+      : await query;
 
     for (const row of rows) {
       const current = byIssueId.get(row.issueId) ?? { all: [], pause: [] };
@@ -934,7 +942,7 @@ export function issueTreeControlService(db: Db) {
         }));
         const [refreshedRunRows, refreshedHolds] = await Promise.all([
           activeRunsForTree(companyId, lockedTreeIssues, tx as unknown as Db),
-          activeHoldsByIssueId(companyId, issueIds, tx as unknown as Db),
+          activeHoldsByIssueId(companyId, issueIds, tx as unknown as Db, { lockForUpdate: true }),
         ]);
         const refreshedRuns = refreshedRunRows.map(toPreviewRun);
         const runByIssueId = new Map(refreshedRuns.map((run) => [run.issueId, run]));

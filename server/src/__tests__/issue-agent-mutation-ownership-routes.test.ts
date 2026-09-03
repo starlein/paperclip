@@ -2359,6 +2359,47 @@ describe("agent issue mutation checkout ownership", () => {
       expect(mockIssueService.update).not.toHaveBeenCalled();
     });
 
+    it("reserves both watchdog mutation slots for a combined PATCH and comment", async () => {
+      denyBaseBoundary();
+      const existing = makeIssue({ status: "todo", assigneeAgentId: ownerAgentId });
+      mockIssueService.getById.mockResolvedValue(existing);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+        ...existing,
+        ...patch,
+        changes: { priority: { from: "medium", to: "high" } },
+      }));
+      mockIssueService.addComment.mockResolvedValue({
+        id: "watchdog-comment-1",
+        issueId,
+        companyId,
+        body: "Applied the bounded recovery.",
+      });
+
+      const app = await createApp(watchdogActor(), createWatchdogDb());
+      const res = await request(app).patch(`/api/issues/${issueId}`).send({
+        priority: "high",
+        comment: "Applied the bounded recovery.",
+      });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockTaskWatchdogService.revalidateMutationScope).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: "watchdog", watchedIssueId: issueId }),
+        expect.objectContaining({
+          queryDb: expect.anything(),
+          lockIssueIds: [issueId, issueId],
+          skipStaleOwnershipReconciliation: true,
+          plannedMutationCount: 2,
+        }),
+      );
+      expect(mockIssueService.addComment).toHaveBeenCalledWith(
+        issueId,
+        "Applied the bounded recovery.",
+        expect.anything(),
+        expect.objectContaining({ postCommitActivityPublications: expect.any(Array) }),
+        expect.anything(),
+      );
+    });
+
     it("takes the dependency advisory lock before watchdog blocker-edit revalidation", async () => {
       denyBaseBoundary();
       mockIssueService.getById.mockResolvedValue(

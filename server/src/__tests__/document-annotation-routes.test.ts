@@ -8,6 +8,7 @@ const otherCompanyId = "33333333-3333-4333-8333-333333333333";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getByIdForUpdate: vi.fn(),
   assertCheckoutOwner: vi.fn(),
   listReviewAttention: vi.fn(),
 }));
@@ -181,7 +182,17 @@ async function createApp(actor: "board" | "agent" = "board", actorCompanyId = co
       };
     next();
   });
-  app.use("/api", issueRoutes({} as any, {} as any));
+  const lockedIssueQuery: any = {
+    from: () => lockedIssueQuery,
+    where: () => lockedIssueQuery,
+    for: () => lockedIssueQuery,
+    then: (resolve: (rows: Array<{ id: string }>) => unknown) => Promise.resolve([{ id: issueId }]).then(resolve),
+  };
+  const db: any = {
+    select: () => lockedIssueQuery,
+  };
+  db.transaction = async (callback: (tx: unknown) => unknown) => callback(db);
+  app.use("/api", issueRoutes(db as any, {} as any));
   app.use(errorHandler);
   return app;
 }
@@ -200,6 +211,7 @@ describe("document annotation routes", () => {
       status: "in_progress",
       assigneeAgentId: null,
     });
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.assertCheckoutOwner.mockResolvedValue({});
     mockIssueService.listReviewAttention.mockResolvedValue(new Map());
     mockDocumentService.getIssueDocumentByKey.mockResolvedValue(documentPayload);
@@ -275,9 +287,11 @@ describe("document annotation routes", () => {
 
     expect(res.body.latestRevisionNumber).toBe(2);
     expect(mockIssueReferenceService.syncDocument).toHaveBeenCalledWith(documentPayload.id);
-    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-      action: "issue.document_updated",
-    }));
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "issue.document_updated" }),
+      expect.any(Array),
+    );
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
 

@@ -137,6 +137,12 @@ import {
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+import {
+  buildIssueBlockersResolvedWakeStateKey,
+  findExistingIssueBlockersResolvedWakeForReadyState,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+} from "./issue-dependency-wakeups.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -170,12 +176,18 @@ const ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE = 500;
 const DELETED_ISSUE_COMMENT_BODY = "";
 const ISSUE_WAKE_DIAGNOSTICS_ACTIVITY_ACTIONS = ["issue.tree_hold_wakeup_deferred"] as const;
 
-export type IssuePostCommitAction = {
-  type: "cancel_native_question_run";
-  runId: string;
-  issueId: string;
-  issueStatus: string;
-};
+export type IssuePostCommitAction =
+  | {
+      type: "cancel_native_question_run";
+      runId: string;
+      issueId: string;
+      issueStatus: string;
+    }
+  | {
+      type: "dispatch_dependency_wake_intents";
+      companyId: string;
+      wakeupRequestIds: string[];
+    };
 
 /** Execute side effects that must never run before the issue transaction commits. */
 export async function executeIssuePostCommitActions(
@@ -187,6 +199,20 @@ export async function executeIssuePostCommitActions(
   const heartbeat = heartbeatService(db);
   const cancelledRunIds = new Set<string>();
   for (const action of actions) {
+    if (action.type === "dispatch_dependency_wake_intents") {
+      try {
+        await heartbeat.dispatchPendingNativeStatusWakeups({
+          companyId: action.companyId,
+          requestIds: action.wakeupRequestIds,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, companyId: action.companyId, wakeupRequestIds: action.wakeupRequestIds },
+          "dependency wake dispatch deferred to recovery sweep",
+        );
+      }
+      continue;
+    }
     if (cancelledRunIds.has(action.runId)) continue;
     cancelledRunIds.add(action.runId);
     try {
@@ -5296,6 +5322,138 @@ export function issueService(db: Db) {
     return blockerIds;
   }
 
+  async function listWakeableBlockedDependents(
+    blockerIssueId: string,
+    dbOrTx: any = db,
+  ): Promise<Array<{
+    id: string;
+    assigneeAgentId: string;
+    blockerIssueIds: string[];
+    blockedTransitionAt: Date | null;
+  }>> {
+    const blockerIssue = await dbOrTx
+      .select({ id: issues.id, companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, blockerIssueId))
+      .then((rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null);
+    if (!blockerIssue) return [];
+
+    const candidates = await dbOrTx
+      .select({
+        id: issues.id,
+        assigneeAgentId: issues.assigneeAgentId,
+        status: issues.status,
+        blockedTransitionAt: issues.blockedTransitionAt,
+      })
+      .from(issueRelations)
+      .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
+      .where(
+        and(
+          eq(issueRelations.companyId, blockerIssue.companyId),
+          eq(issueRelations.type, "blocks"),
+          eq(issueRelations.issueId, blockerIssueId),
+        ),
+      );
+    if (candidates.length === 0) return [];
+
+    const wakeableCandidates = candidates.filter(
+      (candidate: { assigneeAgentId: string | null; status: string }) =>
+        candidate.assigneeAgentId && candidate.status === "blocked",
+    );
+    if (wakeableCandidates.length === 0) return [];
+
+    const readinessMap = await listIssueDependencyReadinessMap(
+      dbOrTx,
+      blockerIssue.companyId,
+      wakeableCandidates.map((candidate: { id: string }) => candidate.id),
+    );
+
+    return wakeableCandidates
+      .map((candidate: typeof wakeableCandidates[number]) => {
+        const readiness = readinessMap.get(candidate.id) ?? createIssueDependencyReadiness(candidate.id);
+        return { candidate, readiness };
+      })
+      .filter(({ readiness }: { readiness: IssueDependencyReadiness }) =>
+        readiness.isDependencyReady && readiness.blockerIssueIds.length > 0)
+      .map(({ candidate, readiness }: {
+        candidate: typeof wakeableCandidates[number];
+        readiness: IssueDependencyReadiness;
+      }) => ({
+        id: candidate.id,
+        assigneeAgentId: candidate.assigneeAgentId!,
+        blockerIssueIds: readiness.blockerIssueIds,
+        blockedTransitionAt: candidate.blockedTransitionAt,
+      }));
+  }
+
+  async function persistDependencyWakeIntents(
+    input: {
+      companyId: string;
+      resolvedBlockerIssueId: string;
+      dependents: Awaited<ReturnType<typeof listWakeableBlockedDependents>>;
+      mutation: string;
+      source: string;
+    },
+    dbOrTx: any,
+    postCommitActions: IssuePostCommitAction[],
+  ) {
+    const wakeupRequestIds: string[] = [];
+    for (const dependent of [...input.dependents].sort((left, right) => left.id.localeCompare(right.id))) {
+      const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(dbOrTx as Db, {
+        companyId: input.companyId,
+        assigneeAgentId: dependent.assigneeAgentId,
+        dependentIssueId: dependent.id,
+        blockerIssueIds: dependent.blockerIssueIds,
+        blockedTransitionAt: dependent.blockedTransitionAt,
+        lockForUpdate: true,
+      });
+      if (existingWake) continue;
+
+      const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: dependent.id,
+        blockerIssueIds: dependent.blockerIssueIds,
+        blockedTransitionAt: dependent.blockedTransitionAt,
+      });
+      const [intent] = await dbOrTx
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: input.companyId,
+          agentId: dependent.assigneeAgentId,
+          source: "automation",
+          triggerDetail: "system",
+          reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+          payload: {
+            issueId: dependent.id,
+            taskId: dependent.id,
+            resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+            blockerIssueIds: dependent.blockerIssueIds,
+            mutation: input.mutation,
+            _paperclipWakeContext: {
+              issueId: dependent.id,
+              taskId: dependent.id,
+              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+              source: input.source,
+              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+              blockerIssueIds: dependent.blockerIssueIds,
+            },
+          },
+          status: "queued",
+          requestedByActorType: "system",
+          requestedByActorId: ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+          idempotencyKey,
+        })
+        .returning({ id: agentWakeupRequests.id });
+      if (intent) wakeupRequestIds.push(intent.id);
+    }
+    if (wakeupRequestIds.length > 0) {
+      postCommitActions.push({
+        type: "dispatch_dependency_wake_intents",
+        companyId: input.companyId,
+        wakeupRequestIds,
+      });
+    }
+  }
+
   async function syncBlockedByIssueIds(
     issueId: string,
     companyId: string,
@@ -6753,62 +6911,7 @@ export function issueService(db: Db) {
       return listIssueProductivityReviewMap(dbOrTx, companyId, sourceIssueIds);
     },
 
-    listWakeableBlockedDependents: async (blockerIssueId: string) => {
-      const blockerIssue = await db
-        .select({ id: issues.id, companyId: issues.companyId })
-        .from(issues)
-        .where(eq(issues.id, blockerIssueId))
-        .then((rows) => rows[0] ?? null);
-      if (!blockerIssue) return [];
-
-      const candidates = await db
-        .select({
-          id: issues.id,
-          assigneeAgentId: issues.assigneeAgentId,
-          status: issues.status,
-          blockedTransitionAt: issues.blockedTransitionAt,
-        })
-        .from(issueRelations)
-        .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
-        .where(
-          and(
-            eq(issueRelations.companyId, blockerIssue.companyId),
-            eq(issueRelations.type, "blocks"),
-            eq(issueRelations.issueId, blockerIssueId),
-          ),
-        );
-      if (candidates.length === 0) return [];
-
-      const wakeableCandidates = candidates.filter(
-        (candidate) =>
-          candidate.assigneeAgentId && !["backlog", "done", "cancelled"].includes(candidate.status),
-      );
-      if (wakeableCandidates.length === 0) return [];
-
-      // Defer to the unified readiness check so that a dependent only fires when
-      // (a) every blocker is done AND (b) every done blocker's workspace has
-      // recorded a successful workspace_finalize. The finalize hook also calls
-      // this function on completion, so a wake initially gated by an in-flight
-      // sync-back will re-fire once the restore lands locally.
-      const readinessMap = await listIssueDependencyReadinessMap(
-        db,
-        blockerIssue.companyId,
-        wakeableCandidates.map((candidate) => candidate.id),
-      );
-
-      return wakeableCandidates
-        .map((candidate) => {
-          const readiness = readinessMap.get(candidate.id) ?? createIssueDependencyReadiness(candidate.id);
-          return { candidate, readiness };
-        })
-        .filter(({ readiness }) => readiness.isDependencyReady && readiness.blockerIssueIds.length > 0)
-        .map(({ candidate, readiness }) => ({
-          id: candidate.id,
-          assigneeAgentId: candidate.assigneeAgentId!,
-          blockerIssueIds: readiness.blockerIssueIds,
-          blockedTransitionAt: candidate.blockedTransitionAt,
-        }));
-    },
+    listWakeableBlockedDependents,
 
     getWakeableParentAfterChildCompletion: async (
       parentIssueId: string,
@@ -8069,6 +8172,23 @@ export function issueService(db: Db) {
         if (blockedByIssueIds !== undefined) {
           await lockDependencyState(existing.companyId, id, tx);
         }
+        if (issueData.status === "done" && existing.status !== "done") {
+          // Relation writers lock each dependent before the blocker row. Take
+          // the same order before committing the last blocker so every ready
+          // dependent can receive a durable wake intent in this transaction.
+          const dependentIds = await tx
+            .select({ id: issueRelations.relatedIssueId })
+            .from(issueRelations)
+            .where(and(
+              eq(issueRelations.companyId, existing.companyId),
+              eq(issueRelations.issueId, id),
+              eq(issueRelations.type, "blocks"),
+            ))
+            .then((rows: Array<{ id: string }>) => [...new Set(rows.map((row) => row.id))].sort());
+          for (const dependentId of dependentIds) {
+            await lockDependencyState(existing.companyId, dependentId, tx);
+          }
+        }
         const livenessRelationDependentId =
           (issueData.status === "done" || issueData.status === "cancelled")
           && existing.status !== issueData.status
@@ -8242,6 +8362,42 @@ export function issueService(db: Db) {
             tx,
           );
         }
+        if (updated.status === "done" && receiptExisting.status !== "done") {
+          const dependents = await listWakeableBlockedDependents(updated.id, tx);
+          await persistDependencyWakeIntents({
+            companyId: updated.companyId,
+            resolvedBlockerIssueId: updated.id,
+            dependents,
+            mutation: "blocker_done",
+            source: "issue.blockers_resolved",
+          }, tx, queuedPostCommitActions);
+        }
+        if (
+          blockedByIssueIds !== undefined &&
+          updated.status === "blocked" &&
+          updated.assigneeAgentId
+        ) {
+          const readiness = (await listIssueDependencyReadinessMap(
+            tx,
+            updated.companyId,
+            [updated.id],
+          )).get(updated.id) ?? createIssueDependencyReadiness(updated.id);
+          const resolvedBlockerIssueId = readiness.blockerIssueIds[0] ?? null;
+          if (readiness.isDependencyReady && resolvedBlockerIssueId) {
+            await persistDependencyWakeIntents({
+              companyId: updated.companyId,
+              resolvedBlockerIssueId,
+              dependents: [{
+                id: updated.id,
+                assigneeAgentId: updated.assigneeAgentId,
+                blockerIssueIds: readiness.blockerIssueIds,
+                blockedTransitionAt: updated.blockedTransitionAt,
+              }],
+              mutation: "blocked_dependency_restored",
+              source: "issue.blockers_restored",
+            }, tx, queuedPostCommitActions);
+          }
+        }
         if (
           issueData.executionWorkspaceSettings !== undefined &&
           nextExecutionWorkspaceId &&
@@ -8399,6 +8555,41 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        const lockedIssue = await tx
+          .select({ id: issues.id, companyId: issues.companyId })
+          .from(issues)
+          .where(eq(issues.id, id))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!lockedIssue) return null;
+
+        // Deleting a blocker used to cascade its relation edges and could leave
+        // a blocked dependent with zero blockers and no wake. Serialize against
+        // relation writers via the blocker row and reject while any live issue
+        // still depends on it. Deleting the dependent first remains valid.
+        const liveDependents = await tx
+          .select({ id: issues.id, identifier: issues.identifier })
+          .from(issueRelations)
+          .innerJoin(issues, and(
+            eq(issues.id, issueRelations.relatedIssueId),
+            eq(issues.companyId, lockedIssue.companyId),
+          ))
+          .where(and(
+            eq(issueRelations.companyId, lockedIssue.companyId),
+            eq(issueRelations.issueId, id),
+            eq(issueRelations.type, "blocks"),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ));
+        if (liveDependents.length > 0) {
+          throw conflict("Issue cannot be deleted while it blocks non-terminal issues.", {
+            dependentIssueIds: liveDependents.map((dependent) => dependent.id).sort(),
+            dependentIssueIdentifiers: liveDependents
+              .map((dependent) => dependent.identifier)
+              .filter((identifier): identifier is string => Boolean(identifier))
+              .sort(),
+          });
+        }
+
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)
