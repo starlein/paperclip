@@ -318,7 +318,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
-    mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => makeIssue("todo"));
     mockHeartbeatService.wakeup.mockResolvedValue(undefined);
     mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
     mockHeartbeatService.getRun.mockResolvedValue(null);
@@ -1159,6 +1159,7 @@ describe.sequential("issue comment reopen routes", () => {
         metadata,
         sourceTrust: null,
       },
+      mockTx,
     );
   });
 
@@ -1220,6 +1221,7 @@ describe.sequential("issue comment reopen routes", () => {
           density: "compact",
         },
       }),
+      mockTx,
     );
   });
 
@@ -1241,6 +1243,7 @@ describe.sequential("issue comment reopen routes", () => {
         onBehalfOfUserId: null,
       },
       expect.objectContaining({ presentation: null }),
+      mockTx,
     );
   });
 
@@ -1274,6 +1277,7 @@ describe.sequential("issue comment reopen routes", () => {
         onBehalfOfUserId: null,
       },
       expect.objectContaining({ presentation: null }),
+      mockTx,
     );
   });
 
@@ -1883,6 +1887,7 @@ describe.sequential("issue comment reopen routes", () => {
           followUpRequested: true,
         }),
       }),
+      expect.any(Array),
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -1938,6 +1943,7 @@ describe.sequential("issue comment reopen routes", () => {
           followUpRequested: true,
         }),
       }),
+      expect.any(Array),
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -2438,7 +2444,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ status: "done", comment: "Approved for ship" });
 
     expect(res.status).toBe(200);
-    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(mockDb.transaction).toHaveBeenCalledTimes(2);
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({
@@ -2847,7 +2853,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
       expect.any(String),
@@ -2912,7 +2918,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
@@ -2972,7 +2978,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
@@ -3030,7 +3036,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
@@ -3089,7 +3095,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
@@ -3164,7 +3170,7 @@ describe.sequential("issue comment reopen routes", () => {
         .send({ body });
 
       expect(res.status).toBe(201);
-      expect(mockDb.transaction).not.toHaveBeenCalled();
+      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
       expect(mockIssueService.update).not.toHaveBeenCalled();
       expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
     });

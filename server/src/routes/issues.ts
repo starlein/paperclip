@@ -4246,7 +4246,6 @@ export function issueRoutes(
     issue: { id: string },
   ) {
     if (scope.kind !== "watchdog") return true;
-    if (scope.watchdogIssueId && issue.id === scope.watchdogIssueId) return true;
 
     const revalidated = await taskWatchdogsSvc.revalidateMutationScope(scope);
     if (revalidated.allowed) return true;
@@ -10517,8 +10516,7 @@ export function issueRoutes(
       ? await resolveTaskWatchdogMutationScope(db, req.actor)
       : { kind: "none" as const };
     const requiresLockedWatchdogRevalidation =
-      transactionalWatchdogScope.kind === "watchdog"
-      && transactionalWatchdogScope.watchdogIssueId !== existing.id;
+      transactionalWatchdogScope.kind === "watchdog";
     const persistIssueActivityTransactionally =
       persistReviewActivityTransactionally || requiresLockedWatchdogRevalidation;
     const shouldUseTransactionalIssueUpdate =
@@ -11030,22 +11028,68 @@ export function issueRoutes(
     if (commentBody) {
       const commentReferenceSummaryBefore = updateReferenceSummaryAfter
         ?? await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      comment = await svc.addComment(id, commentBody, {
-        agentId: actor.agentId ?? undefined,
-        userId: actor.actorType === "user" ? actor.actorId : undefined,
-        runId: actor.runId,
-        onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-      }, {
-        authorizationReason: issueMutationAuthorizationReason,
-        sourceTrust: await sourceTrustForActorWrite(issue, actor),
+      const sourceTrust = await sourceTrustForActorWrite(issue, actor);
+      const postCommitCommentPublications: ActivityPublication[] = [];
+      const commentResult = await db.transaction(async (tx) => {
+        const lockedIssue = await svc.getByIdForUpdate(issue.id, tx);
+        if (!lockedIssue || lockedIssue.companyId !== issue.companyId) throw notFound("Issue not found");
+        const insertedComment = await svc.addComment(id, commentBody, {
+          agentId: actor.agentId ?? undefined,
+          userId: actor.actorType === "user" ? actor.actorId : undefined,
+          runId: actor.runId,
+          onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+        }, {
+          authorizationReason: issueMutationAuthorizationReason,
+          sourceTrust,
+        }, tx);
+        const transactionalReferences = issueReferenceService(tx as unknown as Db);
+        await transactionalReferences.syncComment(insertedComment.id);
+        const referenceSummaryAfter = await transactionalReferences.listIssueReferenceSummary(issue.id);
+        const referenceDiff = transactionalReferences.diffIssueReferenceSummary(
+          commentReferenceSummaryBefore,
+          referenceSummaryAfter,
+        );
+        await logActivity(tx as unknown as Db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
+          action: "issue.comment_added",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            commentId: insertedComment.id,
+            bodySnippet: insertedComment.body.slice(0, 120),
+            identifier: issue.identifier,
+            issueTitle: issue.title,
+            authorizationReason: issueMutationAuthorizationReason,
+            ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+            ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
+            ...(scheduledRetrySupersededByComment
+              ? {
+                  scheduledRetrySupersededByComment: true,
+                  scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
+                  ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
+                }
+              : {}),
+            ...(interruptedRunId ? { interruptedRunId } : {}),
+            ...(hasFieldChanges ? { updated: true } : {}),
+            ...summarizeIssueReferenceActivityDetails({
+              addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
+              removedReferencedIssues: referenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
+              currentReferencedIssues: referenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
+            }),
+          },
+        }, postCommitCommentPublications);
+        return { insertedComment, referenceSummaryAfter };
       });
-      await issueReferencesSvc.syncComment(comment.id);
+      for (const publication of postCommitCommentPublications) publishActivity(publication);
+      comment = commentResult.insertedComment;
       await externalObjectsSvc.syncCommentSafely(comment.id);
-      const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
-      const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
-        commentReferenceSummaryBefore,
-        commentReferenceSummaryAfter,
-      );
+      const commentReferenceSummaryAfter = commentResult.referenceSummaryAfter;
       issueResponse = {
         ...issueResponse,
         relatedWork: commentReferenceSummaryAfter,
@@ -11053,42 +11097,6 @@ export function issueRoutes(
           (item) => item.issue.identifier ?? item.issue.id,
         ),
       };
-
-      await logActivity(db, {
-        companyId: issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
-        action: "issue.comment_added",
-        entityType: "issue",
-        entityId: issue.id,
-        details: {
-          commentId: comment.id,
-          bodySnippet: comment.body.slice(0, 120),
-          identifier: issue.identifier,
-          issueTitle: issue.title,
-          authorizationReason: issueMutationAuthorizationReason,
-          ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
-          ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
-          ...(scheduledRetrySupersededByComment
-            ? {
-                scheduledRetrySupersededByComment: true,
-                scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
-                ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
-              }
-            : {}),
-          ...(interruptedRunId ? { interruptedRunId } : {}),
-          ...(hasFieldChanges ? { updated: true } : {}),
-          ...summarizeIssueReferenceActivityDetails({
-            addedReferencedIssues: commentReferenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
-            removedReferencedIssues: commentReferenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
-            currentReferencedIssues: commentReferenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
-          }),
-        },
-      });
 
       const expiredInteractions = await issueThreadInteractionService(db).expireRequestConfirmationsSupersededByComment(
         issue,
@@ -13319,6 +13327,67 @@ export function issueRoutes(
       actorMatchesExecutionParticipant(actor, currentExecutionState.currentParticipant ?? null) &&
       isApprovalReviewComment(req.body.body);
 
+    type CommentReferenceSummary = Awaited<ReturnType<typeof issueReferencesSvc.listIssueReferenceSummary>>;
+    type CommentReferenceDiff = ReturnType<typeof issueReferencesSvc.diffIssueReferenceSummary>;
+    let commentReferenceSummaryAfter: CommentReferenceSummary | null = null;
+    let commentReferenceDiff: CommentReferenceDiff | null = null;
+    const lockCommentIssue = async (tx: Db) => {
+      const locked = await svc.getByIdForUpdate(currentIssue.id, tx);
+      if (!locked || locked.companyId !== currentIssue.companyId) throw new AutoApprovalIssueMissingError();
+    };
+    const persistCommentBoundary = async (
+      tx: Db,
+      insertedComment: Awaited<ReturnType<typeof svc.addComment>>,
+      activityIssue: typeof currentIssue,
+      publications: ActivityPublication[],
+    ) => {
+      const transactionalReferences = issueReferenceService(tx);
+      await transactionalReferences.syncComment(insertedComment.id);
+      const referenceSummaryAfter = await transactionalReferences.listIssueReferenceSummary(activityIssue.id);
+      const referenceDiff = transactionalReferences.diffIssueReferenceSummary(
+        commentReferenceSummaryBefore,
+        referenceSummaryAfter,
+      );
+      await logActivity(tx, {
+        companyId: activityIssue.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        runId: actor.runId,
+        agentApiKeyId: actor.agentApiKeyId,
+        responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
+        action: "issue.comment_added",
+        entityType: "issue",
+        entityId: activityIssue.id,
+        details: {
+          commentId: insertedComment.id,
+          bodySnippet: insertedComment.body.slice(0, 120),
+          identifier: activityIssue.identifier,
+          issueTitle: activityIssue.title,
+          authorizationReason: commentAuthorizationReason,
+          ...(isDirectParentReportDecision(commentAccessDecision)
+            ? { directParentReportGrant: true }
+            : {}),
+          ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
+          ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
+          ...(scheduledRetrySupersededByComment
+            ? {
+                scheduledRetrySupersededByComment: true,
+                scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
+                ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
+              }
+            : {}),
+          ...(interruptedRunId ? { interruptedRunId } : {}),
+          ...summarizeIssueReferenceActivityDetails({
+            addedReferencedIssues: referenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
+            removedReferencedIssues: referenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
+            currentReferencedIssues: referenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
+          }),
+        },
+      }, publications);
+      return { referenceSummaryAfter, referenceDiff };
+    };
+
     // Persist the comment and the auto-approval state transition atomically when both apply.
     // Without a single transaction, a 422 (or any error) thrown by the status update after the
     // comment is inserted would leave an orphan comment without the corresponding state change.
@@ -13362,11 +13431,17 @@ export function issueRoutes(
         metadata: req.body.metadata ?? null,
         sourceTrust,
       };
-      let txResult: { comment: Awaited<ReturnType<typeof svc.addComment>>; issue: NonNullable<Awaited<ReturnType<typeof svc.update>>> };
+      let txResult: {
+        comment: Awaited<ReturnType<typeof svc.addComment>>;
+        issue: NonNullable<Awaited<ReturnType<typeof svc.update>>>;
+        referenceSummaryAfter: CommentReferenceSummary;
+        referenceDiff: CommentReferenceDiff;
+      };
       const postCommitActivityPublications: ActivityPublication[] = [];
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       try {
         txResult = await db.transaction(async (tx) => {
+          await lockCommentIssue(tx as unknown as Db);
           const insertedComment = await svc.addComment(
             id,
             req.body.body,
@@ -13401,7 +13476,13 @@ export function issueRoutes(
             });
           }
 
-          return { comment: insertedComment, issue: updated };
+          const boundary = await persistCommentBoundary(
+            tx as unknown as Db,
+            insertedComment,
+            updated,
+            postCommitActivityPublications,
+          );
+          return { comment: insertedComment, issue: updated, ...boundary };
         });
       } catch (err) {
         if (err instanceof AutoApprovalIssueMissingError) {
@@ -13414,6 +13495,8 @@ export function issueRoutes(
       await flushIssuePostCommitActions(postCommitIssueActions);
       comment = txResult.comment;
       currentIssue = txResult.issue;
+      commentReferenceSummaryAfter = txResult.referenceSummaryAfter;
+      commentReferenceDiff = txResult.referenceDiff;
       // Mirror the normal status-change audit trail: every other in_review -> done path
       // emits an `issue.updated` activity, so emit one here too for the auto-approval path.
       if (issueBeforeCommentDecision.status !== currentIssue.status) {
@@ -13444,70 +13527,58 @@ export function issueRoutes(
         requestedByActorId: actor.actorId,
       });
     } else {
-      comment = await svc.addComment(id, req.body.body, {
-        agentId: actor.agentId ?? undefined,
-        userId: actor.actorType === "user" ? actor.actorId : undefined,
-        runId: actor.runId,
-        onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
-      }, {
-        authorType: req.body.authorType ?? (actor.actorType === "agent" ? "agent" : "user"),
-        presentation: commentPresentation,
-        metadata: req.body.metadata ?? null,
-        authorizationReason: commentAuthorizationReason,
-        sourceTrust: await sourceTrustForActorWrite(currentIssue, actor),
-      });
+      const postCommitActivityPublications: ActivityPublication[] = [];
+      const sourceTrust = await sourceTrustForActorWrite(currentIssue, actor);
+      let txResult: {
+        comment: Awaited<ReturnType<typeof svc.addComment>>;
+        referenceSummaryAfter: CommentReferenceSummary;
+        referenceDiff: CommentReferenceDiff;
+      };
+      try {
+        txResult = await db.transaction(async (tx) => {
+          await lockCommentIssue(tx as unknown as Db);
+          const insertedComment = await svc.addComment(id, req.body.body, {
+            agentId: actor.agentId ?? undefined,
+            userId: actor.actorType === "user" ? actor.actorId : undefined,
+            runId: actor.runId,
+            onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+          }, {
+            authorType: req.body.authorType ?? (actor.actorType === "agent" ? "agent" : "user"),
+            presentation: commentPresentation,
+            metadata: req.body.metadata ?? null,
+            authorizationReason: commentAuthorizationReason,
+            sourceTrust,
+          }, tx);
+          const boundary = await persistCommentBoundary(
+            tx as unknown as Db,
+            insertedComment,
+            currentIssue,
+            postCommitActivityPublications,
+          );
+          return { comment: insertedComment, ...boundary };
+        });
+      } catch (err) {
+        if (err instanceof AutoApprovalIssueMissingError) {
+          res.status(404).json({ error: "Issue not found" });
+          return;
+        }
+        throw err;
+      }
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
+      comment = txResult.comment;
+      commentReferenceSummaryAfter = txResult.referenceSummaryAfter;
+      commentReferenceDiff = txResult.referenceDiff;
     }
 
-    await issueReferencesSvc.syncComment(comment.id);
     await externalObjectsSvc.syncCommentSafely(comment.id);
-    const commentReferenceSummaryAfter = await issueReferencesSvc.listIssueReferenceSummary(currentIssue.id);
-    const commentReferenceDiff = issueReferencesSvc.diffIssueReferenceSummary(
-      commentReferenceSummaryBefore,
-      commentReferenceSummaryAfter,
-    );
+    if (!commentReferenceSummaryAfter || !commentReferenceDiff) {
+      throw new Error("Comment transaction committed without reference and activity state");
+    }
 
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>
         logger.warn({ err, runId: actor.runId }, "failed to clear detached run warning after issue comment"));
     }
-
-    await logActivity(db, {
-      companyId: currentIssue.companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      agentApiKeyId: actor.agentApiKeyId,
-      responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
-      action: "issue.comment_added",
-      entityType: "issue",
-      entityId: currentIssue.id,
-      details: {
-        commentId: comment.id,
-        bodySnippet: comment.body.slice(0, 120),
-        identifier: currentIssue.identifier,
-        issueTitle: currentIssue.title,
-        authorizationReason: commentAuthorizationReason,
-        ...(isDirectParentReportDecision(commentAccessDecision)
-          ? { directParentReportGrant: true }
-          : {}),
-        ...(resumeRequested === true ? { resumeIntent: true, followUpRequested: true } : {}),
-        ...(reopened ? { reopened: true, reopenedFrom: reopenFromStatus, source: "comment" } : {}),
-        ...(scheduledRetrySupersededByComment
-          ? {
-              scheduledRetrySupersededByComment: true,
-              scheduledRetryRunId: scheduledRetryForHumanComment?.runId ?? null,
-              ...(cancelledScheduledRetryRunId ? { cancelledScheduledRetryRunId } : {}),
-            }
-          : {}),
-        ...(interruptedRunId ? { interruptedRunId } : {}),
-        ...summarizeIssueReferenceActivityDetails({
-          addedReferencedIssues: commentReferenceDiff.addedReferencedIssues.map(summarizeIssueRelationForActivity),
-          removedReferencedIssues: commentReferenceDiff.removedReferencedIssues.map(summarizeIssueRelationForActivity),
-          currentReferencedIssues: commentReferenceDiff.currentReferencedIssues.map(summarizeIssueRelationForActivity),
-        }),
-      },
-    });
 
     const expiredInteractions = await issueThreadInteractionService(db).expireRequestConfirmationsSupersededByComment(
       currentIssue,

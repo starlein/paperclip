@@ -70,6 +70,11 @@ const TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS = [
   "issue.work_product_created",
   "issue.work_product_updated",
   "issue.work_product_deleted",
+  "approval.approved",
+  "approval.rejected",
+  "approval.cancelled",
+  "approval.revision_requested",
+  "approval.resubmitted",
 ] as const;
 const TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS = [
   "approval.approved",
@@ -852,17 +857,56 @@ async function countCommitOrderedWatchdogActivities(input: {
   mutableIssueIds: string[];
   watchdogRunId?: string | null;
 }) {
-  const [row] = await input.db
-    .select({ count: sql<number>`count(*)::int` })
-    .from(activityLog)
-    .where(and(
-      eq(activityLog.companyId, input.companyId),
-      eq(activityLog.entityType, "issue"),
-      inArray(activityLog.entityId, input.mutableIssueIds),
-      inArray(activityLog.action, TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS),
-      ...(input.watchdogRunId ? [eq(activityLog.runId, input.watchdogRunId)] : []),
-    ));
-  return row?.count ?? 0;
+  const [currentApprovalLinks, historicalApprovalLinks] = await Promise.all([
+    input.db
+      .selectDistinct({ approvalId: issueApprovals.approvalId })
+      .from(issueApprovals)
+      .where(and(
+        eq(issueApprovals.companyId, input.companyId),
+        inArray(issueApprovals.issueId, input.mutableIssueIds),
+      )),
+    input.db
+      .select({ details: activityLog.details })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, input.companyId),
+        eq(activityLog.entityType, "issue"),
+        inArray(activityLog.entityId, input.mutableIssueIds),
+        inArray(activityLog.action, ["issue.approval_linked", "issue.approval_unlinked"]),
+      )),
+  ]);
+  const linkedApprovalIds = [...new Set([
+    ...currentApprovalLinks.map((row) => row.approvalId),
+    ...historicalApprovalLinks.flatMap((row) => {
+      const approvalId = parseObject(row.details).approvalId;
+      return typeof approvalId === "string" ? [approvalId] : [];
+    }),
+  ])];
+  const [issueRows, approvalRows] = await Promise.all([
+    input.db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, input.companyId),
+        eq(activityLog.entityType, "issue"),
+        inArray(activityLog.entityId, input.mutableIssueIds),
+        inArray(activityLog.action, TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS),
+        ...(input.watchdogRunId ? [eq(activityLog.runId, input.watchdogRunId)] : []),
+      )),
+    linkedApprovalIds.length === 0
+      ? Promise.resolve([{ count: 0 }])
+      : input.db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(activityLog)
+        .where(and(
+          eq(activityLog.companyId, input.companyId),
+          eq(activityLog.entityType, "approval"),
+          inArray(activityLog.entityId, linkedApprovalIds),
+          inArray(activityLog.action, TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS),
+          ...(input.watchdogRunId ? [eq(activityLog.runId, input.watchdogRunId)] : []),
+        )),
+  ]);
+  return (issueRows[0]?.count ?? 0) + (approvalRows[0]?.count ?? 0);
 }
 
 async function latestMaterialBoundaryIsServerOwnedWatchdogTransition(input: {

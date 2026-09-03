@@ -275,6 +275,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     ]);
     const commitOrderedActions = new Set([
       "issue.updated",
+      "issue.comment_added",
       "issue.document_created",
       "issue.document_updated",
       "issue.document_upserted",
@@ -285,13 +286,27 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       "issue.work_product_created",
       "issue.work_product_updated",
       "issue.work_product_deleted",
+      "approval.approved",
+      "approval.rejected",
+      "approval.cancelled",
+      "approval.revision_requested",
+      "approval.resubmitted",
     ]);
+    const boundaryApprovalIds = new Set(sourceApprovals.map((approval) => approval.id));
     const boundaryActivities = await db
-      .select({ entityId: activityLog.entityId, action: activityLog.action })
+      .select({ entityId: activityLog.entityId, action: activityLog.action, details: activityLog.details })
       .from(activityLog)
       .where(eq(activityLog.companyId, input.companyId));
+    for (const activity of boundaryActivities) {
+      if (activity.action !== "issue.approval_linked" && activity.action !== "issue.approval_unlinked") {
+        continue;
+      }
+      const details = activity.details as Record<string, unknown> | null;
+      if (typeof details?.approvalId === "string") boundaryApprovalIds.add(details.approvalId);
+    }
     const issueActivityCount = boundaryActivities.filter((activity) =>
-      boundaryIssueIds.has(activity.entityId) && commitOrderedActions.has(activity.action)
+      commitOrderedActions.has(activity.action) &&
+      (boundaryIssueIds.has(activity.entityId) || boundaryApprovalIds.has(activity.entityId))
     ).length;
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({
@@ -946,6 +961,50 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(ownActivities).toHaveLength(3);
   });
 
+  it("applies the recovery mutation cap to the reusable watchdog issue", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    const first = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ priority: "high" });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+
+    const second = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ billingCode: "watchdog-recovery" });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+
+    const third = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ priority: "critical" });
+    expect(third.status, JSON.stringify(third.body)).toBe(200);
+
+    const fourth = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ billingCode: "must-not-commit" });
+    expect(fourth.status, JSON.stringify(fourth.body)).toBe(409);
+
+    const [watchdogIssue] = await db
+      .select({ priority: issues.priority, billingCode: issues.billingCode })
+      .from(issues)
+      .where(eq(issues.id, fixture.watchdogIssueId));
+    expect(watchdogIssue).toEqual({
+      priority: "critical",
+      billingCode: "watchdog-recovery",
+    });
+
+    const ownActivities = await db
+      .select({ runId: activityLog.runId })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.entityId, fixture.watchdogIssueId),
+        eq(activityLog.action, "issue.updated"),
+        eq(activityLog.runId, fixture.watchdogRunId),
+      ));
+    expect(ownActivities).toHaveLength(3);
+  });
+
   it("commits each watchdog PATCH activity before another recovery mutation revalidates", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
 
@@ -1029,6 +1088,34 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(response.status, JSON.stringify(response.body)).toBe(409);
   });
 
+  it("rolls back an external comment when its activity boundary cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "blocked",
+      sourceUnresolvedBlocker: true,
+    });
+    const boardApp = createApp(fixture.companyId);
+    const constraintName = `watchdog_comment_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (entity_id IS DISTINCT FROM '${fixture.sourceIssueId}' OR action <> 'issue.comment_added')`,
+    ));
+
+    try {
+      const response = await request(boardApp)
+        .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+        .send({ body: "This comment must not outlive its missing recovery boundary." });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const comments = await db
+        .select({ id: issueComments.id })
+        .from(issueComments)
+        .where(eq(issueComments.issueId, fixture.sourceIssueId));
+      expect(comments).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
   it("rejects recovery provenance superseded by a later user source transition", async () => {
     const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
     await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
@@ -1046,11 +1133,14 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
 
     const res = await request(fixture.app)
       .patch(`/api/issues/${fixture.sourceIssueId}`)
-      .send({ executionPolicy: null });
+      .send({ priority: "high" });
 
     expect(res.status, JSON.stringify(res.body)).toBe(409);
-    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
-    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+    const [source] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
   });
 
   it("rejects a watchdog mutation after a descendant material boundary", async () => {
@@ -1735,6 +1825,59 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(res.status, JSON.stringify(res.body)).toBe(409);
     const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
     expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects a linked approval decision that commits with a pre-trigger timestamp", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+    });
+    const approvalId = randomUUID();
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId: fixture.companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: { title: "Late-committing source approval" },
+    });
+    await db.insert(issueApprovals).values({
+      companyId: fixture.companyId,
+      issueId: fixture.sourceIssueId,
+      approvalId,
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "issue.approval_linked",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: { approvalId },
+      createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 2_000),
+    });
+    await db.update(approvals)
+      .set({ status: "approved" })
+      .where(eq(approvals.id, approvalId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "approval.approved",
+      entityType: "approval",
+      entityId: approvalId,
+      details: {},
+      createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
   });
 
   it("accepts a server-owned blocker transition that returns to an already-reviewed snapshot", async () => {
