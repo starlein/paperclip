@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
   agentWakeupRequests,
@@ -173,8 +173,15 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     const agentId = await seedAgent(companyId);
     await seedWatchdog(companyId, sourceId, agentId);
     const { service, wakes } = createService();
+    const transactionSpy = vi.spyOn(db, "transaction");
 
     const result = await service.reconcileTaskWatchdogs({ companyId });
+
+    expect(transactionSpy).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+    transactionSpy.mockRestore();
 
     expect(result).toMatchObject({ checked: 1, triggered: 1 });
     expect(wakes).toHaveLength(1);
@@ -816,7 +823,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       executionLockedAt: new Date(),
     }).where(eq(issues.id, sourceId));
     await seedWatchdog(companyId, sourceId, watchdogAgentId);
-    const { service } = createService();
+    const { service, wakes } = createService();
 
     await service.reconcileTaskWatchdogs({ companyId });
     const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
@@ -828,10 +835,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       agentId: watchdogAgentId,
       status: "running",
       invocationSource: "assignment",
-      contextSnapshot: {
-        issueId: watchdog!.watchdogIssueId,
-        taskWatchdog: { watchedIssueId: sourceId, stopFingerprint },
-      },
+      contextSnapshot: wakes[0]?.opts?.contextSnapshot,
     });
 
     const revalidated = await service.revalidateMutationScope({
@@ -982,7 +986,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       executionLockedAt: new Date(),
     }).where(eq(issues.id, foreignIssueId));
     await seedWatchdog(watchedCompanyId, watchedIssueId, watchdogAgentId);
-    const { service } = createService();
+    const { service, wakes } = createService();
 
     await service.reconcileTaskWatchdogs({ companyId: watchedCompanyId });
     const [watchdog] = await db
@@ -1003,10 +1007,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       agentId: watchdogAgentId,
       status: "running",
       invocationSource: "assignment",
-      contextSnapshot: {
-        issueId: watchdog!.watchdogIssueId,
-        taskWatchdog: { watchedIssueId, stopFingerprint },
-      },
+      contextSnapshot: wakes[0]?.opts?.contextSnapshot,
     });
 
     const revalidated = await service.revalidateMutationScope({

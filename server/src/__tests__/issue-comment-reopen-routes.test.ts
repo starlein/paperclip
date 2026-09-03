@@ -318,7 +318,7 @@ describe.sequential("issue comment reopen routes", () => {
     mockDbSelectFrom.mockImplementation(() => ({ where: mockDbSelectWhere }));
     mockDbSelect.mockImplementation(() => ({ from: mockDbSelectFrom }));
     mockDb.transaction.mockImplementation(async (fn: (tx: typeof mockTx) => Promise<unknown>) => fn(mockTx));
-    mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => makeIssue("todo"));
     mockHeartbeatService.wakeup.mockResolvedValue(undefined);
     mockHeartbeatService.reportRunActivity.mockResolvedValue(undefined);
     mockHeartbeatService.getRun.mockResolvedValue(null);
@@ -574,6 +574,7 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      expect.anything(),
     );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -889,6 +890,7 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      expect.anything(),
     );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -947,6 +949,7 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      expect.anything(),
     );
     expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith("retry-run-1");
     expect(mockLogActivity).toHaveBeenCalledWith(
@@ -960,6 +963,7 @@ describe.sequential("issue comment reopen routes", () => {
           cancelledScheduledRetryRunId: "retry-run-1",
         }),
       }),
+      expect.any(Array),
     );
     await waitForWakeup(() => expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -1158,7 +1162,9 @@ describe.sequential("issue comment reopen routes", () => {
         presentation: { kind: "system_notice", tone: "warning", detailsDefaultOpen: false },
         metadata,
         sourceTrust: null,
+        postCommitActivityPublications: expect.any(Array),
       },
+      mockTx,
     );
   });
 
@@ -1220,6 +1226,7 @@ describe.sequential("issue comment reopen routes", () => {
           density: "compact",
         },
       }),
+      mockTx,
     );
   });
 
@@ -1241,6 +1248,7 @@ describe.sequential("issue comment reopen routes", () => {
         onBehalfOfUserId: null,
       },
       expect.objectContaining({ presentation: null }),
+      mockTx,
     );
   });
 
@@ -1274,6 +1282,7 @@ describe.sequential("issue comment reopen routes", () => {
         onBehalfOfUserId: null,
       },
       expect.objectContaining({ presentation: null }),
+      mockTx,
     );
   });
 
@@ -1473,6 +1482,7 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      expect.anything(),
     );
   });
 
@@ -1883,6 +1893,7 @@ describe.sequential("issue comment reopen routes", () => {
           followUpRequested: true,
         }),
       }),
+      expect.any(Array),
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -1927,6 +1938,7 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      expect.anything(),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -1938,6 +1950,7 @@ describe.sequential("issue comment reopen routes", () => {
           followUpRequested: true,
         }),
       }),
+      expect.any(Array),
     );
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
       "22222222-2222-4222-8222-222222222222",
@@ -1981,6 +1994,7 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      expect.anything(),
     );
     expect(mockIssueService.addComment).toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -2255,6 +2269,7 @@ describe.sequential("issue comment reopen routes", () => {
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       { status: "todo" },
+      expect.anything(),
     );
     expect(mockIssueService.addComment).toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
@@ -2438,7 +2453,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ status: "done", comment: "Approved for ship" });
 
     expect(res.status).toBe(200);
-    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
+    expect(mockDb.transaction).toHaveBeenCalledTimes(2);
     expect(mockIssueService.update).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       expect.objectContaining({
@@ -2638,7 +2653,7 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  it("auto-approves a reviewer comment and wakes dependents when the final blocker resolves", async () => {
+  it("auto-approves a reviewer comment with a transactional dependency-wake action queue", async () => {
     const reviewerAgentId = "33333333-3333-4333-8333-333333333333";
     const dependentAgentId = "44444444-4444-4444-8444-444444444444";
     const policy = await normalizePolicy({
@@ -2710,20 +2725,18 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockIssueService.listWakeableBlockedDependents).toHaveBeenCalledWith(issue.id);
-    await waitForWakeup(() => {
-      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(
-        dependentAgentId,
-        expect.objectContaining({
-          reason: "issue_blockers_resolved",
-          payload: expect.objectContaining({
-            issueId: "dependent-1",
-            resolvedBlockerIssueId: issue.id,
-            blockerIssueIds: [issue.id],
-          }),
-        }),
-      );
-    });
+    expect(mockIssueService.update).toHaveBeenCalledWith(
+      issue.id,
+      expect.objectContaining({ status: "done" }),
+      mockTx,
+      undefined,
+      expect.any(Array),
+    );
+    expect(mockIssueService.listWakeableBlockedDependents).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
+      dependentAgentId,
+      expect.objectContaining({ reason: "issue_blockers_resolved" }),
+    );
   });
 
   it("does not wake the returnAssignee with issue_commented when auto-approval reassigns the issue", async () => {
@@ -2847,7 +2860,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalledWith(
       expect.any(String),
@@ -2912,7 +2925,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
@@ -2972,7 +2985,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
@@ -3030,7 +3043,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
@@ -3089,7 +3102,7 @@ describe.sequential("issue comment reopen routes", () => {
       .send({ body: reviewBody });
 
     expect(res.status).toBe(201);
-    expect(mockDb.transaction).not.toHaveBeenCalled();
+    expect(mockDb.transaction).toHaveBeenCalledTimes(1);
     expect(mockIssueService.update).not.toHaveBeenCalled();
     expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
   });
@@ -3164,7 +3177,7 @@ describe.sequential("issue comment reopen routes", () => {
         .send({ body });
 
       expect(res.status).toBe(201);
-      expect(mockDb.transaction).not.toHaveBeenCalled();
+      expect(mockDb.transaction).toHaveBeenCalledTimes(1);
       expect(mockIssueService.update).not.toHaveBeenCalled();
       expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
     });

@@ -799,7 +799,7 @@ describeEmbeddedPostgres("accepted plan workspace refresh", () => {
     const run = await heartbeat.wakeup(agentId, {
       source: "automation",
       triggerDetail: "system",
-      reason: "issue_blockers_resolved",
+      reason: "issue_commented",
       payload: {
         issueId,
         interactionId: "interaction-cross-issue",
@@ -810,7 +810,7 @@ describeEmbeddedPostgres("accepted plan workspace refresh", () => {
       contextSnapshot: {
         issueId,
         taskId: issueId,
-        wakeReason: "issue_blockers_resolved",
+        wakeReason: "issue_commented",
         interactionKind: "request_confirmation",
         interactionStatus: "accepted",
       },
@@ -1101,7 +1101,7 @@ describeEmbeddedPostgres("accepted plan workspace refresh", () => {
     const run = await heartbeat.wakeup(agentId, {
       source: "automation",
       triggerDetail: "system",
-      reason: "issue_blockers_resolved",
+      reason: "issue_commented",
       payload: {
         issueId,
         interactionId: "interaction-same-issue",
@@ -1112,7 +1112,7 @@ describeEmbeddedPostgres("accepted plan workspace refresh", () => {
       contextSnapshot: {
         issueId,
         taskId: issueId,
-        wakeReason: "issue_blockers_resolved",
+        wakeReason: "issue_commented",
         interactionKind: "request_confirmation",
         interactionStatus: "accepted",
       },

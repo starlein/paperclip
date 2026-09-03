@@ -133,9 +133,16 @@ import {
   persistActivity,
   publishActivity,
   type ActivityPublication,
+  type LogActivityInput,
 } from "./activity-log.js";
 import { buildIssueChanges } from "./issue-change-receipt.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
+import {
+  buildIssueBlockersResolvedWakeStateKey,
+  findExistingIssueBlockersResolvedWakeForReadyState,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+} from "./issue-dependency-wakeups.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -169,12 +176,18 @@ const ISSUE_CREATE_IDEMPOTENCY_KEY_CLEANUP_BATCH_SIZE = 500;
 const DELETED_ISSUE_COMMENT_BODY = "";
 const ISSUE_WAKE_DIAGNOSTICS_ACTIVITY_ACTIONS = ["issue.tree_hold_wakeup_deferred"] as const;
 
-export type IssuePostCommitAction = {
-  type: "cancel_native_question_run";
-  runId: string;
-  issueId: string;
-  issueStatus: string;
-};
+export type IssuePostCommitAction =
+  | {
+      type: "cancel_native_question_run";
+      runId: string;
+      issueId: string;
+      issueStatus: string;
+    }
+  | {
+      type: "dispatch_dependency_wake_intents";
+      companyId: string;
+      wakeupRequestIds: string[];
+    };
 
 /** Execute side effects that must never run before the issue transaction commits. */
 export async function executeIssuePostCommitActions(
@@ -186,6 +199,20 @@ export async function executeIssuePostCommitActions(
   const heartbeat = heartbeatService(db);
   const cancelledRunIds = new Set<string>();
   for (const action of actions) {
+    if (action.type === "dispatch_dependency_wake_intents") {
+      try {
+        await heartbeat.dispatchPendingNativeStatusWakeups({
+          companyId: action.companyId,
+          requestIds: action.wakeupRequestIds,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, companyId: action.companyId, wakeupRequestIds: action.wakeupRequestIds },
+          "dependency wake dispatch deferred to recovery sweep",
+        );
+      }
+      continue;
+    }
     if (cancelledRunIds.has(action.runId)) continue;
     cancelledRunIds.add(action.runId);
     try {
@@ -5258,6 +5285,175 @@ export function issueService(db: Db) {
     }
   }
 
+  async function lockDependencyState(
+    companyId: string,
+    issueId: string,
+    dbOrTx: any,
+  ) {
+    await dbOrTx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`paperclip:issue-dependency:${companyId}:${issueId}`}, 0))`,
+    );
+  }
+
+  async function lockDependencyStateForUpdate(
+    companyId: string,
+    issueId: string,
+    dbOrTx: any,
+  ) {
+    // The dependent-scoped advisory lock closes the uncommitted-new-edge gap:
+    // relation writers acquire it before reading or changing the edge set.
+    await lockDependencyState(companyId, issueId, dbOrTx);
+    const blockerIds = await dbOrTx
+      .select({ id: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.relatedIssueId, issueId),
+        eq(issueRelations.type, "blocks"),
+      ))
+      .then((rows: Array<{ id: string }>) => rows.map((row) => row.id));
+    const issueIds = [...new Set([issueId, ...blockerIds])].sort();
+    await dbOrTx
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)))
+      .orderBy(asc(issues.id))
+      .for("update");
+    return blockerIds;
+  }
+
+  async function listWakeableBlockedDependents(
+    blockerIssueId: string,
+    dbOrTx: any = db,
+  ): Promise<Array<{
+    id: string;
+    assigneeAgentId: string;
+    blockerIssueIds: string[];
+    blockedTransitionAt: Date | null;
+  }>> {
+    const blockerIssue = await dbOrTx
+      .select({ id: issues.id, companyId: issues.companyId })
+      .from(issues)
+      .where(eq(issues.id, blockerIssueId))
+      .then((rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null);
+    if (!blockerIssue) return [];
+
+    const candidates = await dbOrTx
+      .select({
+        id: issues.id,
+        assigneeAgentId: issues.assigneeAgentId,
+        status: issues.status,
+        blockedTransitionAt: issues.blockedTransitionAt,
+      })
+      .from(issueRelations)
+      .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
+      .where(
+        and(
+          eq(issueRelations.companyId, blockerIssue.companyId),
+          eq(issueRelations.type, "blocks"),
+          eq(issueRelations.issueId, blockerIssueId),
+        ),
+      );
+    if (candidates.length === 0) return [];
+
+    const wakeableCandidates = candidates.filter(
+      (candidate: { assigneeAgentId: string | null; status: string }) =>
+        candidate.assigneeAgentId && candidate.status === "blocked",
+    );
+    if (wakeableCandidates.length === 0) return [];
+
+    const readinessMap = await listIssueDependencyReadinessMap(
+      dbOrTx,
+      blockerIssue.companyId,
+      wakeableCandidates.map((candidate: { id: string }) => candidate.id),
+    );
+
+    return wakeableCandidates
+      .map((candidate: typeof wakeableCandidates[number]) => {
+        const readiness = readinessMap.get(candidate.id) ?? createIssueDependencyReadiness(candidate.id);
+        return { candidate, readiness };
+      })
+      .filter(({ readiness }: { readiness: IssueDependencyReadiness }) =>
+        readiness.isDependencyReady && readiness.blockerIssueIds.length > 0)
+      .map(({ candidate, readiness }: {
+        candidate: typeof wakeableCandidates[number];
+        readiness: IssueDependencyReadiness;
+      }) => ({
+        id: candidate.id,
+        assigneeAgentId: candidate.assigneeAgentId!,
+        blockerIssueIds: readiness.blockerIssueIds,
+        blockedTransitionAt: candidate.blockedTransitionAt,
+      }));
+  }
+
+  async function persistDependencyWakeIntents(
+    input: {
+      companyId: string;
+      resolvedBlockerIssueId: string;
+      dependents: Awaited<ReturnType<typeof listWakeableBlockedDependents>>;
+      mutation: string;
+      source: string;
+    },
+    dbOrTx: any,
+    postCommitActions: IssuePostCommitAction[],
+  ) {
+    const wakeupRequestIds: string[] = [];
+    for (const dependent of [...input.dependents].sort((left, right) => left.id.localeCompare(right.id))) {
+      const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(dbOrTx as Db, {
+        companyId: input.companyId,
+        assigneeAgentId: dependent.assigneeAgentId,
+        dependentIssueId: dependent.id,
+        blockerIssueIds: dependent.blockerIssueIds,
+        blockedTransitionAt: dependent.blockedTransitionAt,
+        lockForUpdate: true,
+      });
+      if (existingWake) continue;
+
+      const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: dependent.id,
+        blockerIssueIds: dependent.blockerIssueIds,
+        blockedTransitionAt: dependent.blockedTransitionAt,
+      });
+      const [intent] = await dbOrTx
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: input.companyId,
+          agentId: dependent.assigneeAgentId,
+          source: "automation",
+          triggerDetail: "system",
+          reason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+          payload: {
+            issueId: dependent.id,
+            taskId: dependent.id,
+            resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+            blockerIssueIds: dependent.blockerIssueIds,
+            mutation: input.mutation,
+            _paperclipWakeContext: {
+              issueId: dependent.id,
+              taskId: dependent.id,
+              wakeReason: ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+              source: input.source,
+              resolvedBlockerIssueId: input.resolvedBlockerIssueId,
+              blockerIssueIds: dependent.blockerIssueIds,
+            },
+          },
+          status: "queued",
+          requestedByActorType: "system",
+          requestedByActorId: ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+          idempotencyKey,
+        })
+        .returning({ id: agentWakeupRequests.id });
+      if (intent) wakeupRequestIds.push(intent.id);
+    }
+    if (wakeupRequestIds.length > 0) {
+      postCommitActions.push({
+        type: "dispatch_dependency_wake_intents",
+        companyId: input.companyId,
+        wakeupRequestIds,
+      });
+    }
+  }
+
   async function syncBlockedByIssueIds(
     issueId: string,
     companyId: string,
@@ -5270,14 +5466,16 @@ export function issueService(db: Db) {
       throw unprocessable("Issue cannot be blocked by itself");
     }
 
+    await lockDependencyState(companyId, issueId, dbOrTx);
+    const lockedIssueIds = [issueId, ...deduped].sort();
+    await dbOrTx.execute(
+      sql`SELECT ${issues.id} FROM ${issues}
+          WHERE ${and(eq(issues.companyId, companyId), inArray(issues.id, lockedIssueIds))}
+          ORDER BY ${issues.id}
+          FOR UPDATE`,
+    );
+
     if (deduped.length > 0) {
-      const lockedIssueIds = [issueId, ...deduped].sort();
-      await dbOrTx.execute(
-        sql`SELECT ${issues.id} FROM ${issues}
-            WHERE ${and(eq(issues.companyId, companyId), inArray(issues.id, lockedIssueIds))}
-            ORDER BY ${issues.id}
-            FOR UPDATE`,
-      );
       const relatedIssues = await dbOrTx
         .select({ id: issues.id })
         .from(issues)
@@ -5288,24 +5486,40 @@ export function issueService(db: Db) {
       await assertNoBlockingCycles(companyId, issueId, deduped, dbOrTx);
     }
 
-    await dbOrTx
-      .delete(issueRelations)
-      .where(
-        and(
+    const existingRelations = await dbOrTx
+      .select({ blockerIssueId: issueRelations.issueId })
+      .from(issueRelations)
+      .where(and(
+        eq(issueRelations.companyId, companyId),
+        eq(issueRelations.relatedIssueId, issueId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    const existingBlockerIds = new Set<string>(
+      existingRelations.map((relation: { blockerIssueId: string }) => relation.blockerIssueId),
+    );
+    const desiredBlockerIds = new Set(deduped);
+    const removedBlockerIds = [...existingBlockerIds].filter((blockerId) => !desiredBlockerIds.has(blockerId));
+    if (removedBlockerIds.length > 0) {
+      await dbOrTx
+        .delete(issueRelations)
+        .where(and(
           eq(issueRelations.companyId, companyId),
           eq(issueRelations.relatedIssueId, issueId),
           eq(issueRelations.type, "blocks"),
-        ),
-      );
+          inArray(issueRelations.issueId, removedBlockerIds),
+        ));
+    }
 
-    if (deduped.length === 0) return;
+    const addedBlockerIds = deduped.filter((blockerId) => !existingBlockerIds.has(blockerId));
+    if (addedBlockerIds.length === 0) return;
 
     await dbOrTx.insert(issueRelations).values(
-      deduped.map((blockerIssueId) => ({
+      addedBlockerIds.map((blockerIssueId) => ({
         companyId,
         issueId: blockerIssueId,
         relatedIssueId: issueId,
         type: "blocks",
+        createdByActorType: actor.agentId ? "agent" : actor.userId ? "user" : "system",
         createdByAgentId: actor.agentId ?? null,
         createdByUserId: actor.userId ?? null,
       })),
@@ -6671,6 +6885,8 @@ export function issueService(db: Db) {
       return listIssueDependencyReadinessMap(dbOrTx, companyId, issueIds);
     },
 
+    lockDependencyStateForUpdate,
+
     listBlockerAttention: async (
       companyId: string,
       issueRows: IssueBlockerAttentionInputNode[],
@@ -6695,62 +6911,7 @@ export function issueService(db: Db) {
       return listIssueProductivityReviewMap(dbOrTx, companyId, sourceIssueIds);
     },
 
-    listWakeableBlockedDependents: async (blockerIssueId: string) => {
-      const blockerIssue = await db
-        .select({ id: issues.id, companyId: issues.companyId })
-        .from(issues)
-        .where(eq(issues.id, blockerIssueId))
-        .then((rows) => rows[0] ?? null);
-      if (!blockerIssue) return [];
-
-      const candidates = await db
-        .select({
-          id: issues.id,
-          assigneeAgentId: issues.assigneeAgentId,
-          status: issues.status,
-          blockedTransitionAt: issues.blockedTransitionAt,
-        })
-        .from(issueRelations)
-        .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
-        .where(
-          and(
-            eq(issueRelations.companyId, blockerIssue.companyId),
-            eq(issueRelations.type, "blocks"),
-            eq(issueRelations.issueId, blockerIssueId),
-          ),
-        );
-      if (candidates.length === 0) return [];
-
-      const wakeableCandidates = candidates.filter(
-        (candidate) =>
-          candidate.assigneeAgentId && !["backlog", "done", "cancelled"].includes(candidate.status),
-      );
-      if (wakeableCandidates.length === 0) return [];
-
-      // Defer to the unified readiness check so that a dependent only fires when
-      // (a) every blocker is done AND (b) every done blocker's workspace has
-      // recorded a successful workspace_finalize. The finalize hook also calls
-      // this function on completion, so a wake initially gated by an in-flight
-      // sync-back will re-fire once the restore lands locally.
-      const readinessMap = await listIssueDependencyReadinessMap(
-        db,
-        blockerIssue.companyId,
-        wakeableCandidates.map((candidate) => candidate.id),
-      );
-
-      return wakeableCandidates
-        .map((candidate) => {
-          const readiness = readinessMap.get(candidate.id) ?? createIssueDependencyReadiness(candidate.id);
-          return { candidate, readiness };
-        })
-        .filter(({ readiness }) => readiness.isDependencyReady && readiness.blockerIssueIds.length > 0)
-        .map(({ candidate, readiness }) => ({
-          id: candidate.id,
-          assigneeAgentId: candidate.assigneeAgentId!,
-          blockerIssueIds: readiness.blockerIssueIds,
-          blockedTransitionAt: candidate.blockedTransitionAt,
-        }));
-    },
+    listWakeableBlockedDependents,
 
     getWakeableParentAfterChildCompletion: async (
       parentIssueId: string,
@@ -6929,16 +7090,20 @@ export function issueService(db: Db) {
       });
 
       if (blockParentUntilDone) {
-        const existingBlockers = await db
-          .select({ blockerIssueId: issueRelations.issueId })
-          .from(issueRelations)
-          .where(and(eq(issueRelations.companyId, parent.companyId), eq(issueRelations.relatedIssueId, parent.id), eq(issueRelations.type, "blocks")));
-        await syncBlockedByIssueIds(
-          parent.id,
-          parent.companyId,
-          [...new Set([...existingBlockers.map((row) => row.blockerIssueId), child.id])],
-          { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
-        );
+        await db.transaction(async (tx) => {
+          await lockDependencyState(parent.companyId, parent.id, tx);
+          const existingBlockers = await tx
+            .select({ blockerIssueId: issueRelations.issueId })
+            .from(issueRelations)
+            .where(and(eq(issueRelations.companyId, parent.companyId), eq(issueRelations.relatedIssueId, parent.id), eq(issueRelations.type, "blocks")));
+          await syncBlockedByIssueIds(
+            parent.id,
+            parent.companyId,
+            [...new Set([...existingBlockers.map((row) => row.blockerIssueId), child.id])],
+            { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+            tx,
+          );
+        });
         [child] = await withIssueRelationSummaries(parent.companyId, [child], db);
       }
 
@@ -8000,6 +8165,39 @@ export function issueService(db: Db) {
       }
 
       const runUpdate = async (tx: any) => {
+        // Dependency-edge mutations must take the dependent-scoped lock before
+        // any issue-row lock. Recovery takes the same order, so a concurrent
+        // edge addition cannot either evade the readiness snapshot or deadlock
+        // while each transaction waits on the other's first lock.
+        if (blockedByIssueIds !== undefined) {
+          await lockDependencyState(existing.companyId, id, tx);
+        }
+        if (issueData.status === "done" && existing.status !== "done") {
+          // Relation writers lock each dependent before the blocker row. Take
+          // the same order before committing the last blocker so every ready
+          // dependent can receive a durable wake intent in this transaction.
+          const dependentIds = await tx
+            .select({ id: issueRelations.relatedIssueId })
+            .from(issueRelations)
+            .where(and(
+              eq(issueRelations.companyId, existing.companyId),
+              eq(issueRelations.issueId, id),
+              eq(issueRelations.type, "blocks"),
+            ))
+            .then((rows: Array<{ id: string }>) => [...new Set(rows.map((row) => row.id))].sort());
+          for (const dependentId of dependentIds) {
+            await lockDependencyState(existing.companyId, dependentId, tx);
+          }
+        }
+        const livenessRelationDependentId =
+          (issueData.status === "done" || issueData.status === "cancelled")
+          && existing.status !== issueData.status
+          && existing.originKind === RECOVERY_ORIGIN_KINDS.issueGraphLivenessEscalation
+            ? parseIssueGraphLivenessIncidentKey(existing.originId)?.issueId ?? null
+            : null;
+        if (livenessRelationDependentId) {
+          await lockDependencyState(existing.companyId, livenessRelationDependentId, tx);
+        }
         // The receipt baseline must be read under the same row lock as the
         // write. Otherwise a concurrent update can be mistaken for a change
         // made by this request.
@@ -8164,6 +8362,42 @@ export function issueService(db: Db) {
             tx,
           );
         }
+        if (updated.status === "done" && receiptExisting.status !== "done") {
+          const dependents = await listWakeableBlockedDependents(updated.id, tx);
+          await persistDependencyWakeIntents({
+            companyId: updated.companyId,
+            resolvedBlockerIssueId: updated.id,
+            dependents,
+            mutation: "blocker_done",
+            source: "issue.blockers_resolved",
+          }, tx, queuedPostCommitActions);
+        }
+        if (
+          blockedByIssueIds !== undefined &&
+          updated.status === "blocked" &&
+          updated.assigneeAgentId
+        ) {
+          const readiness = (await listIssueDependencyReadinessMap(
+            tx,
+            updated.companyId,
+            [updated.id],
+          )).get(updated.id) ?? createIssueDependencyReadiness(updated.id);
+          const resolvedBlockerIssueId = readiness.blockerIssueIds[0] ?? null;
+          if (readiness.isDependencyReady && resolvedBlockerIssueId) {
+            await persistDependencyWakeIntents({
+              companyId: updated.companyId,
+              resolvedBlockerIssueId,
+              dependents: [{
+                id: updated.id,
+                assigneeAgentId: updated.assigneeAgentId,
+                blockerIssueIds: readiness.blockerIssueIds,
+                blockedTransitionAt: updated.blockedTransitionAt,
+              }],
+              mutation: "blocked_dependency_restored",
+              source: "issue.blockers_restored",
+            }, tx, queuedPostCommitActions);
+          }
+        }
         if (
           issueData.executionWorkspaceSettings !== undefined &&
           nextExecutionWorkspaceId &&
@@ -8321,6 +8555,41 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        const lockedIssue = await tx
+          .select({ id: issues.id, companyId: issues.companyId })
+          .from(issues)
+          .where(eq(issues.id, id))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!lockedIssue) return null;
+
+        // Deleting a blocker used to cascade its relation edges and could leave
+        // a blocked dependent with zero blockers and no wake. Serialize against
+        // relation writers via the blocker row and reject while any live issue
+        // still depends on it. Deleting the dependent first remains valid.
+        const liveDependents = await tx
+          .select({ id: issues.id, identifier: issues.identifier })
+          .from(issueRelations)
+          .innerJoin(issues, and(
+            eq(issues.id, issueRelations.relatedIssueId),
+            eq(issues.companyId, lockedIssue.companyId),
+          ))
+          .where(and(
+            eq(issueRelations.companyId, lockedIssue.companyId),
+            eq(issueRelations.issueId, id),
+            eq(issueRelations.type, "blocks"),
+            notInArray(issues.status, ["done", "cancelled"]),
+          ));
+        if (liveDependents.length > 0) {
+          throw conflict("Issue cannot be deleted while it blocks non-terminal issues.", {
+            dependentIssueIds: liveDependents.map((dependent) => dependent.id).sort(),
+            dependentIssueIdentifiers: liveDependents
+              .map((dependent) => dependent.identifier)
+              .filter((identifier): identifier is string => Boolean(identifier))
+              .sort(),
+          });
+        }
+
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)
@@ -9075,6 +9344,7 @@ export function issueService(db: Db) {
         authorizationReason?: string | null;
         sourceTrust?: typeof issueComments.$inferInsert.sourceTrust;
         createdAt?: Date | string | null;
+        postCommitActivityPublications?: ActivityPublication[];
       },
       dbOrTx: any = db,
     ) => {
@@ -9171,7 +9441,7 @@ export function issueService(db: Db) {
               source: "issue.comment.service",
               result: interaction.result ?? null,
             },
-          });
+          }, options?.postCommitActivityPublications);
         }
       }
 
@@ -9189,6 +9459,10 @@ export function issueService(db: Db) {
       originalFilename?: string | null;
       createdByAgentId?: string | null;
       createdByUserId?: string | null;
+      activityActor?: Pick<
+        LogActivityInput,
+        "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId"
+      >;
     }) => {
       const issue = await db
         .select({ id: issues.id, companyId: issues.companyId })
@@ -9197,19 +9471,28 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!issue) throw notFound("Issue not found");
 
-      if (input.issueCommentId) {
-        const comment = await db
-          .select({ id: issueComments.id, companyId: issueComments.companyId, issueId: issueComments.issueId })
-          .from(issueComments)
-          .where(eq(issueComments.id, input.issueCommentId))
+      const postCommitActivityPublications: ActivityPublication[] = [];
+      const created = await db.transaction(async (tx) => {
+        const lockedIssue = await tx
+          .select({ id: issues.id, companyId: issues.companyId })
+          .from(issues)
+          .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId)))
+          .for("update")
           .then((rows) => rows[0] ?? null);
-        if (!comment) throw notFound("Issue comment not found");
-        if (comment.companyId !== issue.companyId || comment.issueId !== issue.id) {
-          throw unprocessable("Attachment comment must belong to same issue and company");
-        }
-      }
+        if (!lockedIssue) throw notFound("Issue not found");
 
-      return db.transaction(async (tx) => {
+        if (input.issueCommentId) {
+          const comment = await tx
+            .select({ id: issueComments.id, companyId: issueComments.companyId, issueId: issueComments.issueId })
+            .from(issueComments)
+            .where(eq(issueComments.id, input.issueCommentId))
+            .then((rows) => rows[0] ?? null);
+          if (!comment) throw notFound("Issue comment not found");
+          if (comment.companyId !== lockedIssue.companyId || comment.issueId !== lockedIssue.id) {
+            throw unprocessable("Attachment comment must belong to same issue and company");
+          }
+        }
+
         const [asset] = await tx
           .insert(assets)
           .values({
@@ -9235,7 +9518,7 @@ export function issueService(db: Db) {
           })
           .returning();
 
-        return {
+        const result = {
           id: attachment.id,
           companyId: attachment.companyId,
           issueId: attachment.issueId,
@@ -9252,7 +9535,25 @@ export function issueService(db: Db) {
           createdAt: attachment.createdAt,
           updatedAt: attachment.updatedAt,
         };
+        if (input.activityActor) {
+          await logActivity(tx as unknown as Db, {
+            companyId: issue.companyId,
+            ...input.activityActor,
+            action: "issue.attachment_added",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              attachmentId: result.id,
+              originalFilename: result.originalFilename,
+              contentType: result.contentType,
+              byteSize: result.byteSize,
+            },
+          }, postCommitActivityPublications);
+        }
+        return result;
       });
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
+      return created;
     },
 
     listAttachments: async (issueId: string) =>
@@ -9303,8 +9604,37 @@ export function issueService(db: Db) {
         .where(eq(issueAttachments.id, id))
         .then((rows) => rows[0] ?? null),
 
-    removeAttachment: async (id: string) =>
-      db.transaction(async (tx) => {
+    removeAttachment: async (
+      id: string,
+      activityActor?: Pick<
+        LogActivityInput,
+        "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId"
+      >,
+    ) => {
+      // Resolve the owner without locking the attachment row first. Every
+      // attachment mutation then serializes on the owning issue, matching the
+      // watchdog source/target lock order. The row is re-read after acquiring
+      // the issue lock so a stale pre-read can never authorize deletion.
+      const attachmentOwner = await db
+        .select({ issueId: issueAttachments.issueId, companyId: issueAttachments.companyId })
+        .from(issueAttachments)
+        .where(eq(issueAttachments.id, id))
+        .then((rows) => rows[0] ?? null);
+      if (!attachmentOwner) return null;
+
+      const postCommitActivityPublications: ActivityPublication[] = [];
+      const removed = await db.transaction(async (tx) => {
+        const lockedIssue = await tx
+          .select({ id: issues.id })
+          .from(issues)
+          .where(and(
+            eq(issues.id, attachmentOwner.issueId),
+            eq(issues.companyId, attachmentOwner.companyId),
+          ))
+          .for("update")
+          .then((rows) => rows[0] ?? null);
+        if (!lockedIssue) return null;
+
         const existing = await tx
           .select({
             id: issueAttachments.id,
@@ -9327,12 +9657,29 @@ export function issueService(db: Db) {
           .innerJoin(assets, eq(issueAttachments.assetId, assets.id))
           .where(eq(issueAttachments.id, id))
           .then((rows) => rows[0] ?? null);
-        if (!existing) return null;
+        if (
+          !existing ||
+          existing.issueId !== attachmentOwner.issueId ||
+          existing.companyId !== attachmentOwner.companyId
+        ) return null;
 
         await tx.delete(issueAttachments).where(eq(issueAttachments.id, id));
         await tx.delete(assets).where(eq(assets.id, existing.assetId));
+        if (activityActor) {
+          await logActivity(tx as unknown as Db, {
+            companyId: existing.companyId,
+            ...activityActor,
+            action: "issue.attachment_removed",
+            entityType: "issue",
+            entityId: existing.issueId,
+            details: { attachmentId: existing.id },
+          }, postCommitActivityPublications);
+        }
         return existing;
-      }),
+      });
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
+      return removed;
+    },
 
     findMentionedAgents: async (companyId: string, body: string) => {
       const explicitAgentMentionIds = extractAgentMentionIds(body);

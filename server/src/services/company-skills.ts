@@ -4344,7 +4344,15 @@ export function companySkillService(db: Db) {
         throw unprocessable("Skill source metadata is incomplete.");
       }
       const repoPath = normalizePortablePath(path.posix.join(repoSkillDir, normalizedPath));
-      content = await fetchText(resolveRawGitHubUrl(hostname, owner, repo, ref, repoPath));
+      try {
+        content = await fetchText(resolveRawGitHubUrl(hostname, owner, repo, ref, repoPath));
+      } catch (error) {
+        if (normalizedPath === "SKILL.md" && skill.markdown) {
+          content = skill.markdown;
+        } else {
+          throw error;
+        }
+      }
     } else if (skill.sourceType === "agentskill_sh") {
       if (normalizedPath === "SKILL.md" && skill.markdown) {
         content = skill.markdown;

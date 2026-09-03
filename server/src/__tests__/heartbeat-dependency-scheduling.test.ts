@@ -6,6 +6,7 @@ import {
   agents,
   agentRuntimeState,
   agentWakeupRequests,
+  approvals,
   companySkills,
   companies,
   createDb,
@@ -18,6 +19,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueDocuments,
+  issueApprovals,
   issueRelations,
   issueThreadInteractions,
   issueTreeHolds,
@@ -30,6 +32,13 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
+import {
+  buildIssueBlockersResolvedWakeStateKey,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+} from "../services/issue-dependency-wakeups.ts";
+import { approvalService } from "../services/approvals.ts";
+import { issueApprovalService } from "../services/issue-approvals.ts";
+import { issueService } from "../services/issues.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -139,6 +148,8 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueRelations);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(issueThreadInteractions);
     await db.delete(issueTreeHolds);
     await db.delete(issues);
@@ -261,12 +272,134 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(dispatchedRequests[0]).toMatchObject({ runId: dispatchedRun!.id });
   });
 
+  it("dispatches a persisted dependency intent to the assignee despite an unrelated mention run", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const mentionedAgentId = randomUUID();
+    const blockerId = randomUUID();
+    const dependentId = randomUUID();
+    const blockedTransitionAt = new Date("2026-09-03T12:00:00.000Z");
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Dependency intent dispatch",
+      issuePrefix: `D${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+      defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "DependentAssignee",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      },
+      {
+        id: mentionedAgentId,
+        companyId,
+        name: "MentionParticipant",
+        role: "reviewer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Completed blocker", status: "done", priority: "high" },
+      {
+        id: dependentId,
+        companyId,
+        title: "Ready dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId,
+        responsibleUserId: "responsible-user",
+        blockedTransitionAt,
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: dependentId,
+      type: "blocks",
+    });
+    const [mentionRequest] = await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId: mentionedAgentId,
+      source: "automation",
+      triggerDetail: "mention",
+      reason: "issue_comment_mentioned",
+      payload: { issueId: dependentId, commentId: randomUUID() },
+      status: "queued",
+    }).returning();
+    await db.insert(heartbeatRuns).values({
+      companyId,
+      agentId: mentionedAgentId,
+      invocationSource: "automation",
+      triggerDetail: "mention",
+      status: "queued",
+      responsibleUserId: "responsible-user",
+      wakeupRequestId: mentionRequest!.id,
+      contextSnapshot: { issueId: dependentId },
+    });
+    const [intent] = await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId: assigneeAgentId,
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: {
+        issueId: dependentId,
+        taskId: dependentId,
+        resolvedBlockerIssueId: blockerId,
+        blockerIssueIds: [blockerId],
+        _paperclipWakeContext: { issueId: dependentId, taskId: dependentId },
+      },
+      status: "queued",
+      requestedByActorType: "system",
+      requestedByActorId: ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: dependentId,
+        blockerIssueIds: [blockerId],
+        blockedTransitionAt,
+      }),
+    }).returning();
+
+    const result = await heartbeat.dispatchPendingNativeStatusWakeups({
+      companyId,
+      requestIds: [intent!.id],
+    });
+    expect(result).toMatchObject({ scanned: 1, dispatched: 1 });
+    await heartbeat.drainActiveRunExecutions();
+
+    const [runnableDependent] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, dependentId));
+    expect(["todo", "in_progress"]).toContain(runnableDependent?.status);
+    const dependencyDispatches = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId),
+      eq(agentWakeupRequests.agentId, assigneeAgentId),
+      eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+      sql`${agentWakeupRequests.requestedByActorId} like 'dependency-wake-dispatch:%'`,
+    ));
+    expect(dependencyDispatches).toHaveLength(1);
+    expect(dependencyDispatches[0]?.runId).toEqual(expect.any(String));
+  });
+
   it("keeps blocked descendants idle until their blockers resolve", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const blockerId = randomUUID();
     const blockedIssueId = randomUUID();
     const readyIssueId = randomUUID();
+    const blockedTransitionAt = new Date("2026-09-02T08:00:00.000Z");
 
     await db.insert(companies).values({
       id: companyId,
@@ -304,10 +437,11 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         id: blockedIssueId,
         companyId,
         title: "Mission 2",
-        status: "todo",
+        status: "blocked",
         priority: "medium",
         assigneeAgentId: agentId,
         responsibleUserId: "responsible-user",
+        blockedTransitionAt,
       },
       {
         id: readyIssueId,
@@ -420,7 +554,11 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       source: "automation",
       triggerDetail: "system",
       reason: "interaction_pending",
-      payload: { issueId: blockedIssueId, interactionId: pendingInteractionId },
+      payload: {
+        issueId: blockedIssueId,
+        interactionId: pendingInteractionId,
+        mutation: "interaction",
+      },
       contextSnapshot: {
         issueId: blockedIssueId,
         interactionId: pendingInteractionId,
@@ -447,6 +585,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       dependencyBlockedInteraction: true,
       unresolvedBlockerIssueIds: [blockerId],
     });
+    await db.update(issueThreadInteractions)
+      .set({ status: "accepted", resolvedAt: new Date() })
+      .where(eq(issueThreadInteractions.id, pendingInteractionId));
 
     let finishReadyRun!: () => void;
     const readyRunCanFinish = new Promise<void>((resolve) => {
@@ -505,18 +646,31 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       .set({ status: "done", updatedAt: new Date() })
       .where(eq(issues.id, blockerId));
 
+    const promotedWakeKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerId],
+      blockedTransitionAt,
+    });
+
     const promotedWake = await heartbeat.wakeup(agentId, {
       source: "automation",
       triggerDetail: "system",
       reason: "issue_blockers_resolved",
       payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerId },
+      idempotencyKey: promotedWakeKey,
       contextSnapshot: {
         issueId: blockedIssueId,
         wakeReason: "issue_blockers_resolved",
         resolvedBlockerIssueId: blockerId,
       },
     });
-    expect(promotedWake).not.toBeNull();
+    const promotedWakeRequests = await db.select({
+      status: agentWakeupRequests.status,
+      reason: agentWakeupRequests.reason,
+      payload: agentWakeupRequests.payload,
+    }).from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.idempotencyKey, promotedWakeKey));
+    expect(promotedWake, JSON.stringify(promotedWakeRequests)).not.toBeNull();
 
     await waitForCondition(async () => {
       const run = await db
@@ -629,7 +783,10 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       processGroupId: null,
     });
 
-    const idempotencyKey = `issue_blockers_resolved:${blockedIssueId}:${blockerId}`;
+    const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerId],
+    });
     const wake = await heartbeat.wakeup(agentId, {
       source: "automation",
       triggerDetail: "system",
@@ -672,6 +829,341 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       .update(heartbeatRuns)
       .set({ status: "succeeded", finishedAt: new Date(), updatedAt: new Date() })
       .where(eq(heartbeatRuns.id, activeRunId));
+  });
+
+  it("revalidates readiness after a concurrent blocker reopen commits", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const blockerId = randomUUID();
+    const blockedIssueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "DependencyRevalidator",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    const blockedTransitionAt = new Date();
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Completed blocker", status: "done", priority: "high" },
+      {
+        id: blockedIssueId,
+        companyId,
+        title: "Blocked dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId: agentId,
+        blockedTransitionAt,
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: blockedIssueId,
+      type: "blocks",
+    });
+
+    let releaseReopen!: () => void;
+    const reopenCanCommit = new Promise<void>((resolve) => { releaseReopen = resolve; });
+    let reopenWritten!: () => void;
+    const reopenIsUncommitted = new Promise<void>((resolve) => { reopenWritten = resolve; });
+    const reopen = db.transaction(async (tx) => {
+      await tx.update(issues).set({ status: "todo", updatedAt: new Date() }).where(eq(issues.id, blockerId));
+      reopenWritten();
+      await reopenCanCommit;
+    });
+    await reopenIsUncommitted;
+
+    const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: blockedIssueId,
+      blockerIssueIds: [blockerId],
+      blockedTransitionAt,
+    });
+    let wakeSettled = false;
+    const wake = heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: { issueId: blockedIssueId, resolvedBlockerIssueId: blockerId },
+      idempotencyKey,
+      contextSnapshot: { issueId: blockedIssueId, wakeReason: "issue_blockers_resolved" },
+    }).finally(() => { wakeSettled = true; });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(wakeSettled).toBe(false);
+    releaseReopen();
+    await reopen;
+    expect(await wake).toBeNull();
+
+    const [dependent, requests] = await Promise.all([
+      db.select({ status: issues.status }).from(issues).where(eq(issues.id, blockedIssueId)).then((rows) => rows[0]),
+      db.select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.idempotencyKey, idempotencyKey)),
+    ]);
+    expect(dependent?.status).toBe("blocked");
+    expect(requests).toEqual([expect.objectContaining({
+      status: "skipped",
+      reason: "issue_blockers_resolved_state_mismatch",
+    })]);
+  });
+
+  it("serializes approval links and status changes on their linked issue rows", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Approval-gated dependent",
+      status: "blocked",
+      priority: "high",
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "test",
+      status: "pending",
+      payload: {},
+    });
+
+    let releaseApproval!: () => void;
+    const approvalCanUnlock = new Promise<void>((resolve) => { releaseApproval = resolve; });
+    let approvalLocked!: () => void;
+    const approvalIsLocked = new Promise<void>((resolve) => { approvalLocked = resolve; });
+    const approvalHolder = db.transaction(async (tx) => {
+      await tx.select({ id: approvals.id }).from(approvals).where(eq(approvals.id, approvalId)).for("update");
+      approvalLocked();
+      await approvalCanUnlock;
+    });
+    await approvalIsLocked;
+
+    let linkSettled = false;
+    const link = issueApprovalService(db).link(issueId, approvalId).finally(() => { linkSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(linkSettled).toBe(false);
+    releaseApproval();
+    await approvalHolder;
+    await link;
+
+    let releaseIssue!: () => void;
+    const issueCanUnlock = new Promise<void>((resolve) => { releaseIssue = resolve; });
+    let issueLocked!: () => void;
+    const issueIsLocked = new Promise<void>((resolve) => { issueLocked = resolve; });
+    const issueHolder = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issueId)).for("update");
+      issueLocked();
+      await issueCanUnlock;
+    });
+    await issueIsLocked;
+
+    let decisionSettled = false;
+    const decision = approvalService(db).approve(approvalId, "board").finally(() => { decisionSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(decisionSettled).toBe(false);
+    releaseIssue();
+    await issueHolder;
+    expect((await decision).approval.status).toBe("approved");
+
+    const linkActivities = await db.select({ action: activityLog.action }).from(activityLog).where(and(
+      eq(activityLog.entityId, issueId),
+      eq(activityLog.action, "issue.approval_linked"),
+    ));
+    expect(linkActivities).toHaveLength(1);
+
+    let releaseActivityLog!: () => void;
+    const activityLogCanUnlock = new Promise<void>((resolve) => { releaseActivityLog = resolve; });
+    let activityLogLocked!: () => void;
+    const activityLogIsLocked = new Promise<void>((resolve) => { activityLogLocked = resolve; });
+    const activityLogHolder = db.transaction(async (tx) => {
+      await tx.execute(sql`LOCK TABLE ${activityLog} IN ACCESS EXCLUSIVE MODE`);
+      activityLogLocked();
+      await activityLogCanUnlock;
+    });
+    await activityLogIsLocked;
+
+    let unlinkSettled = false;
+    const unlink = issueApprovalService(db).unlink(issueId, approvalId).finally(() => { unlinkSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(unlinkSettled).toBe(false);
+    expect(await db.select().from(issueApprovals).where(and(
+      eq(issueApprovals.issueId, issueId),
+      eq(issueApprovals.approvalId, approvalId),
+    ))).toHaveLength(1);
+
+    releaseActivityLog();
+    await activityLogHolder;
+    await unlink;
+    expect(await db.select().from(issueApprovals).where(and(
+      eq(issueApprovals.issueId, issueId),
+      eq(issueApprovals.approvalId, approvalId),
+    ))).toHaveLength(0);
+    const unlinkActivities = await db.select({ action: activityLog.action }).from(activityLog).where(and(
+      eq(activityLog.entityId, issueId),
+      eq(activityLog.action, "issue.approval_unlinked"),
+    ));
+    expect(unlinkActivities).toHaveLength(1);
+  });
+
+  it("stabilizes the approval link set before recording a decision", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const approvalId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `L${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Concurrently linked approval gate",
+      status: "blocked",
+      priority: "high",
+    });
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId,
+      type: "test",
+      status: "pending",
+      payload: {},
+    });
+
+    let releaseApproval!: () => void;
+    const approvalCanUnlock = new Promise<void>((resolve) => { releaseApproval = resolve; });
+    let approvalLocked!: () => void;
+    const approvalIsLocked = new Promise<void>((resolve) => { approvalLocked = resolve; });
+    const holder = db.transaction(async (tx) => {
+      await tx.select({ id: approvals.id }).from(approvals).where(eq(approvals.id, approvalId)).for("update");
+      approvalLocked();
+      await approvalCanUnlock;
+    });
+    await approvalIsLocked;
+
+    const link = issueApprovalService(db).link(issueId, approvalId);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const decision = approvalService(db).approve(approvalId, "board-user");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    releaseApproval();
+    await holder;
+    await link;
+    await decision;
+
+    const [decisionActivity] = await db
+      .select({ details: activityLog.details })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.entityType, "approval"),
+        eq(activityLog.entityId, approvalId),
+        eq(activityLog.action, "approval.approved"),
+      ));
+    expect(decisionActivity?.details).toMatchObject({ linkedIssueIds: [issueId] });
+  });
+
+  it("waits for an in-flight blocker edge addition before evaluating readiness", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const completedBlockerId = randomUUID();
+    const newBlockerId = randomUUID();
+    const dependentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `E${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "DependencyEdgeRevalidator",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      permissions: {},
+    });
+    const blockedTransitionAt = new Date();
+    await db.insert(issues).values([
+      { id: completedBlockerId, companyId, title: "Completed blocker", status: "done", priority: "high" },
+      { id: newBlockerId, companyId, title: "New blocker", status: "todo", priority: "high" },
+      {
+        id: dependentId,
+        companyId,
+        title: "Blocked dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId: agentId,
+        blockedTransitionAt,
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: completedBlockerId,
+      relatedIssueId: dependentId,
+      type: "blocks",
+    });
+
+    let releaseNewBlocker!: () => void;
+    const newBlockerCanUnlock = new Promise<void>((resolve) => { releaseNewBlocker = resolve; });
+    let newBlockerLocked!: () => void;
+    const newBlockerIsLocked = new Promise<void>((resolve) => { newBlockerLocked = resolve; });
+    const blockerHolder = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, newBlockerId)).for("update");
+      newBlockerLocked();
+      await newBlockerCanUnlock;
+    });
+    await newBlockerIsLocked;
+
+    let relationSettled = false;
+    const relationUpdate = issueService(db).update(dependentId, {
+      blockedByIssueIds: [completedBlockerId, newBlockerId],
+    }).finally(() => { relationSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(relationSettled).toBe(false);
+
+    const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
+      dependentIssueId: dependentId,
+      blockerIssueIds: [completedBlockerId],
+      blockedTransitionAt,
+    });
+    let wakeSettled = false;
+    const wake = heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: { issueId: dependentId, resolvedBlockerIssueId: completedBlockerId },
+      idempotencyKey,
+      contextSnapshot: { issueId: dependentId, wakeReason: "issue_blockers_resolved" },
+    }).finally(() => { wakeSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(wakeSettled).toBe(false);
+
+    releaseNewBlocker();
+    await blockerHolder;
+    await relationUpdate;
+    expect(await wake).toBeNull();
+    const dependent = await db.select({ status: issues.status }).from(issues)
+      .where(eq(issues.id, dependentId)).then((rows) => rows[0]);
+    expect(dependent?.status).toBe("blocked");
   });
 
   it("honors maxConcurrentRuns 1 by leaving a second assignment wake queued", async () => {

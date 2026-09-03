@@ -2820,44 +2820,50 @@ export function toolAccessService(db: Db, options: ToolAccessServiceOptions = {}
         href: `/${company?.issuePrefix ?? ""}/apps/${input.connection.id}/setup#personal-identity`,
       },
     };
-    const [existing] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
-      eq(issueThreadInteractions.companyId, input.connection.companyId),
-      eq(issueThreadInteractions.issueId, input.issueId),
-      eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
-    )).limit(1);
-    if (existing) {
-      await db.update(issueThreadInteractions).set({
+    await db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.id, input.issueId!),
+        eq(issues.companyId, input.connection.companyId),
+      )).for("update");
+      const [existing] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+        eq(issueThreadInteractions.companyId, input.connection.companyId),
+        eq(issueThreadInteractions.issueId, input.issueId!),
+        eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
+      )).limit(1);
+      if (existing) {
+        await tx.update(issueThreadInteractions).set({
+          status: "pending",
+          continuationPolicy: "wake_assignee",
+          requestedResolverPolicy: "human_only",
+          effectiveResolverPolicy: "human_only",
+          resolverPolicyProvenance: "explicit",
+          effectiveResolverPolicySource: "requested",
+          addresseeUserId: input.ownerUserId,
+          payload,
+          result: null,
+          resolvedAt: null,
+          updatedAt: new Date(),
+        }).where(eq(issueThreadInteractions.id, existing.id));
+        return;
+      }
+      await tx.insert(issueThreadInteractions).values({
+        companyId: input.connection.companyId,
+        issueId: input.issueId!,
+        kind: "request_confirmation",
         status: "pending",
         continuationPolicy: "wake_assignee",
         requestedResolverPolicy: "human_only",
         effectiveResolverPolicy: "human_only",
         resolverPolicyProvenance: "explicit",
         effectiveResolverPolicySource: "requested",
+        idempotencyKey,
+        sourceRunId: input.runId,
+        title: `Delegate your ${input.connection.name}`,
+        summary: "An explicit standing delegation is required for this autonomous run.",
+        createdByAgentId: input.agentId,
         addresseeUserId: input.ownerUserId,
         payload,
-        result: null,
-        resolvedAt: null,
-        updatedAt: new Date(),
-      }).where(eq(issueThreadInteractions.id, existing.id));
-      return;
-    }
-    await db.insert(issueThreadInteractions).values({
-      companyId: input.connection.companyId,
-      issueId: input.issueId,
-      kind: "request_confirmation",
-      status: "pending",
-      continuationPolicy: "wake_assignee",
-      requestedResolverPolicy: "human_only",
-      effectiveResolverPolicy: "human_only",
-      resolverPolicyProvenance: "explicit",
-      effectiveResolverPolicySource: "requested",
-      idempotencyKey,
-      sourceRunId: input.runId,
-      title: `Delegate your ${input.connection.name}`,
-      summary: "An explicit standing delegation is required for this autonomous run.",
-      createdByAgentId: input.agentId,
-      addresseeUserId: input.ownerUserId,
-      payload,
+      });
     });
   }
 

@@ -89,6 +89,7 @@ describeEmbeddedPostgres("companyService", () => {
   it("does not auto-provision bundled built-in agents for a freshly created company", async () => {
     const created = await companyService(db).create({
       name: "Fresh Company",
+      defaultResponsibleUserId: "responsible-user",
     });
 
     // A new company starts clean: the Reflection Coach and Summarizer are

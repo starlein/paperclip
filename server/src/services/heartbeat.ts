@@ -206,7 +206,9 @@ import {
 } from "./issue-rewake-throttle.js";
 import {
   logActivity,
+  publishActivity,
   publishPluginDomainEvent,
+  type ActivityPublication,
   type LogActivityInput,
 } from "./activity-log.js";
 import {
@@ -242,7 +244,12 @@ import {
 import { createToolGatewayService } from "./tool-gateway.js";
 import { toolAccessService } from "./tool-access.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "./issue-dependency-wakeups.js";
+import {
+  ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+  buildIssueBlockersResolvedWakeStateKey,
+  isIssueBlockersResolvedWakeIntentActorId,
+} from "./issue-dependency-wakeups.js";
 import {
   buildIssueMonitorClearedPatch,
   buildIssueMonitorTriggeredPatch,
@@ -17008,6 +17015,17 @@ export function heartbeatService(
     return recovery.reconcileResolvedDependencyWakeBackstop(opts);
   }
 
+  async function reconcileIssueGraphLiveness(opts?: {
+    runId?: string | null;
+    force?: boolean;
+    lookbackHours?: number;
+    issueCreatedAtGte?: Date | null;
+    now?: Date;
+    reescalationCooldownMs?: number;
+  }) {
+    return recovery.reconcileIssueGraphLiveness(opts);
+  }
+
   async function updateRuntimeState(
     agent: typeof agents.$inferSelect,
     run: typeof heartbeatRuns.$inferSelect,
@@ -23303,11 +23321,16 @@ export function heartbeatService(
       // still respect the issue execution lock so a second agent cannot start on the
       // same issue workspace while the assignee already has a live run.
       const agentNameKey = normalizeAgentNameKey(agent.name);
+      const postCommitActivityPublications: ActivityPublication[] = [];
 
       const outcome = await db.transaction(async (tx) => {
-        await tx.execute(
-          sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
-        );
+        if (reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) {
+          await issuesSvc.lockDependencyStateForUpdate(agent.companyId, issueId, tx);
+        } else {
+          await tx.execute(
+            sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
+          );
+        }
 
         const issue = await tx
           .select({
@@ -23321,6 +23344,8 @@ export function heartbeatService(
             executionWorkspacePreference: issues.executionWorkspacePreference,
             executionWorkspaceSettings: issues.executionWorkspaceSettings,
             assigneeAgentId: issues.assigneeAgentId,
+            unblockDescriptor: issues.unblockDescriptor,
+            blockedTransitionAt: issues.blockedTransitionAt,
             executionRunId: issues.executionRunId,
             executionAgentNameKey: issues.executionAgentNameKey,
             createdAt: issues.createdAt,
@@ -23604,6 +23629,243 @@ export function heartbeatService(
             .where(eq(issues.id, issue.id));
         }
 
+        const dependencyReadiness = await issuesSvc.listDependencyReadiness(
+          issue.companyId,
+          [issue.id],
+          tx,
+        ).then((rows) => rows.get(issue.id) ?? null);
+        const isResolvedDependencyAssigneeCandidate =
+          reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON &&
+          issue.status === "blocked" &&
+          issue.assigneeAgentId === agentId &&
+          dependencyReadiness?.isDependencyReady === true &&
+          dependencyReadiness.blockerIssueIds.length > 0;
+        const currentResolvedDependencyWakeKey = isResolvedDependencyAssigneeCandidate
+          ? buildIssueBlockersResolvedWakeStateKey({
+              dependentIssueId: issue.id,
+              blockerIssueIds: dependencyReadiness.blockerIssueIds,
+              blockedTransitionAt: issue.blockedTransitionAt,
+            })
+          : null;
+        const [pendingDependencyInteraction, pendingDependencyApproval, activeDependencyPauseHold] =
+          isResolvedDependencyAssigneeCandidate
+            ? await Promise.all([
+                tx
+                  .select({ id: issueThreadInteractions.id })
+                  .from(issueThreadInteractions)
+                  .where(and(
+                    eq(issueThreadInteractions.companyId, issue.companyId),
+                    eq(issueThreadInteractions.issueId, issue.id),
+                    eq(issueThreadInteractions.status, "pending"),
+                    inArray(issueThreadInteractions.continuationPolicy, [
+                      "wake_assignee",
+                      "wake_assignee_on_accept",
+                    ]),
+                  ))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null),
+                tx
+                  .select({ id: issueApprovals.approvalId })
+                  .from(issueApprovals)
+                  .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+                  .where(and(
+                    eq(issueApprovals.companyId, issue.companyId),
+                    eq(issueApprovals.issueId, issue.id),
+                    inArray(approvals.status, ["pending", "revision_requested"]),
+                  ))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null),
+                issueTreeControlService(tx as unknown as Db)
+                  .getActivePauseHoldGate(issue.companyId, issue.id),
+              ])
+            : [null, null, null];
+        const resolvedDependencySuppressionReason = issue.unblockDescriptor !== null
+          ? "unblock_descriptor"
+          : pendingDependencyInteraction
+            ? "pending_interaction"
+          : pendingDependencyApproval
+            ? "pending_approval"
+            : activeDependencyPauseHold
+              ? "active_pause_hold"
+              : null;
+        const isResolvedDependencyAssigneeWake =
+          isResolvedDependencyAssigneeCandidate &&
+          opts.idempotencyKey === currentResolvedDependencyWakeKey &&
+          resolvedDependencySuppressionReason === null;
+
+        if (reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON && !isResolvedDependencyAssigneeWake) {
+          const skipReason = !isResolvedDependencyAssigneeCandidate
+            ? "issue_blockers_resolved_state_mismatch"
+            : resolvedDependencySuppressionReason
+              ? "issue_blockers_resolved_wait_gate"
+              : "issue_blockers_resolved_stale_cycle";
+          await tx.insert(agentWakeupRequests).values({
+            companyId: agent.companyId,
+            agentId,
+            source,
+            triggerDetail,
+            reason: skipReason,
+            payload: {
+              ...(payload ?? {}),
+              heartbeatSkip: {
+                reason: !isResolvedDependencyAssigneeCandidate
+                  ? "The issue is no longer blocked and dependency-ready for the requested assignee."
+                  : resolvedDependencySuppressionReason
+                    ? "A pending issue wait still suppresses dependency recovery."
+                    : "The blocked issue cycle changed before the dependency wake could be queued.",
+                issueId: issue.id,
+                actualStatus: issue.status,
+                actualAssigneeAgentId: issue.assigneeAgentId,
+                suppressionReason: resolvedDependencySuppressionReason,
+                requestedIdempotencyKey: opts.idempotencyKey ?? null,
+                currentIdempotencyKey: currentResolvedDependencyWakeKey,
+              },
+            },
+            status: "skipped",
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+            finishedAt: new Date(),
+          });
+          return { kind: "skipped" as const };
+        }
+        let resolvedDependencyDispositionMoved = false;
+        const moveResolvedDependencyToRunnableDisposition = async () => {
+          if (!isResolvedDependencyAssigneeWake || resolvedDependencyDispositionMoved) return;
+
+          const now = new Date();
+          const moved = await tx
+            .update(issues)
+            .set({
+              status: "todo",
+              unblockDescriptor: null,
+              blockedTransitionAt: null,
+              blockedOwnerNotifiedAt: null,
+              checkoutRunId: null,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(issues.id, issue.id),
+                eq(issues.companyId, issue.companyId),
+                eq(issues.status, "blocked"),
+              ),
+            )
+            .returning({ id: issues.id });
+          if (moved.length === 0) return;
+
+          resolvedDependencyDispositionMoved = true;
+          issue.status = "todo";
+          await logActivity(tx as unknown as Db, {
+            companyId: issue.companyId,
+            actorType: "system",
+            actorId: "issue_dependency_wakeup",
+            agentId,
+            runId: null,
+            action: "issue.blockers_resolved_disposition_repaired",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              previousStatus: "blocked",
+              nextStatus: "todo",
+              blockerIssueIds: dependencyReadiness?.blockerIssueIds ?? [],
+              requestedReason: reason,
+              source,
+              triggerDetail,
+            },
+          }, postCommitActivityPublications);
+        };
+
+        // Serialize duplicate dependency-ready emitters on the issue row. A
+        // completed wake does not cover an issue that is still blocked: that is
+        // precisely the legacy stranded state this path must reconcile.
+        if (reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON && opts.idempotencyKey) {
+          const existingDependencyWake = await tx
+            .select({
+              id: agentWakeupRequests.id,
+              status: agentWakeupRequests.status,
+              runId: agentWakeupRequests.runId,
+              requestedByActorId: agentWakeupRequests.requestedByActorId,
+            })
+            .from(agentWakeupRequests)
+            .leftJoin(
+              heartbeatRuns,
+              and(
+                eq(heartbeatRuns.id, agentWakeupRequests.runId),
+                eq(heartbeatRuns.companyId, issue.companyId),
+                eq(heartbeatRuns.agentId, agentId),
+              ),
+            )
+            .where(
+              and(
+                eq(agentWakeupRequests.companyId, issue.companyId),
+                eq(agentWakeupRequests.agentId, agentId),
+                eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+                inArray(agentWakeupRequests.status, [
+                  "queued",
+                  "deferred_issue_execution",
+                  "claimed",
+                  "completed",
+                ]),
+              ),
+            )
+            .orderBy(
+              sql`case
+                when ${agentWakeupRequests.runId} is null
+                  and ${agentWakeupRequests.status} <> 'claimed' then 0
+                when ${heartbeatRuns.status} in ('queued', 'running', 'scheduled_retry') then 0
+                when ${agentWakeupRequests.status} = 'completed' then 2
+                else 1
+              end`,
+              sql`case when ${agentWakeupRequests.status} = 'completed' then 1 else 0 end`,
+              asc(agentWakeupRequests.requestedAt),
+            )
+            .limit(1)
+            .for("update", { of: agentWakeupRequests })
+            .then((rows) => rows[0] ?? null);
+          if (
+            existingDependencyWake &&
+            (existingDependencyWake.status !== "completed" || issue.status !== "blocked")
+          ) {
+            const isDurableDependencyIntent =
+              !existingDependencyWake.runId &&
+              isIssueBlockersResolvedWakeIntentActorId(existingDependencyWake.requestedByActorId);
+            const existingDependencyRun = existingDependencyWake.runId
+              ? await tx
+                  .select({ status: heartbeatRuns.status })
+                  .from(heartbeatRuns)
+                  .where(and(
+                    eq(heartbeatRuns.id, existingDependencyWake.runId),
+                    eq(heartbeatRuns.companyId, issue.companyId),
+                    eq(heartbeatRuns.agentId, agentId),
+                  ))
+                  .for("update")
+                  .then((rows) => rows[0] ?? null)
+              : null;
+            const wakeHasLiveDelivery = existingDependencyWake.runId
+              ? Boolean(
+                  existingDependencyRun &&
+                  !isHeartbeatRunTerminalStatus(existingDependencyRun.status),
+                )
+              : existingDependencyWake.status === "deferred_issue_execution";
+            if (wakeHasLiveDelivery) {
+              await moveResolvedDependencyToRunnableDisposition();
+              return { kind: "deferred" as const };
+            }
+            if (!isDurableDependencyIntent) {
+              await tx
+                .update(agentWakeupRequests)
+                .set({
+                  status: "failed",
+                  finishedAt: new Date(),
+                  error: "Dependency wake had no live linked assignee run during enqueue",
+                  updatedAt: new Date(),
+                })
+                .where(eq(agentWakeupRequests.id, existingDependencyWake.id));
+            }
+          }
+        }
+
         if (!activeExecutionRun) {
           const legacyRun = await tx
             .select()
@@ -23615,6 +23877,12 @@ export function heartbeatService(
                   ...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
                 ]),
                 sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                isResolvedDependencyAssigneeWake
+                  ? or(
+                    eq(heartbeatRuns.agentId, agentId),
+                    eq(heartbeatRuns.status, "running"),
+                  )
+                  : undefined,
               ),
             )
             .orderBy(
@@ -23649,12 +23917,10 @@ export function heartbeatService(
           }
         }
 
-        const dependencyReadiness = await issuesSvc
-          .listDependencyReadiness(issue.companyId, [issue.id], tx)
-          .then((rows) => rows.get(issue.id) ?? null);
-
-        // Blocked descendants stay idle except for a bounded human interaction
-        // or a verified pending-interaction addressee wake.
+        // Blocked descendants should stay idle until the final blocker resolves.
+        // Human comment/mention wakes and verified pending-interaction addressee
+        // wakes are exceptions: they may run in a bounded interaction mode
+        // without taking issue ownership or entering the blocked implementation.
         const pendingInteractionAddresseeWake =
           dependencyReadiness &&
           !dependencyReadiness.isDependencyReady &&
@@ -23888,6 +24154,7 @@ export function heartbeatService(
             !shouldQueueFollowupForRunningWake &&
             availableActiveExecutionRun
           ) {
+            await moveResolvedDependencyToRunnableDisposition();
             const mergedContextSnapshot = mergeCoalescedContextSnapshot(
               availableActiveExecutionRun.contextSnapshot,
               enrichedContextSnapshot,
@@ -23927,6 +24194,7 @@ export function heartbeatService(
           }
 
           if (availableActiveExecutionRun) {
+            await moveResolvedDependencyToRunnableDisposition();
             const deferredPayload = {
               ...(payload ?? {}),
               issueId,
@@ -24162,6 +24430,7 @@ export function heartbeatService(
           return { kind: "skipped" as const };
         }
 
+        await moveResolvedDependencyToRunnableDisposition();
         const wakeupRequest = await tx
           .insert(agentWakeupRequests)
           .values({
@@ -24210,6 +24479,10 @@ export function heartbeatService(
 
         return { kind: "queued" as const, run: newRun };
       });
+
+      for (const publication of postCommitActivityPublications) {
+        publishActivity(publication);
+      }
 
       if (outcome.kind === "deferred" || outcome.kind === "skipped")
         return null;
@@ -24446,6 +24719,7 @@ export function heartbeatService(
    */
   async function dispatchPendingNativeStatusWakeups(input: {
     companyId?: string;
+    requestIds?: string[];
     limit?: number;
     staleClaimMs?: number;
   } = {}) {
@@ -24458,8 +24732,14 @@ export function heartbeatService(
         input.companyId
           ? eq(agentWakeupRequests.companyId, input.companyId)
           : undefined,
+        input.requestIds && input.requestIds.length > 0
+          ? inArray(agentWakeupRequests.id, input.requestIds)
+          : undefined,
         eq(agentWakeupRequests.requestedByActorType, "system"),
-        eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
+        inArray(agentWakeupRequests.requestedByActorId, [
+          "native-status-committer",
+          ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID,
+        ]),
         inArray(agentWakeupRequests.status, ["queued", "claimed"]),
         isNull(agentWakeupRequests.runId),
       ))
@@ -24472,7 +24752,10 @@ export function heartbeatService(
     const deliveredByIssueScope = new Map<string, { runId: string | null; status: string }>();
 
     for (const candidate of candidates) {
-      const dispatchActorId = `native-status-wake-dispatch:${candidate.id}`;
+      const dependencyIntent = isIssueBlockersResolvedWakeIntentActorId(candidate.requestedByActorId);
+      const dispatchActorId = dependencyIntent
+        ? `dependency-wake-dispatch:${candidate.id}`
+        : `native-status-wake-dispatch:${candidate.id}`;
       const existingDispatch = await db
         .select()
         .from(agentWakeupRequests)
@@ -24590,8 +24873,10 @@ export function heartbeatService(
             ...wakeContext,
             ...(issueId ? { issueId, taskId: issueId } : {}),
             wakeReason: candidate.reason,
-            source: "native_status_decision",
-            nativeStatusWakeIntentId: candidate.id,
+            source: dependencyIntent ? "issue_dependency_intent" : "native_status_decision",
+            ...(dependencyIntent
+              ? { dependencyWakeIntentId: candidate.id }
+              : { nativeStatusWakeIntentId: candidate.id }),
           },
         });
 
@@ -25394,6 +25679,8 @@ export function heartbeatService(
     releaseEnvironmentLeasesForRun,
 
     sweepStaleIssueLocks,
+
+    reconcileIssueGraphLiveness,
 
     reconcileResolvedDependencyWakes,
 

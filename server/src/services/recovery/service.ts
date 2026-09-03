@@ -31,7 +31,7 @@ import { logger } from "../../middleware/logger.js";
 import { isPidAlive, isProcessGroupAlive, terminateLocalService } from "../local-service-supervisor.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { isUniqueViolation } from "../../db-errors.js";
-import { logActivity } from "../activity-log.js";
+import { logActivity, publishActivity, type ActivityPublication } from "../activity-log.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { budgetService } from "../budgets.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
@@ -822,8 +822,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return Boolean(run || deferredWake);
   }
 
-  async function hasPendingWakeInteraction(companyId: string, issueId: string) {
-    return db
+  async function hasPendingWakeInteraction(companyId: string, issueId: string, queryDb: Db = db) {
+    return queryDb
       .select({ id: issueThreadInteractions.id })
       .from(issueThreadInteractions)
       .where(
@@ -832,6 +832,22 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           eq(issueThreadInteractions.issueId, issueId),
           eq(issueThreadInteractions.status, "pending"),
           inArray(issueThreadInteractions.continuationPolicy, ["wake_assignee", "wake_assignee_on_accept"]),
+        ),
+      )
+      .limit(1)
+      .then((rows) => Boolean(rows[0]));
+  }
+
+  async function hasPendingWakeApproval(companyId: string, issueId: string, queryDb: Db = db) {
+    return queryDb
+      .select({ id: issueApprovals.approvalId })
+      .from(issueApprovals)
+      .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+      .where(
+        and(
+          eq(issueApprovals.companyId, companyId),
+          eq(issueApprovals.issueId, issueId),
+          inArray(approvals.status, ["pending", "revision_requested"]),
         ),
       )
       .limit(1)
@@ -886,12 +902,24 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return db
       .select({ id: agentWakeupRequests.id })
       .from(agentWakeupRequests)
+      .leftJoin(
+        heartbeatRuns,
+        and(
+          eq(heartbeatRuns.id, agentWakeupRequests.runId),
+          eq(heartbeatRuns.companyId, companyId),
+          agentId ? eq(heartbeatRuns.agentId, agentId) : sql`true`,
+        ),
+      )
       .where(
         and(
           eq(agentWakeupRequests.companyId, companyId),
           eq(agentWakeupRequests.status, "queued"),
           sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}`,
           agentId ? eq(agentWakeupRequests.agentId, agentId) : sql`true`,
+          or(
+            isNull(agentWakeupRequests.runId),
+            notInArray(heartbeatRuns.status, [...TERMINAL_HEARTBEAT_RUN_STATUSES]),
+          ),
         ),
       )
       .limit(1)
@@ -2384,8 +2412,37 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     const blockedByIssueIds = [...new Set([...existingBlockers.map((row) => row.id), ...openChildren.map((row) => row.id)])];
     if (blockedByIssueIds.length === 0) return null;
 
-    const updated = await issuesSvc.update(issue.id, { status: "blocked", blockedByIssueIds });
+    const activityPublications: ActivityPublication[] = [];
+    const updated = await db.transaction(async (tx) => {
+      const updated = await issuesSvc.update(
+        issue.id,
+        { status: "blocked", blockedByIssueIds },
+        tx,
+        activityPublications,
+      );
+      if (!updated) return null;
+
+      await logActivity(tx as unknown as Db, {
+        companyId: issue.companyId,
+        actorType: "system",
+        actorId: "system",
+        agentId: null,
+        runId: null,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: issue.id,
+        details: {
+          identifier: issue.identifier,
+          status: "blocked",
+          previousStatus: issue.status,
+          source: "recovery.reconcile_continuation_waiting_on_review",
+          blockedByIssueIds,
+        },
+      }, activityPublications);
+      return updated;
+    });
     if (!updated) return null;
+    for (const publication of activityPublications) publishActivity(publication);
 
     const waitingOn = formatIssueLinksForComment([...openChildren, ...existingBlockers]);
     await issuesSvc.addComment(
@@ -2415,23 +2472,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         },
       },
     );
-    await logActivity(db, {
-      companyId: issue.companyId,
-      actorType: "system",
-      actorId: "system",
-      agentId: null,
-      runId: null,
-      action: "issue.updated",
-      entityType: "issue",
-      entityId: issue.id,
-      details: {
-        identifier: issue.identifier,
-        status: "blocked",
-        previousStatus: issue.status,
-        source: "recovery.reconcile_continuation_waiting_on_review",
-        blockedByIssueIds,
-      },
-    });
     return updated;
   }
 
@@ -4247,6 +4287,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       existingWakeSkipped: 0,
       livePathSkipped: 0,
       interactionSkipped: 0,
+      approvalSkipped: 0,
       pauseHoldSkipped: 0,
       notReadySkipped: 0,
       candidateLimitSkipped: 0,
@@ -4286,6 +4327,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             companyId: issues.companyId,
             identifier: issues.identifier,
             assigneeAgentId: issues.assigneeAgentId,
+            unblockDescriptor: issues.unblockDescriptor,
             blockedTransitionAt: issues.blockedTransitionAt,
             totalCount: sql<number>`count(*) over()::int`,
           })
@@ -4302,6 +4344,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           companyId: issues.companyId,
           identifier: issues.identifier,
           assigneeAgentId: issues.assigneeAgentId,
+          unblockDescriptor: issues.unblockDescriptor,
           blockedTransitionAt: issues.blockedTransitionAt,
           totalCount: sql<number>`count(*) over()::int`,
         })
@@ -4355,6 +4398,10 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       for (const candidate of companyCandidates) {
         const agentId = candidate.assigneeAgentId;
         if (!agentId) continue;
+        if (candidate.unblockDescriptor !== null) {
+          result.notReadySkipped += 1;
+          continue;
+        }
 
         const readiness = readinessMap.get(candidate.id);
         const resolvedBlockerIssueId = readiness?.blockerIssueIds[0] ?? null;
@@ -4371,8 +4418,9 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         // Level-triggered dedup: key on the full blocker set (the current ready
         // state), not on any single resolved edge. An older completed per-edge
         // wake for an earlier partial resolution has a different key, so it does
-        // not suppress this wake. The shared helper still suppresses a duplicate
-        // wake for the SAME ready state, which bounds reconciliation.
+        // not suppress this wake. The shared helper identifies delivery for the
+        // SAME ready state and assignee. An in-flight delivery repairs only the
+        // disposition; a completed delivery cannot cover a still-blocked issue.
         const idempotencyKey = buildIssueBlockersResolvedWakeStateKey({
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
@@ -4380,13 +4428,182 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         });
         const existingWake = await findExistingIssueBlockersResolvedWakeForReadyState(db, {
           companyId,
+          assigneeAgentId: agentId,
           dependentIssueId: candidate.id,
           blockerIssueIds: readiness.blockerIssueIds,
           blockedTransitionAt: candidate.blockedTransitionAt,
         });
         if (existingWake) {
-          result.existingWakeSkipped += 1;
-          continue;
+          // An in-flight assignee wake is already the durable execution path,
+          // but older builds could leave the issue itself blocked. Repair only
+          // the disposition and do not enqueue a duplicate. A completed wake
+          // cannot cover an issue that is still blocked: fall through and emit
+          // a fresh bounded recovery wake for that stranded state.
+          if (existingWake.status !== "completed") {
+            const repairActivityPublications: ActivityPublication[] = [];
+            const repairResult = await db.transaction(async (tx): Promise<
+              | "repaired"
+              | "interaction_suppressed"
+              | "approval_suppressed"
+              | "pause_suppressed"
+              | "unblock_descriptor_suppressed"
+              | "stale_wake"
+              | "not_repaired"
+            > => {
+              await issuesSvc.lockDependencyStateForUpdate(companyId, candidate.id, tx);
+              const lockedIssue = await issuesSvc.getByIdForUpdate(candidate.id, tx);
+              if (
+                !lockedIssue ||
+                lockedIssue.companyId !== companyId ||
+                lockedIssue.status !== "blocked" ||
+                lockedIssue.assigneeAgentId !== agentId
+              ) return "not_repaired";
+              if (lockedIssue.unblockDescriptor !== null) return "unblock_descriptor_suppressed";
+
+              const lockedReadiness = (await issuesSvc.listDependencyReadiness(
+                companyId,
+                [candidate.id],
+                tx,
+              )).get(candidate.id);
+              if (
+                !lockedReadiness ||
+                !lockedReadiness.isDependencyReady ||
+                lockedReadiness.blockerIssueIds.length === 0
+              ) return "not_repaired";
+
+              const lockedWake = await findExistingIssueBlockersResolvedWakeForReadyState(
+                tx as unknown as Db,
+                {
+                  companyId,
+                  assigneeAgentId: agentId,
+                  dependentIssueId: candidate.id,
+                  blockerIssueIds: lockedReadiness.blockerIssueIds,
+                  blockedTransitionAt: lockedIssue.blockedTransitionAt,
+                  lockForUpdate: true,
+                },
+              );
+              if (!lockedWake || lockedWake.status === "completed") return "not_repaired";
+
+              const lockedWakeRun = lockedWake.runId
+                ? await tx
+                    .select({ status: heartbeatRuns.status })
+                    .from(heartbeatRuns)
+                    .where(and(
+                      eq(heartbeatRuns.id, lockedWake.runId),
+                      eq(heartbeatRuns.companyId, companyId),
+                      eq(heartbeatRuns.agentId, agentId),
+                    ))
+                    .for("update")
+                    .then((rows) => rows[0] ?? null)
+                : null;
+              const wakeHasLiveDelivery = lockedWake.runId
+                ? Boolean(lockedWakeRun && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(lockedWakeRun.status))
+                : lockedWake.status === "deferred_issue_execution";
+              if (!wakeHasLiveDelivery) {
+                // A queued/claimed dependency wake without a linked run cannot
+                // deliver anything. Retire the orphan while holding its row
+                // lock so the fresh bounded wake below is not suppressed by a
+                // generic queued-wake check.
+                await tx
+                  .update(agentWakeupRequests)
+                  .set({
+                    status: "failed",
+                    finishedAt: new Date(),
+                    error: "Dependency wake had no live linked assignee run during reconciliation",
+                    updatedAt: new Date(),
+                  })
+                  .where(eq(agentWakeupRequests.id, lockedWake.id));
+                return "stale_wake";
+              }
+
+              if (await hasPendingWakeInteraction(companyId, candidate.id, tx as unknown as Db)) {
+                return "interaction_suppressed";
+              }
+              if (await hasPendingWakeApproval(companyId, candidate.id, tx as unknown as Db)) {
+                return "approval_suppressed";
+              }
+              if (await isAutomaticRecoverySuppressedByPauseHold(
+                tx as unknown as Db,
+                companyId,
+                candidate.id,
+                issueTreeControlService(tx as unknown as Db),
+              )) {
+                return "pause_suppressed";
+              }
+
+              const now = new Date();
+              const updated = await tx
+                .update(issues)
+                .set({
+                  status: "todo",
+                  unblockDescriptor: null,
+                  blockedTransitionAt: null,
+                  blockedOwnerNotifiedAt: null,
+                  checkoutRunId: null,
+                  updatedAt: now,
+                })
+                .where(
+                  and(
+                    eq(issues.id, candidate.id),
+                    eq(issues.companyId, companyId),
+                    eq(issues.status, "blocked"),
+                    eq(issues.assigneeAgentId, agentId),
+                  ),
+                )
+                .returning({ id: issues.id });
+              if (updated.length === 0) return "not_repaired";
+
+              await logActivity(tx as unknown as Db, {
+                companyId,
+                actorType: "system",
+                actorId: requestedByActorId,
+                agentId,
+                runId: opts?.runId ?? null,
+                action: "issue.blockers_resolved_disposition_repaired",
+                entityType: "issue",
+                entityId: candidate.id,
+                details: {
+                  source,
+                  existingWakeRequestId: lockedWake.id,
+                  existingWakeStatus: lockedWake.status,
+                  previousStatus: "blocked",
+                  nextStatus: "todo",
+                  blockerIssueIds: lockedReadiness.blockerIssueIds,
+                },
+              }, repairActivityPublications);
+              return "repaired";
+            });
+            for (const publication of repairActivityPublications) publishActivity(publication);
+            if (repairResult === "stale_wake") {
+              // The wake row can lag behind run finalization. It does not cover
+              // delivery once its linked run is terminal, so fall through and
+              // enqueue a fresh bounded wake for the same ready state.
+            } else if (repairResult === "unblock_descriptor_suppressed") {
+              result.notReadySkipped += 1;
+              result.existingWakeSkipped += 1;
+              continue;
+            } else if (repairResult === "interaction_suppressed") {
+              result.interactionSkipped += 1;
+              result.existingWakeSkipped += 1;
+              continue;
+            } else if (repairResult === "approval_suppressed") {
+              result.approvalSkipped += 1;
+              result.existingWakeSkipped += 1;
+              continue;
+            } else if (repairResult === "pause_suppressed") {
+              result.pauseHoldSkipped += 1;
+              result.existingWakeSkipped += 1;
+              continue;
+            } else if (repairResult === "repaired") {
+              result.healed += 1;
+              result.issueIds.push(candidate.id);
+              result.existingWakeSkipped += 1;
+              continue;
+            } else {
+              result.existingWakeSkipped += 1;
+              continue;
+            }
+          }
         }
 
         if (
@@ -4399,6 +4616,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
 
         if (await hasPendingWakeInteraction(companyId, candidate.id)) {
           result.interactionSkipped += 1;
+          continue;
+        }
+
+        if (await hasPendingWakeApproval(companyId, candidate.id)) {
+          result.approvalSkipped += 1;
+          continue;
+        }
+
+        const currentCandidate = await issuesSvc.getById(candidate.id);
+        if (currentCandidate && currentCandidate.unblockDescriptor !== null) {
+          result.notReadySkipped += 1;
           continue;
         }
 
@@ -4476,6 +4704,52 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       );
     }
 
+    return result;
+  }
+
+  async function reconcileIssueGraphLiveness(opts?: {
+    runId?: string | null;
+    force?: boolean;
+    lookbackHours?: number;
+    issueCreatedAtGte?: Date | null;
+    now?: Date;
+    reescalationCooldownMs?: number;
+  }) {
+    const dependencyWakeBackstop = await reconcileResolvedDependencyWakeBackstop({
+      runId: opts?.runId ?? null,
+    });
+    const result = {
+      findings: 0,
+      autoRecoveryEnabled: opts?.force === true,
+      lookbackHours: opts?.lookbackHours ?? null,
+      cutoff: null as string | null,
+      escalationsCreated: 0,
+      existingEscalations: 0,
+      skipped: 0,
+      skippedAutoRecoveryDisabled: 0,
+      skippedOutsideLookback: 0,
+      skippedReescalationCooldown: 0,
+      obsoleteRecoveriesRetired: 0,
+      obsoleteRecoveriesActiveSkipped: 0,
+      obsoleteRecoveryBlockerRelationsRemoved: 0,
+      doneRecoveryBlockerRelationsRemoved: 0,
+      dependencyWakeBackstopChecked: dependencyWakeBackstop.checked,
+      dependencyWakesHealed: dependencyWakeBackstop.healed,
+      dependencyWakeExistingSkipped: dependencyWakeBackstop.existingWakeSkipped,
+      dependencyWakeLivePathSkipped: dependencyWakeBackstop.livePathSkipped,
+      dependencyWakeInteractionSkipped: dependencyWakeBackstop.interactionSkipped,
+      dependencyWakeApprovalSkipped: dependencyWakeBackstop.approvalSkipped,
+      dependencyWakePauseHoldSkipped: dependencyWakeBackstop.pauseHoldSkipped,
+      dependencyWakeNotReadySkipped: dependencyWakeBackstop.notReadySkipped,
+      dependencyWakeCandidateLimitSkipped: dependencyWakeBackstop.candidateLimitSkipped,
+      dependencyWakeDeferredOrFailed: dependencyWakeBackstop.deferredOrFailed,
+      dependencyWakeEnqueueFailed: dependencyWakeBackstop.enqueueFailed,
+      dependencyWakeIssueIds: dependencyWakeBackstop.issueIds,
+      issueIds: [] as string[],
+      escalationIssueIds: [] as string[],
+      retiredRecoveryIssueIds: [] as string[],
+    };
+    result.issueIds.push(...dependencyWakeBackstop.issueIds);
     return result;
   }
 
@@ -4834,6 +5108,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     scanSilentActiveRuns,
     reconcileStrandedAssignedIssues,
     sweepStaleIssueLocks,
+    reconcileIssueGraphLiveness,
     reconcileResolvedDependencyWakeBackstop,
     readRecoveryTimerIntervalMs,
   };

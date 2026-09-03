@@ -552,7 +552,7 @@ export function issueTreeControlService(db: Db) {
     return result;
   }
 
-  async function activeRunsForTree(companyId: string, treeIssues: TreeIssue[]) {
+  async function activeRunsForTree(companyId: string, treeIssues: TreeIssue[], dbOrTx: Db = db) {
     const issueIds = treeIssues.map((issue) => issue.id);
     if (issueIds.length === 0) return [];
     const runIds = treeIssues
@@ -562,7 +562,7 @@ export function issueTreeControlService(db: Db) {
     const issueIdFromContext = sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`;
     const issueIdSet = new Set(issueIds);
 
-    const rows = await db
+    const rows = await dbOrTx
       .select({
         id: heartbeatRuns.id,
         agentId: heartbeatRuns.agentId,
@@ -607,10 +607,15 @@ export function issueTreeControlService(db: Db) {
       .sort((a, b) => a.issueId.localeCompare(b.issueId) || a.createdAt.getTime() - b.createdAt.getTime());
   }
 
-  async function activeHoldsByIssueId(companyId: string, issueIds: string[]) {
+  async function activeHoldsByIssueId(
+    companyId: string,
+    issueIds: string[],
+    dbOrTx: Db = db,
+    options: { lockForUpdate?: boolean } = {},
+  ) {
     const byIssueId = new Map<string, { all: string[]; pause: string[] }>();
     if (issueIds.length === 0) return byIssueId;
-    const rows = await db
+    const query = dbOrTx
       .select({
         issueId: issueTreeHoldMembers.issueId,
         holdId: issueTreeHolds.id,
@@ -626,6 +631,9 @@ export function issueTreeControlService(db: Db) {
         ),
       )
       .orderBy(asc(issueTreeHolds.createdAt), asc(issueTreeHolds.id));
+    const rows = options.lockForUpdate
+      ? await query.for("update", { of: issueTreeHolds })
+      : await query;
 
     for (const row of rows) {
       const current = byIssueId.get(row.issueId) ?? { all: [], pause: [] };
@@ -820,7 +828,7 @@ export function issueTreeControlService(db: Db) {
     resumedPauseHoldIds?: string[];
   }> {
     const holdReleasePolicy = normalizeReleasePolicy(input.releasePolicy);
-    const holdPreview = await preview(companyId, rootIssueId, {
+    let holdPreview = await preview(companyId, rootIssueId, {
       mode: input.mode,
       releasePolicy: holdReleasePolicy,
     });
@@ -909,6 +917,86 @@ export function issueTreeControlService(db: Db) {
     }
 
     const { hold, members } = await db.transaction(async (tx) => {
+      const issueIds = [...new Set(holdPreview.issues.map((issue) => issue.id))].sort();
+      const lockedIssues = issueIds.length > 0
+        ? await tx
+          .select()
+          .from(issues)
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, issueIds)))
+          .orderBy(asc(issues.id))
+          .for("update")
+        : [];
+      if (lockedIssues.length !== issueIds.length) {
+        throw notFound("One or more issues in the subtree no longer exist");
+      }
+
+      // Status, active runs, and existing holds can all change while this
+      // transaction waits for the issue locks. Rebuild the status-dependent
+      // preview from the locked rows before persisting either a pause or cancel
+      // snapshot so reopened work is not retained as a stale terminal skip.
+      if (input.mode === "pause" || input.mode === "cancel") {
+        const depthByIssueId = new Map(holdPreview.issues.map((issue) => [issue.id, issue.depth]));
+        const lockedTreeIssues = lockedIssues.map((issue) => ({
+          ...issue,
+          depth: depthByIssueId.get(issue.id) ?? 0,
+        }));
+        const [refreshedRunRows, refreshedHolds] = await Promise.all([
+          activeRunsForTree(companyId, lockedTreeIssues, tx as unknown as Db),
+          activeHoldsByIssueId(companyId, issueIds, tx as unknown as Db, { lockForUpdate: true }),
+        ]);
+        const refreshedRuns = refreshedRunRows.map(toPreviewRun);
+        const runByIssueId = new Map(refreshedRuns.map((run) => [run.issueId, run]));
+        const lockedIssueById = new Map(lockedTreeIssues.map((issue) => [issue.id, issue]));
+        const refreshedIssues = holdPreview.issues.map((issue) => {
+          const lockedIssue = lockedIssueById.get(issue.id)!;
+          const holdState = refreshedHolds.get(issue.id) ?? { all: [], pause: [] };
+          const skipReason = issueSkipReason({
+            mode: input.mode,
+            issue: lockedIssue,
+            activePauseHoldIds: holdState.pause,
+          });
+          return {
+            ...issue,
+            status: coerceIssueStatus(lockedIssue.status),
+            parentId: lockedIssue.parentId,
+            assigneeAgentId: lockedIssue.assigneeAgentId,
+            assigneeUserId: lockedIssue.assigneeUserId,
+            activeRun: runByIssueId.get(issue.id) ?? null,
+            activeHoldIds: holdState.all,
+            skipped: skipReason !== null,
+            skipReason,
+          };
+        });
+        const skippedIssues = refreshedIssues.filter((issue) => issue.skipped);
+        const affectedAgents = buildAffectedAgents(refreshedIssues);
+        const countsByStatus: Partial<Record<IssueStatus, number>> = {};
+        for (const issue of refreshedIssues) {
+          countsByStatus[issue.status] = (countsByStatus[issue.status] ?? 0) + 1;
+        }
+        holdPreview = {
+          ...holdPreview,
+          generatedAt: new Date(),
+          issues: refreshedIssues,
+          skippedIssues,
+          activeRuns: refreshedRuns,
+          affectedAgents,
+          countsByStatus,
+          totals: {
+            ...holdPreview.totals,
+            affectedIssues: refreshedIssues.length - skippedIssues.length,
+            skippedIssues: skippedIssues.length,
+            activeRuns: refreshedRuns.filter((run) => run.status === "running").length,
+            queuedRuns: refreshedRuns.filter((run) => run.status === "queued").length,
+            affectedAgents: affectedAgents.length,
+          },
+          warnings: buildWarnings({
+            mode: input.mode,
+            issuesToPreview: refreshedIssues,
+            activeRuns: refreshedRuns,
+          }),
+        };
+      }
+
       const [createdHold] = await tx
         .insert(issueTreeHolds)
         .values({

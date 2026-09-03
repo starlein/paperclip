@@ -126,7 +126,9 @@ function registerModuleMocks() {
   }));
 }
 
-async function createApp(db: unknown = {}) {
+async function createApp(
+  db: unknown = { transaction: async (callback: (tx: unknown) => Promise<unknown>) => callback({}) },
+) {
   const [{ issueRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/issues.js")>("../routes/issues.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -617,6 +619,70 @@ describe("issue activity event routes", () => {
       expect.anything(),
       expect.objectContaining({ action: "issue.successful_run_handoff_resolved" }),
     );
+  });
+
+  it("does not log an unchanged execution policy submission as an issue update", async () => {
+    const executionPolicy = normalizeIssueExecutionPolicy({
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "agent", agentId: "11111111-2222-4333-8444-555555555555" }],
+        },
+      ],
+    })!;
+    const issue = { ...makeIssue(), executionPolicy };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      issueUpdateWithReceipt(issue, patch));
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${issue.id}`)
+      .send({ executionPolicy });
+
+    expect(res.status).toBe(200);
+    expect(res.body.changes).toEqual({});
+    expect(mockLogActivity.mock.calls.some(([, input]) => input.action === "issue.updated")).toBe(false);
+  });
+
+  it("logs other field changes submitted with an unchanged execution policy", async () => {
+    const executionPolicy = normalizeIssueExecutionPolicy({
+      stages: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          type: "review",
+          participants: [{ type: "agent", agentId: "11111111-2222-4333-8444-555555555555" }],
+        },
+      ],
+    })!;
+    const issue = { ...makeIssue(), executionPolicy };
+    mockIssueService.getById.mockResolvedValue(issue);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) =>
+      issueUpdateWithReceipt(issue, patch));
+
+    const res = await request(await createApp())
+      .patch(`/api/issues/${issue.id}`)
+      .send({ executionPolicy, priority: "high" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.changes).toEqual({
+      priority: { from: "medium", to: "high" },
+    });
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        action: "issue.updated",
+        details: expect.objectContaining({
+          priority: "high",
+          changes: {
+            priority: { from: "medium", to: "high" },
+          },
+        }),
+      }),
+      expect.any(Array),
+    );
+    const updateActivity = mockLogActivity.mock.calls.find(([, input]) => input.action === "issue.updated")?.[1];
+    expect(updateActivity?.details).not.toHaveProperty("executionPolicy");
   });
 
   it("logs explicit reviewer and approver activity when execution policy participants change", async () => {

@@ -912,7 +912,7 @@ describeEmbeddedPostgres("summary slot service", () => {
       expect(documentAfterCancellation).toEqual(documentBeforeCancellation);
       await expect(
         db.select().from(documentRevisions).where(eq(documentRevisions.documentId, changedPrevious.document.id)),
-      ).resolves.toHaveLength(1);
+      ).resolves.toHaveLength(2);
 
       await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, routineIssue!.id));
 
