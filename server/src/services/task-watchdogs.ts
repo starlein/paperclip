@@ -56,6 +56,19 @@ const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
   "issue.thread_interaction_cancelled",
   "issue.thread_interaction_expired",
 ] as const;
+const TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS = [
+  "issue.updated",
+  "issue.document_created",
+  "issue.document_updated",
+  "issue.document_upserted",
+  "issue.document_restored",
+  "issue.document_deleted",
+  "issue.attachment_added",
+  "issue.attachment_removed",
+  "issue.work_product_created",
+  "issue.work_product_updated",
+  "issue.work_product_deleted",
+] as const;
 const TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS = [
   "approval.approved",
   "approval.rejected",
@@ -63,6 +76,20 @@ const TASK_WATCHDOG_APPROVAL_STATE_ACTIVITY_ACTIONS = [
   "approval.revision_requested",
   "approval.resubmitted",
 ] as const;
+const TASK_WATCHDOG_RECOVERY_MUTATION_ACTIVITY_ACTIONS = [
+  "issue.updated",
+  "issue.comment_added",
+  "issue.created",
+  "issue.thread_interaction_created",
+  "issue.thread_interaction_accepted",
+  "issue.thread_interaction_rejected",
+  "issue.thread_interaction_answered",
+  "issue.thread_interaction_item_verdicts_submitted",
+  "issue.thread_interaction_withdrawn",
+  "issue.thread_interaction_cancelled",
+  "issue.thread_interaction_expired",
+] as const;
+const TASK_WATCHDOG_RECOVERY_MUTATION_LIMIT = 3;
 const TASK_WATCHDOG_TERMINAL_ISSUE_STATUSES = ["done", "cancelled"] as const;
 const TASK_WATCHDOG_TERMINAL_RUN_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
 // Grace window after an issue is created/assigned during which its first
@@ -460,6 +487,7 @@ function stopSnapshotFromRunContext(input: {
 }) {
   const context = parseObject(input.contextSnapshot);
   const taskWatchdog = parseObject(context.taskWatchdog);
+  const recoveryActivityBoundary = parseObject(taskWatchdog.recoveryActivityBoundary);
   const triggeredAt = typeof taskWatchdog.triggeredAt === "string"
     ? new Date(taskWatchdog.triggeredAt)
     : null;
@@ -469,6 +497,9 @@ function stopSnapshotFromRunContext(input: {
     taskWatchdog.watchedIssueId !== input.watchedIssueId ||
     taskWatchdog.stopFingerprint !== input.stopFingerprint ||
     !Array.isArray(taskWatchdog.terminalLeafSummaries) ||
+    recoveryActivityBoundary.version !== 1 ||
+    !Number.isSafeInteger(recoveryActivityBoundary.issueActivityCount) ||
+    (recoveryActivityBoundary.issueActivityCount as number) < 0 ||
     !triggeredAt ||
     !Number.isFinite(triggeredAt.getTime())
   ) return null;
@@ -532,7 +563,15 @@ function stopSnapshotFromRunContext(input: {
     watchedIssueId: input.watchedIssueId,
     stopFingerprint: input.stopFingerprint,
   });
-  return stopSnapshot ? { stopSnapshot, watchedSource, triggeredAt } : null;
+  return stopSnapshot ? {
+    stopSnapshot,
+    watchedSource,
+    triggeredAt,
+    recoveryActivityBoundary: {
+      version: 1 as const,
+      issueActivityCount: recoveryActivityBoundary.issueActivityCount as number,
+    },
+  } : null;
 }
 
 // Snapshots loaded from jsonb columns come back with Postgres's normalized key
@@ -788,6 +827,42 @@ async function loadMaterialWatchdogRecoveryActivities(input: {
   });
 }
 
+async function countConsumedWatchdogRecoveryMutations(input: {
+  db: Db;
+  companyId: string;
+  watchdogRunId: string;
+}) {
+  const [row] = await input.db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.companyId, input.companyId),
+      eq(activityLog.runId, input.watchdogRunId),
+      eq(activityLog.entityType, "issue"),
+      inArray(activityLog.action, TASK_WATCHDOG_RECOVERY_MUTATION_ACTIVITY_ACTIONS),
+    ));
+  return row?.count ?? 0;
+}
+
+async function countCommitOrderedWatchdogActivities(input: {
+  db: Db;
+  companyId: string;
+  mutableIssueIds: string[];
+  watchdogRunId?: string | null;
+}) {
+  const [row] = await input.db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(activityLog)
+    .where(and(
+      eq(activityLog.companyId, input.companyId),
+      eq(activityLog.entityType, "issue"),
+      inArray(activityLog.entityId, input.mutableIssueIds),
+      inArray(activityLog.action, TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS),
+      ...(input.watchdogRunId ? [eq(activityLog.runId, input.watchdogRunId)] : []),
+    ));
+  return row?.count ?? 0;
+}
+
 async function latestMaterialBoundaryIsServerOwnedWatchdogTransition(input: {
   db: Db;
   companyId: string;
@@ -871,6 +946,7 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
   current: TaskWatchdogStopSnapshot;
   watchdogTriggeredAt: Date;
   watchdogRunId?: string | null;
+  commitOrderedExternalActivityCount: number;
 }) {
   const currentWatchedSource = input.current.materialLeaves.find(
     (leaf) => leaf.issueId === input.watchedIssueId,
@@ -886,6 +962,12 @@ async function hasServerOwnedWatchdogBlockerTransitionProvenance(input: {
     watchdogTriggeredAt: input.watchdogTriggeredAt,
     watchdogRunId: input.watchdogRunId,
   });
+  const visibleCommitOrderedActivityCount = materialRecoveryActivities.filter((activity) =>
+    TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS.includes(
+      activity.action as (typeof TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS)[number],
+    )
+  ).length;
+  if (visibleCommitOrderedActivityCount !== input.commitOrderedExternalActivityCount) return false;
   return latestMaterialBoundaryIsServerOwnedWatchdogTransition({
     db: input.db,
     companyId: input.companyId,
@@ -1223,6 +1305,7 @@ function watchdogWakeContext(input: {
   sourceIssue: IssueRow;
   classification: Extract<TaskWatchdogClassifierResult, { state: "stopped" }>;
   triggeredAt: Date;
+  recoveryActivityBoundary: { version: 1; issueActivityCount: number };
 }) {
   return {
     issueId: input.watchdogIssue.id,
@@ -1231,6 +1314,7 @@ function watchdogWakeContext(input: {
     source: TASK_WATCHDOG_ORIGIN_KIND,
     taskWatchdog: {
       triggeredAt: input.triggeredAt.toISOString(),
+      recoveryActivityBoundary: input.recoveryActivityBoundary,
       watchedIssueId: input.sourceIssue.id,
       watchedIssueIdentifier: input.sourceIssue.identifier,
       watchedIssueTitle: input.sourceIssue.title,
@@ -1984,10 +2068,6 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
   }
 
   async function evaluateWatchdog(row: IssueWatchdogRow, opts: { runId?: string | null } = {}) {
-    // Bind the future run to a boundary captured before its stopped-subtree
-    // snapshot. The shared watchdog row can advance during later reconciles;
-    // it must never redefine this run's freshness window.
-    const triggeredAt = new Date();
     const watchdog = await markTerminalWatchdogIssueReviewed(row, opts);
     const sourceIssue = await db
       .select()
@@ -1998,6 +2078,27 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       return { state: "skipped" as const, reason: "watched_issue_not_applicable" };
     }
 
+    // Capture an append-only database visibility boundary before collecting
+    // the stopped snapshot. A transaction that later commits an activity with
+    // an older `created_at` still increases this count, so revalidation cannot
+    // mistake transaction-start time for commit order.
+    const boundaryIssueIds = (await loadWatchdogSubtreeIssues(
+      watchdog.companyId,
+      watchdog.issueId,
+    )).map((issue) => issue.id);
+    const recoveryActivityBoundary = {
+      version: 1 as const,
+      issueActivityCount: await countCommitOrderedWatchdogActivities({
+        db,
+        companyId: watchdog.companyId,
+        mutableIssueIds: boundaryIssueIds,
+      }),
+    };
+    // Keep the legacy timestamp after the database visibility boundary and
+    // before the stopped-subtree snapshot. Timestamp-filtered interaction and
+    // approval provenance therefore cannot reclassify activity already
+    // included in the boundary as a later competing mutation.
+    const triggeredAt = new Date();
     const input = await collectClassifierInput(watchdog.companyId, watchdog);
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state !== "stopped") {
@@ -2115,6 +2216,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
       sourceIssue,
       classification,
       triggeredAt,
+      recoveryActivityBoundary,
     });
     const wake = deps.enqueueWakeup
       ? await deps.enqueueWakeup(watchdog.watchdogAgentId, {
@@ -2400,6 +2502,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           eq(heartbeatRuns.companyId, watchdog.companyId),
           eq(heartbeatRuns.agentId, watchdog.watchdogAgentId),
         ))
+        .for("update")
         .then((rows) => rows[0] ?? null)
       : null;
     const observedRunState = watchdog.watchdogIssueId
@@ -2412,6 +2515,45 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
         stopFingerprint: scope.stopFingerprint,
       })
       : null;
+    let commitOrderedExternalActivityCount: number | null = null;
+    if (run?.status === "running" && scope.runId && observedRunState) {
+      const mutableIssueIds = input.issues.map((issue) => issue.id);
+      const [consumedMutations, currentCommitOrderedActivityCount, ownCommitOrderedActivityCount] = await Promise.all([
+        countConsumedWatchdogRecoveryMutations({
+          db: queryDb,
+          companyId: watchdog.companyId,
+          watchdogRunId: scope.runId,
+        }),
+        countCommitOrderedWatchdogActivities({
+          db: queryDb,
+          companyId: watchdog.companyId,
+          mutableIssueIds,
+        }),
+        countCommitOrderedWatchdogActivities({
+          db: queryDb,
+          companyId: watchdog.companyId,
+          mutableIssueIds,
+          watchdogRunId: scope.runId,
+        }),
+      ]);
+      if (consumedMutations >= TASK_WATCHDOG_RECOVERY_MUTATION_LIMIT) {
+        return {
+          allowed: false as const,
+          reason: `Task-watchdog recovery batch is exhausted after ${TASK_WATCHDOG_RECOVERY_MUTATION_LIMIT} mutations.`,
+          classification,
+        };
+      }
+      commitOrderedExternalActivityCount = currentCommitOrderedActivityCount
+        - observedRunState.recoveryActivityBoundary.issueActivityCount
+        - ownCommitOrderedActivityCount;
+      if (commitOrderedExternalActivityCount < 0) {
+        return {
+          allowed: false as const,
+          reason: "Task-watchdog recovery boundary is invalid because committed activity moved behind the observed snapshot.",
+          classification,
+        };
+      }
+    }
     if (classification.state === "stopped" && classification.stopFingerprint === scope.stopFingerprint) {
       // The compact stop fingerprint intentionally excludes mutable metadata.
       // A watchdog run may therefore still have an exact classifier match
@@ -2429,7 +2571,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           watchdogTriggeredAt: observedRunState.triggeredAt,
           watchdogRunId: scope.runId,
         });
-        if (materialRecoveryActivities.length === 0) {
+        if (
+          materialRecoveryActivities.length === 0 &&
+          commitOrderedExternalActivityCount === 0
+        ) {
           return { allowed: true as const, classification };
         }
         const currentWatchedIssue = input.issues.find((issue) => issue.id === watchdog.issueId);
@@ -2437,9 +2582,15 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           .filter((relation) => relation.blockedIssueId === watchdog.issueId)
           .map((relation) => relation.blockerIssueId)
           .sort();
+        const visibleCommitOrderedActivityCount = materialRecoveryActivities.filter((activity) =>
+          TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS.includes(
+            activity.action as (typeof TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS)[number],
+          )
+        ).length;
         if (
           currentWatchedIssue &&
           watchdog.watchdogIssueId &&
+          commitOrderedExternalActivityCount === visibleCommitOrderedActivityCount &&
           await latestMaterialBoundaryIsServerOwnedWatchdogTransition({
             db: queryDb,
             companyId: watchdog.companyId,
@@ -2501,6 +2652,7 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
           current: classification.stopSnapshot,
           watchdogTriggeredAt: observedRunState.triggeredAt,
           watchdogRunId: scope.runId,
+          commitOrderedExternalActivityCount: commitOrderedExternalActivityCount ?? 0,
         })
       ) return { allowed: true as const, classification };
     }

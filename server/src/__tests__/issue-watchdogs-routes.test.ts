@@ -269,6 +269,30 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       pendingInteractionIds: [],
       pendingApprovalIds: sourceApprovals.map((row) => row.id).sort(),
     };
+    const boundaryIssueIds = new Set([
+      input.watchedIssueId,
+      ...(stopSnapshot?.materialLeaves ?? []).map((leaf) => leaf.issueId),
+    ]);
+    const commitOrderedActions = new Set([
+      "issue.updated",
+      "issue.document_created",
+      "issue.document_updated",
+      "issue.document_upserted",
+      "issue.document_restored",
+      "issue.document_deleted",
+      "issue.attachment_added",
+      "issue.attachment_removed",
+      "issue.work_product_created",
+      "issue.work_product_updated",
+      "issue.work_product_deleted",
+    ]);
+    const boundaryActivities = await db
+      .select({ entityId: activityLog.entityId, action: activityLog.action })
+      .from(activityLog)
+      .where(eq(activityLog.companyId, input.companyId));
+    const issueActivityCount = boundaryActivities.filter((activity) =>
+      boundaryIssueIds.has(activity.entityId) && commitOrderedActions.has(activity.action)
+    ).length;
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({
       id: runId,
@@ -280,6 +304,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         watchdogId: watchdog?.id,
         taskWatchdog: {
           triggeredAt: triggeredAt.toISOString(),
+          recoveryActivityBoundary: { version: 1, issueActivityCount },
           watchedIssueId: input.watchedIssueId,
           watchedIssueIdentifier: "WDOG-ROOT",
           watchedIssueTitle: "Watched root",
@@ -869,8 +894,27 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       .patch(`/api/issues/${fixture.sourceIssueId}`)
       .send({ billingCode: "watchdog-recovery" });
     expect(second.status, JSON.stringify(second.body)).toBe(200);
+
+    const third = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "critical" });
+    expect(third.status, JSON.stringify(third.body)).toBe(200);
+
+    const fourth = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "must-not-commit" });
+    expect(fourth.status, JSON.stringify(fourth.body)).toBe(409);
     expect(second.body).toMatchObject({
       priority: "high",
+      billingCode: "watchdog-recovery",
+    });
+
+    const [source] = await db
+      .select({ priority: issues.priority, billingCode: issues.billingCode })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source).toEqual({
+      priority: "critical",
       billingCode: "watchdog-recovery",
     });
 
@@ -883,7 +927,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         eq(activityLog.action, "issue.updated"),
         eq(activityLog.runId, fixture.watchdogRunId),
       ));
-    expect(ownActivities).toHaveLength(2);
+    expect(ownActivities).toHaveLength(3);
   });
 
   it("rejects recovery provenance superseded by a later user source transition", async () => {
@@ -1261,6 +1305,41 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         participants: [{ type: "agent", agentId: fixture.watchdogAgentId }],
       }],
     });
+  });
+
+  it("rejects an unseen execution-policy edit whose activity timestamp predates the watchdog snapshot", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const executionPolicy = {
+      mode: "normal",
+      stages: [{
+        type: "review",
+        participants: [{ type: "agent", agentId: fixture.watchdogAgentId }],
+      }],
+    };
+    await db.update(issues)
+      .set({ executionPolicy })
+      .where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "transaction-started-before-watchdog",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: { executionPolicy },
+      createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual(executionPolicy);
   });
 
   it.each([
