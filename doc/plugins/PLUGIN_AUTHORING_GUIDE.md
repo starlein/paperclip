@@ -200,7 +200,11 @@ ids. In a worker action or data handler, call `ctx.agents.managed.reconcile()`,
 the current `companyId`. `reconcile()` creates the missing resource, relinks a
 recoverable binding, or returns the existing resource. `reset()` reapplies the
 manifest defaults when the operator wants to restore the plugin's suggested
-configuration.
+configuration. During create, reconcile, and reset, a quantitative open-
+implementation-PR cap in the company's active CEO instructions takes precedence
+over a contradictory cap in the managed agent entry file. Reconciliation changes
+only that stale cap and preserves unrelated operator edits; contradictory caps in
+the CEO instructions fail closed instead of selecting one implicitly.
 
 Declare dependencies between managed resources with refs. A routine can point
 at a managed agent through `assigneeRef` and at a managed project through

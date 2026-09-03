@@ -54,6 +54,7 @@ Every proposal must satisfy all of these:
 - **Trajectory-backed or drop it.** Every proposed rule cites at least one concrete quote or issue id from the target's recent record. No evidence, no rule.
 - **Not your code.** Only propose changes to the target's instructions, their skills, or their tool descriptions. Never to code they do not own or to shared infra.
 - **Benchmark-gated.** Name the replay cases the proposal must still resolve. If a rule would have broken a past success, drop it.
+- **Company policy wins.** Read the target's reporting chain before proposing a role-level policy. A quantitative policy stated by the CEO overrides a contradictory role-local default; the diff must update or remove the stale value rather than leave both active.
 - **No reflection on yourself.** If `targetAgentId == PAPERCLIP_AGENT_ID`, refuse and ask for another coach.
 
 ## Procedure
@@ -89,6 +90,7 @@ Before proposing anything, read what already exists so you don't restate it:
 
 - Their `AGENTS.md` at `adapterConfig.instructionsFilePath`.
 - Their assigned skills (from step 1).
+- Their manager/CEO instruction chain when the proposal changes delivery, queue, security, budget, or other company policy.
 - Any `MEMORY.md` / `memory/` files in their cwd if the adapter uses para-memory-files.
 
 If a rule you were about to propose is already present, drop it. A failure pattern *despite* an existing rule is a different finding — record it as "existing rule X is not being followed" and propose how to make it stick (move to a skill, add a negative example, strengthen the trigger), not a duplicate.
@@ -174,6 +176,8 @@ Server-enforced mutation target keys:
 ### 10) Apply only after acceptance, in a follow-up run
 
 When the interaction resolves **accepted**, apply the change in a *separate* run:
+
+First re-read the reporting-chain policy and the target revision. If company policy changed after review, or the accepted diff would now introduce a contradictory local limit, apply nothing and supersede the proposal with a fresh diff.
 
 - **AGENTS.md** — update the target's managed instruction file exactly as the accepted diff specified.
 - **Skill** — install/update the skill in the company library, then `POST /api/agents/<targetAgentId>/skills/sync` with `{"mode":"add","desiredSkills":["<skill-ref>"]}` when the target should receive it. Use `remove` only for the named assignments. Use `replace` only after explicit confirmation to overwrite the complete desired skill set.
