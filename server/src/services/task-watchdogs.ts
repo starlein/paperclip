@@ -2601,10 +2601,10 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
             activities: materialRecoveryActivities,
           })
         ) return { allowed: true as const, classification };
-      } else {
+      } else if (!run) {
         // Preserve service callers that perform classifier-only checks without
-        // a persisted run context. HTTP watchdog mutations always carry the
-        // verified running context above.
+        // a persisted run context. A persisted HTTP watchdog run with a
+        // missing, malformed, or non-running context must fail closed.
         return { allowed: true as const, classification };
       }
     }

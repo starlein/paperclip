@@ -1342,6 +1342,31 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     expect(source?.executionPolicy).toEqual(executionPolicy);
   });
 
+  it("fails closed when a persisted watchdog run lacks its recovery activity boundary", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const [run] = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, fixture.watchdogRunId));
+    const contextSnapshot = structuredClone(run?.contextSnapshot) as {
+      taskWatchdog?: { recoveryActivityBoundary?: unknown };
+    };
+    delete contextSnapshot.taskWatchdog?.recoveryActivityBoundary;
+    await db.update(heartbeatRuns)
+      .set({ contextSnapshot })
+      .where(eq(heartbeatRuns.id, fixture.watchdogRunId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
+  });
+
   it.each([
     ["interaction", "issue.thread_interaction_created", "issue.thread_interaction_accepted"],
     ["approval", "issue.approval_linked", "issue.approval_unlinked"],

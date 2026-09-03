@@ -816,7 +816,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       executionLockedAt: new Date(),
     }).where(eq(issues.id, sourceId));
     await seedWatchdog(companyId, sourceId, watchdogAgentId);
-    const { service } = createService();
+    const { service, wakes } = createService();
 
     await service.reconcileTaskWatchdogs({ companyId });
     const [watchdog] = await db.select().from(issueWatchdogs).where(eq(issueWatchdogs.issueId, sourceId));
@@ -828,10 +828,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       agentId: watchdogAgentId,
       status: "running",
       invocationSource: "assignment",
-      contextSnapshot: {
-        issueId: watchdog!.watchdogIssueId,
-        taskWatchdog: { watchedIssueId: sourceId, stopFingerprint },
-      },
+      contextSnapshot: wakes[0]?.opts?.contextSnapshot,
     });
 
     const revalidated = await service.revalidateMutationScope({
@@ -982,7 +979,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       executionLockedAt: new Date(),
     }).where(eq(issues.id, foreignIssueId));
     await seedWatchdog(watchedCompanyId, watchedIssueId, watchdogAgentId);
-    const { service } = createService();
+    const { service, wakes } = createService();
 
     await service.reconcileTaskWatchdogs({ companyId: watchedCompanyId });
     const [watchdog] = await db
@@ -1003,10 +1000,7 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
       agentId: watchdogAgentId,
       status: "running",
       invocationSource: "assignment",
-      contextSnapshot: {
-        issueId: watchdog!.watchdogIssueId,
-        taskWatchdog: { watchedIssueId, stopFingerprint },
-      },
+      contextSnapshot: wakes[0]?.opts?.contextSnapshot,
     });
 
     const revalidated = await service.revalidateMutationScope({
