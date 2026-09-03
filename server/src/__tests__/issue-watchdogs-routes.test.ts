@@ -21,6 +21,8 @@ import {
   principalPermissionGrants,
   goals,
   projects,
+  projectWorkspaces,
+  executionWorkspaces,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -88,6 +90,8 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     await db.delete(issueRelations);
     await db.delete(issueWatchdogs);
     await db.delete(issues);
+    await db.delete(executionWorkspaces);
+    await db.delete(projectWorkspaces);
     await db.delete(projects);
     await db.delete(goals);
     await db.delete(agents);
@@ -944,6 +948,79 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       projectId: sourceProjectId,
       goalId: sourceGoalId,
       billingCode: "source-billing",
+    });
+  });
+
+  it("does not derive watchdog-discovered product bug scope from caller workspace overrides", async () => {
+    const companyId = await seedCompany();
+    const callerProjectId = randomUUID();
+    const callerProjectWorkspaceId = randomUUID();
+    const callerExecutionWorkspaceId = randomUUID();
+    await db.insert(projects).values({
+      id: callerProjectId,
+      companyId,
+      name: "Caller-selected project",
+      status: "in_progress",
+    });
+    await db.insert(projectWorkspaces).values({
+      id: callerProjectWorkspaceId,
+      companyId,
+      projectId: callerProjectId,
+      name: "Caller-selected project workspace",
+    });
+    await db.insert(executionWorkspaces).values({
+      id: callerExecutionWorkspaceId,
+      companyId,
+      projectId: callerProjectId,
+      projectWorkspaceId: callerProjectWorkspaceId,
+      mode: "shared_workspace",
+      strategyType: "project_primary",
+      name: "Caller-selected execution workspace",
+      status: "active",
+    });
+    const watchdogAgentId = await seedAgent(companyId, { name: "Unscoped Product Bug Watchdog" });
+    const watchedRootId = await seedIssue(companyId, { title: "Unscoped watched root" });
+    const watchdogIssueId = await seedIssue(companyId, {
+      title: "Reusable watchdog issue",
+      parentId: watchedRootId,
+      assigneeAgentId: watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: watchedRootId,
+    });
+    const runId = await seedWatchdogRun({
+      companyId,
+      watchdogAgentId,
+      watchedIssueId: watchedRootId,
+      watchdogIssueId,
+    });
+    const app = createApp(companyId, {
+      type: "agent",
+      agentId: watchdogAgentId,
+      companyId,
+      runId,
+      source: "agent_jwt",
+    });
+
+    const res = await request(app)
+      .post(`/api/companies/${companyId}/issues`)
+      .send({
+        title: "Workspace-scoped watchdog discovery",
+        projectWorkspaceId: callerProjectWorkspaceId,
+        executionWorkspaceId: callerExecutionWorkspaceId,
+        watchdogDiscovery: {
+          kind: "product_bug",
+          evidenceMarkdown: "Caller workspace selection must not supply project scope.",
+        },
+      });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body).toMatchObject({
+      companyId,
+      projectId: null,
+      projectWorkspaceId: null,
+      executionWorkspaceId: null,
+      originKind: "task_watchdog_product_bug",
+      originId: watchedRootId,
     });
   });
 

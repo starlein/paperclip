@@ -58,6 +58,21 @@ describe("paperclip MCP tools", () => {
     expect(tool.schema.shape).not.toHaveProperty("watchdogDiscovery");
   });
 
+  it("rejects stale watchdogDiscovery input instead of forwarding a partial issue update", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const tool = getTool("paperclipUpdateIssue");
+
+    const response = await tool.execute({
+      issueId: "PAP-1135",
+      status: "done",
+      watchdogDiscovery: { kind: "platform_bug" },
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(response.content[0]?.text).toContain("watchdogDiscovery");
+  });
+
   it("lists the company skill library with the default company id", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       mockJsonResponse([{ key: "paperclipai/bundled/product/wireframe", name: "wireframe" }]),

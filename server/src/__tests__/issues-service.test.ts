@@ -2857,13 +2857,15 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
       status: "in_progress",
     });
 
-    await expect(svc.create(companyId, {
-      title: "Cross-company issue",
-      projectId: foreignProjectId,
-    })).rejects.toMatchObject({
-      status: 422,
-      message: "Project must belong to same company",
-    });
+    for (const projectId of [foreignProjectId, randomUUID()]) {
+      await expect(svc.create(companyId, {
+        title: "Cross-company issue",
+        projectId,
+      })).rejects.toMatchObject({
+        status: 404,
+        message: "Project not found",
+      });
+    }
 
     const persisted = await db.select().from(issues).where(eq(issues.companyId, companyId));
     expect(persisted).toHaveLength(0);
@@ -2895,10 +2897,12 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     });
     const issue = await svc.create(companyId, { title: "Company-scoped issue" });
 
-    await expect(svc.update(issue.id, { projectId: foreignProjectId })).rejects.toMatchObject({
-      status: 422,
-      message: "Project must belong to same company",
-    });
+    for (const projectId of [foreignProjectId, randomUUID()]) {
+      await expect(svc.update(issue.id, { projectId })).rejects.toMatchObject({
+        status: 404,
+        message: "Project not found",
+      });
+    }
 
     const [persisted] = await db.select().from(issues).where(eq(issues.id, issue.id));
     expect(persisted?.projectId).toBeNull();

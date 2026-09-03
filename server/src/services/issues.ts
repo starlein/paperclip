@@ -1442,14 +1442,11 @@ async function assertValidProject(
 ) {
   if (!projectId) return;
   const project = await db
-    .select({ id: projects.id, companyId: projects.companyId })
+    .select({ id: projects.id })
     .from(projects)
-    .where(eq(projects.id, projectId))
+    .where(and(eq(projects.id, projectId), eq(projects.companyId, companyId)))
     .then((rows) => rows[0] ?? null);
   if (!project) throw notFound("Project not found");
-  if (project.companyId !== companyId) {
-    throw unprocessable("Project must belong to same company");
-  }
 }
 
 async function getWorkspaceInheritanceIssue(
@@ -7276,7 +7273,6 @@ export function issueService(db: Db) {
       }
       return db.transaction(async (tx) => {
         const requestedProjectId = issueData.projectId;
-        await assertValidProject(tx, companyId, requestedProjectId);
         const idempotencyKey = rawIdempotencyKey?.trim() || null;
         const normalizedTitle = normalizeCreateIssueTitle(issueData.title);
         if (allowDuplicate === false) {
@@ -7346,6 +7342,7 @@ export function issueService(db: Db) {
           return withRelations;
         }
 
+        await assertValidProject(tx, companyId, requestedProjectId);
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         let projectWorkspaceId = issueData.projectWorkspaceId ?? null;
         let executionWorkspaceId = issueData.executionWorkspaceId ?? null;
