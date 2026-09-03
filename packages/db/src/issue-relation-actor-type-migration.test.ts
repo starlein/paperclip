@@ -1,8 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
+import { applyPendingMigrations, inspectMigrations } from "./client.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -11,6 +12,9 @@ import {
 const cleanups: Array<() => Promise<void>> = [];
 const support = await getEmbeddedPostgresTestSupport();
 const d = support.supported ? describe : describe.skip;
+const MIGRATION_FILE = "0237_clammy_colonel_america.sql";
+const ORIGINAL_MANAGED_PROFILES_HASH =
+  "2292cae4f2bd3bd8e364506f83b4149e316683c94500c5da3fb021f50bb0d78e";
 
 afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()?.();
@@ -18,7 +22,7 @@ afterEach(async () => {
 
 async function migrationStatements(): Promise<string[]> {
   const migrationSql = await readFile(
-    fileURLToPath(new URL("./migrations/0237_rapid_firebird.sql", import.meta.url)),
+    fileURLToPath(new URL(`./migrations/${MIGRATION_FILE}`, import.meta.url)),
     "utf8",
   );
   return migrationSql
@@ -27,7 +31,51 @@ async function migrationStatements(): Promise<string[]> {
     .filter((statement) => statement.length > 0);
 }
 
-d("issue relation actor provenance migration", () => {
+d("combined managed profiles and issue relation actor migration", () => {
+  it("upgrades a database that recorded the original managed profiles migration", async () => {
+    const database = await startEmbeddedPostgresTestDatabase("combined-0237-migration-");
+    cleanups.push(database.cleanup);
+    const sql = postgres(database.connectionString, { max: 1, onnotice: () => {} });
+    cleanups.push(async () => sql.end());
+
+    const migrationSql = await readFile(
+      fileURLToPath(new URL(`./migrations/${MIGRATION_FILE}`, import.meta.url)),
+    );
+    const combinedHash = createHash("sha256").update(migrationSql).digest("hex");
+
+    await sql`DELETE FROM "drizzle"."__drizzle_migrations" WHERE "hash" = ${combinedHash}`;
+    await sql`
+      INSERT INTO "drizzle"."__drizzle_migrations" ("hash", "created_at")
+      VALUES (${ORIGINAL_MANAGED_PROFILES_HASH}, 1788296836732)
+    `;
+    await sql`ALTER TABLE "issue_relations" DROP COLUMN "created_by_actor_type"`;
+
+    expect(await inspectMigrations(database.connectionString)).toMatchObject({
+      status: "needsMigrations",
+      pendingMigrations: [MIGRATION_FILE],
+    });
+
+    await expect(applyPendingMigrations(database.connectionString)).resolves.toBeUndefined();
+    expect(await inspectMigrations(database.connectionString)).toMatchObject({ status: "upToDate" });
+
+    const [journalEntry] = await sql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM "drizzle"."__drizzle_migrations"
+      WHERE "hash" = ${combinedHash}
+    `;
+    expect(journalEntry?.count).toBe(1);
+    const [actorColumn] = await sql<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'issue_relations'
+          AND column_name = 'created_by_actor_type'
+      ) AS exists
+    `;
+    expect(actorColumn?.exists).toBe(true);
+  }, 240_000);
+
   it("replays without laundering deleted actors into system recovery provenance", async () => {
     const database = await startEmbeddedPostgresTestDatabase("relation-actor-migration-");
     cleanups.push(database.cleanup);
