@@ -10437,11 +10437,12 @@ export function issueRoutes(
       }
       return true;
     };
-    const persistReviewTransitionActivity = async (
+    const persistIssueUpdateActivityTransactionally = async (
       tx: Parameters<typeof svc.update>[2],
       updated: NonNullable<Awaited<ReturnType<typeof svc.update>>>,
+      shouldPersist: boolean,
     ) => {
-      if (!persistReviewActivityTransactionally) return;
+      if (!shouldPersist) return;
       const changes = updated.changes ?? {};
       if (Object.keys(changes).length === 0 && !reviewInteractionId) return;
       const previous = Object.fromEntries(
@@ -10518,6 +10519,8 @@ export function issueRoutes(
     const requiresLockedWatchdogRevalidation =
       transactionalWatchdogScope.kind === "watchdog"
       && transactionalWatchdogScope.watchdogIssueId !== existing.id;
+    const persistIssueActivityTransactionally =
+      persistReviewActivityTransactionally || requiresLockedWatchdogRevalidation;
     const shouldUseTransactionalIssueUpdate =
       Boolean(decision)
       || shouldRelayStop
@@ -10582,7 +10585,16 @@ export function issueRoutes(
             stopRelayResult.value = await svc.addStopRelayCommentIfNeeded(updated, tx);
           }
 
-          await persistReviewTransitionActivity(tx, updated);
+          // A watchdog's mutation allowance is counted from issue.updated
+          // activity while the run/subtree locks are held. Persist every
+          // watchdog PATCH receipt before this transaction releases those
+          // locks, otherwise a concurrent PATCH can revalidate against a
+          // committed issue row whose consumed mutation is not visible yet.
+          await persistIssueUpdateActivityTransactionally(
+            tx,
+            updated,
+            persistIssueActivityTransactionally,
+          );
 
           return updated;
         });
@@ -10770,7 +10782,7 @@ export function issueRoutes(
         activeRecoveryAction: null,
       };
     }
-    if (!persistReviewActivityTransactionally) await logActivity(db, {
+    if (!persistIssueActivityTransactionally) await logActivity(db, {
       companyId: issue.companyId,
       actorType: actor.actorType,
       actorId: actor.actorId,

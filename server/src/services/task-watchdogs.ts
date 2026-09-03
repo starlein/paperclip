@@ -35,6 +35,7 @@ const TASK_WATCHDOG_LIVE_RUN_STATUSES = ["queued", "running", "scheduled_retry"]
 const TASK_WATCHDOG_WAKE_REQUEST_STATUSES = ["queued", "deferred_issue_execution"] as const;
 const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
   "issue.updated",
+  "issue.comment_added",
   "issue.approval_linked",
   "issue.approval_unlinked",
   "issue.document_created",
@@ -58,6 +59,7 @@ const TASK_WATCHDOG_SOURCE_STATE_ACTIVITY_ACTIONS = [
 ] as const;
 const TASK_WATCHDOG_COMMIT_ORDERED_ACTIVITY_ACTIONS = [
   "issue.updated",
+  "issue.comment_added",
   "issue.document_created",
   "issue.document_updated",
   "issue.document_upserted",

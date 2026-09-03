@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -344,11 +344,12 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
   }
 
   async function seedWatchdogMutationWithStaleOwnership(input: {
-    sourceStatus: "in_progress" | "done" | "cancelled";
+    sourceStatus: "in_progress" | "blocked" | "done" | "cancelled";
     sourceChild?: boolean;
     preexistingWatchdogBlocker?: boolean;
     sourcePendingApproval?: boolean;
     preexistingResolvedBlocker?: boolean;
+    sourceUnresolvedBlocker?: boolean;
   }) {
     const companyId = await seedCompany();
     const ownerAgentId = await seedAgent(companyId, { name: "Stopped owner" });
@@ -374,6 +375,20 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       originKind: "task_watchdog",
       originId: sourceIssueId,
     });
+    const unresolvedBlockerIssueId = input.sourceUnresolvedBlocker
+      ? await seedIssue(companyId, {
+          title: "Unresolved source blocker",
+          status: "in_progress",
+        })
+      : null;
+    if (unresolvedBlockerIssueId) {
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: unresolvedBlockerIssueId,
+        relatedIssueId: sourceIssueId,
+        type: "blocks",
+      });
+    }
     let sourceApprovalId: string | null = null;
     if (input.sourcePendingApproval) {
       sourceApprovalId = randomUUID();
@@ -458,6 +473,7 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       preexistingWatchdogBlocker: input.preexistingWatchdogBlocker === true,
       sourceApprovalId,
       resolvedBlockerIssueId,
+      unresolvedBlockerIssueId,
       watchdogTriggeredAt,
       watchdogRunCreatedAt,
     };
@@ -928,6 +944,89 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         eq(activityLog.runId, fixture.watchdogRunId),
       ));
     expect(ownActivities).toHaveLength(3);
+  });
+
+  it("commits each watchdog PATCH activity before another recovery mutation revalidates", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    const first = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+
+    const second = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "watchdog-recovery" });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+
+    const concurrent = await Promise.all([
+      request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ priority: "critical" }),
+      request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ billingCode: "must-not-commit" }),
+    ]);
+    expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
+
+    const ownActivities = await db
+      .select({ runId: activityLog.runId })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.entityId, fixture.sourceIssueId),
+        eq(activityLog.action, "issue.updated"),
+        eq(activityLog.runId, fixture.watchdogRunId),
+      ));
+    expect(ownActivities).toHaveLength(3);
+  });
+
+  it("rolls back a watchdog PATCH when its locked activity receipt cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const constraintName = `watchdog_activity_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (run_id IS DISTINCT FROM '${fixture.watchdogRunId}'::uuid OR action <> 'issue.updated')`,
+    ));
+
+    try {
+      const response = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ priority: "high" });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const [source] = await db
+        .select({ priority: issues.priority })
+        .from(issues)
+        .where(eq(issues.id, fixture.sourceIssueId));
+      expect(source?.priority).toBe("medium");
+    } finally {
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
+  it("rejects watchdog recovery after a newer external comment on the watched source", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "blocked",
+      sourceUnresolvedBlocker: true,
+    });
+    const boardApp = createApp(fixture.companyId);
+
+    const comment = await request(boardApp)
+      .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+      .send({ body: "New operator evidence must invalidate the older recovery snapshot." });
+    expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+
+    const [source] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.status).toBe("blocked");
+
+    const response = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
   });
 
   it("rejects recovery provenance superseded by a later user source transition", async () => {
