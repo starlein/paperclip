@@ -65,6 +65,13 @@ type AgentInstructionsBundle = {
   files: AgentInstructionsFileSummary[];
 };
 
+type PreparedManagedBundleReplacement = {
+  adapterConfig: Record<string, unknown>;
+  commit: () => Promise<void>;
+  rollback: () => Promise<void>;
+  finalize: () => Promise<void>;
+};
+
 type BundleState = {
   config: Record<string, unknown>;
   mode: BundleMode | null;
@@ -156,6 +163,13 @@ async function statIfExists(targetPath: string) {
   return fs.stat(targetPath).catch(() => null);
 }
 
+async function lstatIfExists(targetPath: string) {
+  return fs.lstat(targetPath).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+}
+
 function shouldIgnoreInstructionsEntry(entry: { name: string; isDirectory(): boolean; isFile(): boolean }) {
   if (entry.name === "." || entry.name === "..") return true;
   if (entry.isDirectory()) {
@@ -172,12 +186,14 @@ function shouldIgnoreInstructionsEntry(entry: { name: string; isDirectory(): boo
 
 async function listFilesRecursive(
   rootPath: string,
-  options?: { rejectSymlinks?: boolean },
+  options?: { rejectSymlinks?: boolean; strictRead?: boolean },
 ): Promise<string[]> {
   const output: string[] = [];
 
   async function walk(currentPath: string, relativeDir: string) {
-    const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
+    const entries = options?.strictRead
+      ? await fs.readdir(currentPath, { withFileTypes: true })
+      : await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (shouldIgnoreInstructionsEntry(entry)) continue;
       const absolutePath = path.join(currentPath, entry.name);
@@ -461,6 +477,61 @@ export function syncInstructionsBundleConfigFromFilePath(
 }
 
 export function agentInstructionsService() {
+  async function readEntryFile(agent: AgentLike, options?: {
+    rejectSymlinks?: boolean;
+    strictRead?: boolean;
+  }): Promise<{
+    content: string;
+    entryFile: string;
+    warnings: string[];
+  }> {
+    const state = deriveBundleState(agent);
+    if (!state.rootPath) {
+      const content = asString(state.config[PROMPT_KEY]);
+      if (content !== null) {
+        return { content, entryFile: state.entryFile, warnings: state.warnings };
+      }
+      if (options?.strictRead) {
+        throw notFound(`Instructions entry file does not exist: ${state.entryFile}`);
+      }
+      return { content: "", entryFile: state.entryFile, warnings: state.warnings };
+    }
+
+    const rootStat = await lstatIfExists(state.rootPath);
+    if (options?.rejectSymlinks && rootStat?.isSymbolicLink()) {
+      throw unprocessable("Instructions root may not be a symlink");
+    }
+    if (!rootStat?.isDirectory()) {
+      if (options?.strictRead) {
+        throw notFound(`Instructions root does not exist: ${state.rootPath}`);
+      }
+      return { content: "", entryFile: state.entryFile, warnings: state.warnings };
+    }
+
+    const pathParts = normalizeRelativeFilePath(state.entryFile).split("/");
+    let currentPath = state.rootPath;
+    for (const [index, pathPart] of pathParts.entries()) {
+      currentPath = path.join(currentPath, pathPart);
+      const currentStat = await lstatIfExists(currentPath);
+      if (options?.rejectSymlinks && currentStat?.isSymbolicLink()) {
+        throw unprocessable(`Instructions entry file may not contain symlinks: ${state.entryFile}`);
+      }
+      const isEntry = index === pathParts.length - 1;
+      if (!currentStat || (isEntry ? !currentStat.isFile() : !currentStat.isDirectory())) {
+        if (options?.strictRead) {
+          throw notFound(`Instructions entry file does not exist: ${state.entryFile}`);
+        }
+        return { content: "", entryFile: state.entryFile, warnings: state.warnings };
+      }
+    }
+
+    return {
+      content: await fs.readFile(currentPath, "utf8"),
+      entryFile: state.entryFile,
+      warnings: state.warnings,
+    };
+  }
+
   async function getBundle(agent: AgentLike): Promise<AgentInstructionsBundle> {
     const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
     if (!state.rootPath) return toBundle(agent, state, []);
@@ -662,7 +733,10 @@ export function agentInstructionsService() {
     return { bundle, adapterConfig };
   }
 
-  async function exportFiles(agent: AgentLike, options?: { rejectSymlinks?: boolean }): Promise<{
+  async function exportFiles(agent: AgentLike, options?: {
+    rejectSymlinks?: boolean;
+    strictRead?: boolean;
+  }): Promise<{
     files: Record<string, string>;
     entryFile: string;
     warnings: string[];
@@ -670,6 +744,9 @@ export function agentInstructionsService() {
     const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
     if (state.rootPath) {
       const stat = await statIfExists(state.rootPath);
+      if (options?.strictRead && !stat?.isDirectory()) {
+        throw notFound(`Instructions root does not exist: ${state.rootPath}`);
+      }
       if (stat?.isDirectory()) {
         const relativePaths = await listFilesRecursive(state.rootPath, options);
         const files = Object.fromEntries(await Promise.all(relativePaths.map(async (relativePath) => {
@@ -677,6 +754,9 @@ export function agentInstructionsService() {
           const content = await fs.readFile(absolutePath, "utf8");
           return [relativePath, content] as const;
         })));
+        if (options?.strictRead && files[state.entryFile] === undefined) {
+          throw notFound(`Instructions entry file does not exist: ${state.entryFile}`);
+        }
         if (Object.keys(files).length > 0) {
           return { files, entryFile: state.entryFile, warnings: state.warnings };
         }
@@ -731,8 +811,93 @@ export function agentInstructionsService() {
     return { bundle, adapterConfig };
   }
 
+  async function prepareManagedBundleReplacement(
+    agent: AgentLike,
+    files: Record<string, string>,
+    options?: {
+      clearLegacyPromptTemplate?: boolean;
+      entryFile?: string;
+    },
+  ): Promise<PreparedManagedBundleReplacement> {
+    const rootPath = resolveManagedInstructionsRoot(agent);
+    const parentPath = path.dirname(rootPath);
+    const entryFile = options?.entryFile ? normalizeRelativeFilePath(options.entryFile) : ENTRY_FILE_DEFAULT;
+    await fs.mkdir(parentPath, { recursive: true });
+    const stagingPath = await fs.mkdtemp(path.join(parentPath, `.${path.basename(rootPath)}.tmp-`));
+    const previousPath = `${stagingPath}.previous`;
+
+    try {
+      const normalizedEntries = Object.entries(files).map(([relativePath, content]) => [
+        normalizeRelativeFilePath(relativePath),
+        content,
+      ] as const);
+      for (const [relativePath, content] of normalizedEntries) {
+        const absolutePath = resolvePathWithinRoot(stagingPath, relativePath);
+        await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+        await fs.writeFile(absolutePath, content, "utf8");
+      }
+      if (!normalizedEntries.some(([relativePath]) => relativePath === entryFile)) {
+        await fs.writeFile(resolvePathWithinRoot(stagingPath, entryFile), "", "utf8");
+      }
+    } catch (error) {
+      await fs.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+
+    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), {
+      mode: "managed",
+      rootPath,
+      entryFile,
+      clearLegacyPromptTemplate: options?.clearLegacyPromptTemplate,
+    });
+    let committed = false;
+    let hasPrevious = false;
+
+    return {
+      adapterConfig,
+      async commit() {
+        if (committed) return;
+        try {
+          await fs.rename(rootPath, previousPath);
+          hasPrevious = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        try {
+          await fs.rename(stagingPath, rootPath);
+          committed = true;
+        } catch (error) {
+          if (hasPrevious) {
+            await fs.rename(previousPath, rootPath).catch(() => undefined);
+          }
+          throw error;
+        }
+      },
+      async rollback() {
+        if (!committed) {
+          await fs.rm(stagingPath, { recursive: true, force: true });
+          return;
+        }
+        await fs.rm(rootPath, { recursive: true, force: true });
+        if (hasPrevious) {
+          await fs.rename(previousPath, rootPath);
+        }
+        committed = false;
+      },
+      async finalize() {
+        await Promise.all([
+          fs.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined),
+          fs.rm(previousPath, { recursive: true, force: true }).catch(() => undefined),
+        ]);
+        committed = false;
+        hasPrevious = false;
+      },
+    };
+  }
+
   return {
     getBundle,
+    readEntryFile,
     readFile,
     updateBundle,
     writeFile,
@@ -740,5 +905,6 @@ export function agentInstructionsService() {
     exportFiles,
     ensureManagedBundle: ensureWritableBundle,
     materializeManagedBundle,
+    prepareManagedBundleReplacement,
   };
 }

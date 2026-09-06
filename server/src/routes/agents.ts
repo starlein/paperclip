@@ -104,7 +104,7 @@ import {
   refreshAdapterModels,
   requireServerAdapter,
 } from "../adapters/index.js";
-import { redactEventPayload } from "../redaction.js";
+import { redactEventPayload, redactSensitiveText } from "../redaction.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import {
   HarnessRuntimeRequestResolutionError,
@@ -2433,8 +2433,24 @@ export function agentRoutes(
   function redactRevisionSnapshot(snapshot: unknown): Record<string, unknown> {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return {};
     const record = snapshot as Record<string, unknown>;
+    const instructionsBundle = asRecord(record.instructionsBundle);
+    const instructionFiles = asRecord(instructionsBundle?.files);
+    const redactedInstructionsBundle = instructionsBundle
+      ? {
+          ...instructionsBundle,
+          files: instructionFiles
+            ? Object.fromEntries(
+                Object.entries(instructionFiles).map(([filePath, content]) => [
+                  filePath,
+                  typeof content === "string" ? redactSensitiveText(content) : content,
+                ]),
+              )
+            : instructionsBundle.files,
+        }
+      : record.instructionsBundle;
     return {
       ...record,
+      instructionsBundle: redactedInstructionsBundle,
       adapterConfig: redactEventPayload(
         typeof record.adapterConfig === "object" && record.adapterConfig !== null
           ? (record.adapterConfig as Record<string, unknown>)
@@ -3439,6 +3455,9 @@ export function agentRoutes(
     const rollbackConfig = asRecord(revision.afterConfig);
     if (!rollbackConfig) {
       throw unprocessable("Invalid revision snapshot");
+    }
+    if (Object.prototype.hasOwnProperty.call(rollbackConfig, "instructionsBundle")) {
+      await assertCanManageInstructionsPath(req, existing);
     }
     assertProviderTraceSettingTransition(
       req,

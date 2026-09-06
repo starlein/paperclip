@@ -37,8 +37,13 @@ import {
   syncAgentAdapterEnvBindings,
 } from "./agent-secret-bindings.js";
 import { logActivity } from "./activity-log.js";
+import { agentInstructionsService } from "./agent-instructions.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
-import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
+import {
+  REDACTED_EVENT_VALUE,
+  redactSensitiveText,
+  sanitizeRecord,
+} from "../redaction.js";
 import {
   assertClaudeOAuthBindingInvariant,
   claudeOAuthClaimRejectedError,
@@ -79,11 +84,19 @@ const CONFIG_REVISION_FIELDS = [
 type ConfigRevisionField = (typeof CONFIG_REVISION_FIELDS)[number];
 type AgentConfigSnapshot = Pick<typeof agents.$inferSelect, ConfigRevisionField>;
 
+type InstructionBundleRevisionSnapshot = {
+  entryFile: string;
+  files: Record<string, string>;
+};
+
 interface RevisionMetadata {
   createdByAgentId?: string | null;
   createdByUserId?: string | null;
   source?: string;
   rolledBackFromRevisionId?: string | null;
+  beforeConfigExtension?: Record<string, unknown>;
+  afterConfigExtension?: Record<string, unknown>;
+  changedKeys?: string[];
 }
 
 /**
@@ -111,6 +124,7 @@ interface UpdateAgentOptions {
   allowBuiltInAgentMetadata?: boolean;
   allowPendingApprovalConfigUpdate?: boolean;
   claudeLogin?: ClaudeLoginContext;
+  beforePersist?: () => Promise<void>;
 }
 
 interface CreateAgentOptions {
@@ -193,11 +207,63 @@ function buildConfigSnapshot(
   };
 }
 
+function extendConfigSnapshot(
+  snapshot: AgentConfigSnapshot,
+  extension: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!extension) return { ...snapshot };
+  const sanitizedExtension = sanitizeRecord(extension);
+  const instructionBundle = instructionBundleFromConfigSnapshot(extension);
+  if (instructionBundle) {
+    sanitizedExtension.instructionsBundle = redactInstructionBundleSnapshot(instructionBundle);
+  }
+  return {
+    ...sanitizedExtension,
+    ...snapshot,
+  };
+}
+
 function containsRedactedMarker(value: unknown): boolean {
-  if (value === REDACTED_EVENT_VALUE) return true;
+  if (typeof value === "string") return value.includes(REDACTED_EVENT_VALUE);
   if (Array.isArray(value)) return value.some((item) => containsRedactedMarker(item));
   if (typeof value !== "object" || value === null) return false;
   return Object.values(value as Record<string, unknown>).some((entry) => containsRedactedMarker(entry));
+}
+
+function instructionBundleFromConfigSnapshot(
+  snapshot: unknown,
+): InstructionBundleRevisionSnapshot | null {
+  if (!isPlainRecord(snapshot) || snapshot.instructionsBundle === undefined) return null;
+  if (!isPlainRecord(snapshot.instructionsBundle)) {
+    throw unprocessable("Invalid revision snapshot: instructionsBundle");
+  }
+  const entryFile = snapshot.instructionsBundle.entryFile;
+  const rawFiles = snapshot.instructionsBundle.files;
+  if (typeof entryFile !== "string" || entryFile.length === 0 || !isPlainRecord(rawFiles)) {
+    throw unprocessable("Invalid revision snapshot: instructionsBundle");
+  }
+  const files: Record<string, string> = {};
+  for (const [filePath, content] of Object.entries(rawFiles)) {
+    if (typeof content !== "string") {
+      throw unprocessable("Invalid revision snapshot: instructionsBundle files");
+    }
+    files[filePath] = content;
+  }
+  return { entryFile, files };
+}
+
+function redactInstructionBundleSnapshot(
+  snapshot: InstructionBundleRevisionSnapshot,
+): InstructionBundleRevisionSnapshot {
+  return {
+    entryFile: snapshot.entryFile,
+    files: Object.fromEntries(
+      Object.entries(snapshot.files).map(([filePath, content]) => [
+        filePath,
+        redactSensitiveText(content),
+      ]),
+    ),
+  };
 }
 
 function hasConfigPatchFields(data: Partial<typeof agents.$inferInsert>) {
@@ -738,8 +804,19 @@ export function agentService(db: Db) {
         })
       : null;
 
-    const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
-    const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
+    const explicitRevisionKeys = options?.recordRevision?.changedKeys
+      ?.map((key) => key.trim())
+      .filter((key, index, keys) => key.length > 0 && keys.indexOf(key) === index) ?? [];
+    const shouldRecordRevision = Boolean(options?.recordRevision) && (
+      hasConfigPatchFields(normalizedPatch)
+      || explicitRevisionKeys.length > 0
+    );
+    const beforeConfig = shouldRecordRevision
+      ? extendConfigSnapshot(
+          buildConfigSnapshot(existing),
+          options?.recordRevision?.beforeConfigExtension,
+        )
+      : null;
 
     type AgentUpdateResult = Awaited<ReturnType<typeof getById>>;
     const applyUpdate = async (txDb: Db): Promise<AgentUpdateResult> => {
@@ -775,8 +852,19 @@ export function agentService(db: Db) {
       }
 
       if (shouldRecordRevision && beforeConfig) {
-        const afterConfig = buildConfigSnapshot(normalizedUpdated);
-        const changedKeys = diffConfigSnapshot(beforeConfig, afterConfig);
+        const afterConfig = extendConfigSnapshot(
+          buildConfigSnapshot(normalizedUpdated),
+          options?.recordRevision?.afterConfigExtension,
+        );
+        const changedKeys = [
+          ...new Set([
+            ...diffConfigSnapshot(
+              beforeConfig as unknown as AgentConfigSnapshot,
+              afterConfig as unknown as AgentConfigSnapshot,
+            ),
+            ...explicitRevisionKeys,
+          ]),
+        ];
         if (changedKeys.length > 0) {
           await txDb.insert(agentConfigRevisions).values({
             companyId: normalizedUpdated.companyId,
@@ -798,6 +886,7 @@ export function agentService(db: Db) {
     const transaction = (db as unknown as {
       transaction?: (callback: (tx: unknown) => Promise<AgentUpdateResult>) => Promise<AgentUpdateResult>;
     }).transaction;
+    await options?.beforePersist?.();
     if (typeof transaction !== "function") return applyUpdate(db);
     return transaction.call(db, async (tx) => applyUpdate(tx as unknown as Db));
   }
@@ -1030,73 +1119,117 @@ export function agentService(db: Db) {
     },
 
     activatePendingApproval: async (id: string, approvedPayload?: Record<string, unknown> | null) => {
-      const activatedAgent = await db.transaction(async (tx) => {
-        const txDb = tx as unknown as Db;
-        const existing = await agentService(txDb).getById(id);
-        if (!existing || existing.status !== "pending_approval") return null;
-        const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
-        let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
-        let approvalBindingDecision: ClaudeOAuthBindingInvariantDecision | null = null;
-        if (
-          Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
-          isPlainRecord(patch.adapterConfig)
-        ) {
-          patch.adapterConfig = await secretService(txDb).normalizeAdapterConfigForPersistence(
-            existing.companyId,
-            patch.adapterConfig,
-            { adapterType: (patch.adapterType ?? existing.adapterType) as string },
-          );
-          // The approval activation keeps an existing fixed binding but rejects a
-          // newly introduced binding, because it carries no stored-session claim.
-          approvalBindingDecision = assertClaudeOAuthBindingInvariant({
+      type PreparedPolicy = Awaited<ReturnType<
+        (typeof import("./plugin-managed-agents.js"))["preparePendingManagedAgentPolicyActivation"]
+      >>;
+      const preparedPolicyState: { current: PreparedPolicy } = { current: null };
+      try {
+        const activatedAgent = await db.transaction(async (tx) => {
+          const txDb = tx as unknown as Db;
+          const existing = await agentService(txDb).getById(id);
+          if (!existing || existing.status !== "pending_approval") return null;
+          const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
+          let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
+          let approvalBindingDecision: ClaudeOAuthBindingInvariantDecision | null = null;
+          if (
+            Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
+            isPlainRecord(patch.adapterConfig)
+          ) {
+            patch.adapterConfig = await secretService(txDb).normalizeAdapterConfigForPersistence(
+              existing.companyId,
+              patch.adapterConfig,
+              { adapterType: (patch.adapterType ?? existing.adapterType) as string },
+            );
+            // The approval activation keeps an existing fixed binding but rejects a
+            // newly introduced binding, because it carries no stored-session claim.
+            approvalBindingDecision = assertClaudeOAuthBindingInvariant({
+              adapterType: (patch.adapterType ?? existing.adapterType) as string,
+              nextConfig: patch.adapterConfig,
+              priorConfig: existing.adapterConfig,
+            });
+          }
+          assertPaperclipRunnerOperationalSkillInvariant({
             adapterType: (patch.adapterType ?? existing.adapterType) as string,
-            nextConfig: patch.adapterConfig,
+            nextConfig: Object.prototype.hasOwnProperty.call(patch, "adapterConfig")
+              ? patch.adapterConfig
+              : existing.adapterConfig,
+            priorAdapterType: existing.adapterType,
             priorConfig: existing.adapterConfig,
           });
-        }
-        assertPaperclipRunnerOperationalSkillInvariant({
-          adapterType: (patch.adapterType ?? existing.adapterType) as string,
-          nextConfig: Object.prototype.hasOwnProperty.call(patch, "adapterConfig")
-            ? patch.adapterConfig
-            : existing.adapterConfig,
-          priorAdapterType: existing.adapterType,
-          priorConfig: existing.adapterConfig,
-        });
-        if (patch.permissions !== undefined) {
-          patch.permissions = normalizeAgentPermissions(
-            patch.permissions,
-            (patch.role ?? existing.role) as string,
+          if (patch.permissions !== undefined) {
+            patch.permissions = normalizeAgentPermissions(
+              patch.permissions,
+              (patch.role ?? existing.role) as string,
+            );
+          }
+
+          const { preparePendingManagedAgentPolicyActivation } = await import("./plugin-managed-agents.js");
+          preparedPolicyState.current = await preparePendingManagedAgentPolicyActivation(
+            txDb,
+            existing,
+            isPlainRecord(patch.adapterConfig) ? patch.adapterConfig : existing.adapterConfig,
           );
-        }
-        const updated = await tx
-          .update(agents)
-          .set({ ...patch, status: "idle", updatedAt: new Date() })
-          .where(and(eq(agents.id, id), eq(agents.status, "pending_approval")))
-          .returning()
-          .then((rows) => rows[0] ?? null);
-        if (!updated) return null;
-        if (approvalBindingDecision) {
-          await enforceClaudeOAuthBindingClaim(txDb, {
-            companyId: existing.companyId,
-            decision: approvalBindingDecision,
-            consume: false,
-            environmentId: null,
-          });
-        }
-        await syncAgentSecretBindings(updated, txDb, existing.adapterConfig);
-        const agent = await agentService(txDb).getById(updated.id);
-        if (!agent) {
-          throw notFound("Agent not found");
-        }
-        return agent;
-      });
+          const preparedPolicy = preparedPolicyState.current;
+          if (preparedPolicy) {
+            patch.adapterConfig = preparedPolicy.replacement.adapterConfig;
+            await preparedPolicy.replacement.commit();
+          }
 
-      if (activatedAgent) {
-        return { agent: activatedAgent, activated: true };
+          const updated = await tx
+            .update(agents)
+            .set({ ...patch, status: "idle", updatedAt: new Date() })
+            .where(and(eq(agents.id, id), eq(agents.status, "pending_approval")))
+            .returning()
+            .then((rows) => rows[0] ?? null);
+          if (!updated) {
+            await preparedPolicy?.replacement.rollback();
+            preparedPolicyState.current = null;
+            return null;
+          }
+          if (approvalBindingDecision) {
+            await enforceClaudeOAuthBindingClaim(txDb, {
+              companyId: existing.companyId,
+              decision: approvalBindingDecision,
+              consume: false,
+              environmentId: null,
+            });
+          }
+          await syncAgentSecretBindings(updated, txDb, existing.adapterConfig);
+          if (preparedPolicy) {
+            await logActivity(txDb, {
+              companyId: existing.companyId,
+              actorType: "plugin",
+              actorId: preparedPolicy.marker.pluginId,
+              action: "plugin.managed_agent.company_instruction_policy_reconciled",
+              entityType: "agent",
+              entityId: existing.id,
+              details: {
+                sourcePluginKey: preparedPolicy.marker.pluginKey,
+                managedResourceKey: preparedPolicy.marker.resourceKey,
+                companyImplementationPrCap: preparedPolicy.authoritativeLimit,
+                replacedImplementationPrLimits: preparedPolicy.replacedLimits,
+                activationBoundary: true,
+              },
+            });
+          }
+          const agent = await agentService(txDb).getById(updated.id);
+          if (!agent) {
+            throw notFound("Agent not found");
+          }
+          return agent;
+        });
+
+        await preparedPolicyState.current?.replacement.finalize();
+        if (activatedAgent) {
+          return { agent: activatedAgent, activated: true };
+        }
+
+        const existing = await getById(id);
+        return existing ? { agent: existing, activated: false } : null;
+      } catch (error) {
+        await preparedPolicyState.current?.replacement.rollback();
+        throw error;
       }
-
-      const existing = await getById(id);
-      return existing ? { agent: existing, activated: false } : null;
     },
 
     updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {
@@ -1153,14 +1286,59 @@ export function agentService(db: Db) {
       }
 
       const patch = configPatchFromSnapshot(revision.afterConfig);
-      return updateAgent(id, patch, {
-        recordRevision: {
-          createdByAgentId: actor.agentId ?? null,
-          createdByUserId: actor.userId ?? null,
-          source: "rollback",
-          rolledBackFromRevisionId: revision.id,
-        },
-      });
+      const targetInstructionBundle = instructionBundleFromConfigSnapshot(revision.afterConfig);
+      let beforeInstructionBundle: InstructionBundleRevisionSnapshot | null = null;
+      let preparedInstructionBundle: Awaited<
+        ReturnType<ReturnType<typeof agentInstructionsService>["prepareManagedBundleReplacement"]>
+      > | null = null;
+      if (targetInstructionBundle) {
+        const existing = await getById(id);
+        if (!existing) return null;
+        const exported = await agentInstructionsService().exportFiles(existing, {
+          rejectSymlinks: true,
+          strictRead: true,
+        });
+        beforeInstructionBundle = redactInstructionBundleSnapshot({
+          entryFile: exported.entryFile,
+          files: exported.files,
+        });
+        preparedInstructionBundle = await agentInstructionsService().prepareManagedBundleReplacement(
+          { ...existing, adapterConfig: patch.adapterConfig },
+          targetInstructionBundle.files,
+          {
+            entryFile: targetInstructionBundle.entryFile,
+            clearLegacyPromptTemplate: true,
+          },
+        );
+        patch.adapterConfig = preparedInstructionBundle.adapterConfig;
+      }
+      try {
+        const updated = await updateAgent(id, patch, {
+          beforePersist: preparedInstructionBundle?.commit,
+          recordRevision: {
+            createdByAgentId: actor.agentId ?? null,
+            createdByUserId: actor.userId ?? null,
+            source: "rollback",
+            rolledBackFromRevisionId: revision.id,
+            beforeConfigExtension: beforeInstructionBundle
+              ? { instructionsBundle: beforeInstructionBundle }
+              : undefined,
+            afterConfigExtension: targetInstructionBundle
+              ? { instructionsBundle: targetInstructionBundle }
+              : undefined,
+            changedKeys: targetInstructionBundle ? ["instructionsBundle"] : undefined,
+          },
+        });
+        if (!updated) {
+          await preparedInstructionBundle?.rollback();
+          return null;
+        }
+        await preparedInstructionBundle?.finalize();
+        return updated;
+      } catch (error) {
+        await preparedInstructionBundle?.rollback();
+        throw error;
+      }
     },
 
     createApiKey: async (

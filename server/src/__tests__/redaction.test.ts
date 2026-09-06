@@ -159,6 +159,42 @@ describe("redaction", () => {
     expect(result).not.toContain(jwt);
   });
 
+  it.each([
+    ["Markdown", "- **API key:** review-fixture-opaque-123456", "review-fixture-opaque-123456"],
+    ["YAML", "password: review-fixture-password", "review-fixture-password"],
+    ["YAML case variant", "ToKeN: review-fixture-token", "review-fixture-token"],
+    ["YAML namespaced secret", "service_token: review-fixture-service-token", "review-fixture-service-token"],
+    ["Basic authorization", "Authorization: Basic review-fixture-basic", "review-fixture-basic"],
+    ["opaque authorization", "authorization: review-fixture-opaque", "review-fixture-opaque"],
+    ["dotenv", "SERVICE_TOKEN=review-fixture-dotenv", "review-fixture-dotenv"],
+    ["JSON", '{"accessToken":"review-fixture-json"}', "review-fixture-json"],
+  ])("redacts %s secret fields from instruction text", (_label, input, secret) => {
+    const result = redactSensitiveText(input);
+
+    expect(result).toContain(REDACTED_EVENT_VALUE);
+    expect(result).not.toContain(secret);
+  });
+
+  it("preserves representative safe instruction prose", () => {
+    const input = [
+      "Never commit secrets, credentials, or customer data. Use the token budget carefully.",
+      "token_budget: 200000",
+      "access_token_ttl: 3600",
+      "secret_handling: never paste credentials",
+      "authorization_mode: strict",
+    ].join("\n");
+
+    expect(redactSensitiveText(input)).toBe(input);
+  });
+
+  it("composes bearer and dotenv redaction on a shared line", () => {
+    expect(redactSensitiveText(
+      "Authorization: Bearer live-bearer-token-value OPENAI_API_KEY=paperclip-shell-secret",
+    )).toBe(
+      `Authorization: Bearer ${REDACTED_EVENT_VALUE} OPENAI_API_KEY=${REDACTED_EVENT_VALUE}`,
+    );
+  });
+
   it("redacts inline secrets from command metadata without hiding safe command text", () => {
     const input = {
       command: "custom-acp --token ghp_example_secret env OPENAI_API_KEY=sk-live-example custom-acp",

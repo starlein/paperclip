@@ -46,6 +46,16 @@ const ESCAPED_JSON_SECRET_FIELD_TEXT_RE = new RegExp(
   String.raw`((?:\\")?${SECRET_FIELD_NAME_PATTERN}(?:\\")?\s*:\s*(?:\\"))[^\\\r\n]+((?:\\"))`,
   "gi",
 );
+const FREEFORM_SECRET_FIELD_NAME_PATTERN =
+  String.raw`(?:[A-Za-z0-9]+[-_ ])*(?:api[-_ ]?key|access[-_ ]?token|refresh[-_ ]?token|auth|token|secret|passwd|password|credential|jwt|private[-_ ]?key|cookie|connection[-_ ]?string|browser[-_ ]?code|login[-_ ]?url)`;
+const MARKDOWN_YAML_SECRET_FIELD_TEXT_RE = new RegExp(
+  String.raw`(^[\t ]*(?:(?:[-+*]|\d+[.)])[\t ]+|>[\t ]*)?(?:\*\*|__|` + "`" + String.raw`)?${FREEFORM_SECRET_FIELD_NAME_PATTERN}[\t ]*:(?:\*\*|__|` + "`" + String.raw`)?[\t ]*)[^\r\n]+`,
+  "gim",
+);
+const AUTHORIZATION_FIELD_TEXT_RE = new RegExp(
+  String.raw`(^[\t ]*(?:(?:[-+*]|\d+[.)])[\t ]+|>[\t ]*)?(?:\*\*|__|` + "`" + String.raw`)?authorization[\t ]*:(?![\t ]*(?:\*\*|__|` + "`" + String.raw`)?[\t ]*bearer(?:[\t ]|$))(?:\*\*|__|` + "`" + String.raw`)?[\t ]*)[^\r\n]+`,
+  "gim",
+);
 const SECRET_TEXT_HINTS = [
   "api",
   "key",
@@ -176,7 +186,9 @@ export function redactSensitiveText(input: string): string {
   return redactCommandText(
     input
       .replace(JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
-      .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`),
+      .replace(ESCAPED_JSON_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}$2`)
+      .replace(AUTHORIZATION_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}`)
+      .replace(MARKDOWN_YAML_SECRET_FIELD_TEXT_RE, `$1${REDACTED_EVENT_VALUE}`),
     REDACTED_EVENT_VALUE,
   );
 }
