@@ -234,7 +234,7 @@ describe("agent live run routes", () => {
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     mockIssueService.getByIdentifier.mockResolvedValue({
       id: "issue-1",
       companyId: "company-1",
@@ -312,6 +312,7 @@ describe("agent live run routes", () => {
       agentId: "agent-1",
       status: "succeeded",
     });
+    mockLogActivity.mockResolvedValue(undefined);
     mockQueueRuntimeRequestResolution.mockReturnValue({
       commandId: "command-resolution-1",
     });
@@ -321,6 +322,7 @@ describe("agent live run routes", () => {
     });
     mockProviderTraceStore.getByRun.mockResolvedValue(null);
     mockProviderTraceStore.readExactEntries.mockResolvedValue([]);
+    mockProviderTraceStore.listMetadataForRuns.mockResolvedValue([]);
     mockWorkspaceDiffReprojection.project.mockReturnValue({ turns: [], skipReasons: [] });
     mockWorkspaceDiffReprojection.persist.mockResolvedValue({
       created: 0,
