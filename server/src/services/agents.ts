@@ -37,8 +37,13 @@ import {
   syncAgentAdapterEnvBindings,
 } from "./agent-secret-bindings.js";
 import { logActivity } from "./activity-log.js";
+import { agentInstructionsService } from "./agent-instructions.js";
 import { normalizeAgentPermissions } from "./agent-permissions.js";
-import { REDACTED_EVENT_VALUE, sanitizeRecord } from "../redaction.js";
+import {
+  REDACTED_EVENT_VALUE,
+  redactSensitiveText,
+  sanitizeRecord,
+} from "../redaction.js";
 import {
   assertClaudeOAuthBindingInvariant,
   claudeOAuthClaimRejectedError,
@@ -78,6 +83,11 @@ const CONFIG_REVISION_FIELDS = [
 
 type ConfigRevisionField = (typeof CONFIG_REVISION_FIELDS)[number];
 type AgentConfigSnapshot = Pick<typeof agents.$inferSelect, ConfigRevisionField>;
+
+type InstructionBundleRevisionSnapshot = {
+  entryFile: string;
+  files: Record<string, string>;
+};
 
 interface RevisionMetadata {
   createdByAgentId?: string | null;
@@ -201,17 +211,58 @@ function extendConfigSnapshot(
   extension: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   if (!extension) return { ...snapshot };
+  const sanitizedExtension = sanitizeRecord(extension);
+  const instructionBundle = instructionBundleFromConfigSnapshot(extension);
+  if (instructionBundle) {
+    sanitizedExtension.instructionsBundle = redactInstructionBundleSnapshot(instructionBundle);
+  }
   return {
-    ...sanitizeRecord(extension),
+    ...sanitizedExtension,
     ...snapshot,
   };
 }
 
 function containsRedactedMarker(value: unknown): boolean {
-  if (value === REDACTED_EVENT_VALUE) return true;
+  if (typeof value === "string") return value.includes(REDACTED_EVENT_VALUE);
   if (Array.isArray(value)) return value.some((item) => containsRedactedMarker(item));
   if (typeof value !== "object" || value === null) return false;
   return Object.values(value as Record<string, unknown>).some((entry) => containsRedactedMarker(entry));
+}
+
+function instructionBundleFromConfigSnapshot(
+  snapshot: unknown,
+): InstructionBundleRevisionSnapshot | null {
+  if (!isPlainRecord(snapshot) || snapshot.instructionsBundle === undefined) return null;
+  if (!isPlainRecord(snapshot.instructionsBundle)) {
+    throw unprocessable("Invalid revision snapshot: instructionsBundle");
+  }
+  const entryFile = snapshot.instructionsBundle.entryFile;
+  const rawFiles = snapshot.instructionsBundle.files;
+  if (typeof entryFile !== "string" || entryFile.length === 0 || !isPlainRecord(rawFiles)) {
+    throw unprocessable("Invalid revision snapshot: instructionsBundle");
+  }
+  const files: Record<string, string> = {};
+  for (const [filePath, content] of Object.entries(rawFiles)) {
+    if (typeof content !== "string") {
+      throw unprocessable("Invalid revision snapshot: instructionsBundle files");
+    }
+    files[filePath] = content;
+  }
+  return { entryFile, files };
+}
+
+function redactInstructionBundleSnapshot(
+  snapshot: InstructionBundleRevisionSnapshot,
+): InstructionBundleRevisionSnapshot {
+  return {
+    entryFile: snapshot.entryFile,
+    files: Object.fromEntries(
+      Object.entries(snapshot.files).map(([filePath, content]) => [
+        filePath,
+        redactSensitiveText(content),
+      ]),
+    ),
+  };
 }
 
 function hasConfigPatchFields(data: Partial<typeof agents.$inferInsert>) {
@@ -1189,12 +1240,43 @@ export function agentService(db: Db) {
       }
 
       const patch = configPatchFromSnapshot(revision.afterConfig);
+      const targetInstructionBundle = instructionBundleFromConfigSnapshot(revision.afterConfig);
+      let beforeInstructionBundle: InstructionBundleRevisionSnapshot | null = null;
+      if (targetInstructionBundle) {
+        const existing = await getById(id);
+        if (!existing) return null;
+        const exported = await agentInstructionsService().exportFiles(existing, {
+          rejectSymlinks: true,
+          strictRead: true,
+        });
+        beforeInstructionBundle = redactInstructionBundleSnapshot({
+          entryFile: exported.entryFile,
+          files: exported.files,
+        });
+        const materialized = await agentInstructionsService().materializeManagedBundle(
+          { ...existing, adapterConfig: patch.adapterConfig },
+          targetInstructionBundle.files,
+          {
+            entryFile: targetInstructionBundle.entryFile,
+            replaceExisting: true,
+            clearLegacyPromptTemplate: true,
+          },
+        );
+        patch.adapterConfig = materialized.adapterConfig;
+      }
       return updateAgent(id, patch, {
         recordRevision: {
           createdByAgentId: actor.agentId ?? null,
           createdByUserId: actor.userId ?? null,
           source: "rollback",
           rolledBackFromRevisionId: revision.id,
+          beforeConfigExtension: beforeInstructionBundle
+            ? { instructionsBundle: beforeInstructionBundle }
+            : undefined,
+          afterConfigExtension: targetInstructionBundle
+            ? { instructionsBundle: targetInstructionBundle }
+            : undefined,
+          changedKeys: targetInstructionBundle ? ["instructionsBundle"] : undefined,
         },
       });
     },

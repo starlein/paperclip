@@ -542,6 +542,16 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
           },
         },
       });
+
+      const rolledBack = await agentService(db).rollbackConfigRevision(
+        created.agentId!,
+        prewriteRevisions[0]!.id,
+        {},
+      );
+      expect(rolledBack).not.toBeNull();
+      const restored = await fs.readFile(instructionsPath, "utf8");
+      expect(restored).toContain("at most two open implementation PRs");
+      expect(restored).not.toContain("at most 5 open implementation PRs");
     } finally {
       if (previousHome === undefined) delete process.env.PAPERCLIP_HOME;
       else process.env.PAPERCLIP_HOME = previousHome;
@@ -574,6 +584,86 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       const content = await fs.readFile(instructionsPath, "utf8");
       expect(content).toContain("at most 5 open implementation PRs");
       expect(content).not.toContain("at most 2 open implementation PRs");
+    });
+  });
+
+  it("does not rewrite pending managed-agent instructions after the hire request", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+        requireApproval: true,
+      });
+      const ceo = await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      expect(created.agent?.status).toBe("pending_approval");
+      const candidatePath = created.agent?.adapterConfig.instructionsFilePath as string;
+      await expect(fs.readFile(candidatePath, "utf8")).resolves.toContain(
+        "at most 5 open implementation PRs",
+      );
+
+      const ceoPath = ceo.adapterConfig.instructionsFilePath as string;
+      await fs.writeFile(
+        ceoPath,
+        "Enforce at most 6 open implementation PRs per repository.",
+        "utf8",
+      );
+      await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+
+      const preserved = await fs.readFile(candidatePath, "utf8");
+      expect(preserved).toContain("at most 5 open implementation PRs");
+      expect(preserved).not.toContain("at most 6 open implementation PRs");
+    });
+  });
+
+  it("redacts inline secrets from stored instruction-bundle revisions", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+      });
+      await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      const instructionsPath = created.agent?.adapterConfig.instructionsFilePath as string;
+      await fs.writeFile(
+        instructionsPath,
+        [
+          "Drive each repository to at most two open implementation PRs.",
+          "OPENAI_API_KEY=sk-review-fixture-secret",
+        ].join("\n"),
+        "utf8",
+      );
+
+      await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      const revisions = await db
+        .select()
+        .from(agentConfigRevisions)
+        .where(eq(
+          agentConfigRevisions.source,
+          "plugin:paperclip.managed-agents-test:company-instruction-policy:prewrite-snapshot",
+        ));
+      const serialized = JSON.stringify(revisions[0]?.afterConfig);
+      expect(serialized).toContain("***REDACTED***");
+      expect(serialized).not.toContain("sk-review-fixture-secret");
+      await expect(
+        agentService(db).rollbackConfigRevision(created.agentId!, revisions[0]!.id, {}),
+      ).rejects.toThrow("Cannot roll back a revision that contains redacted secret values");
     });
   });
 
@@ -622,6 +712,31 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       const companyAgents = await db.select().from(agents).where(eq(agents.companyId, companyId));
       expect(companyAgents).toHaveLength(1);
       await expect(db.select().from(pluginEntities)).resolves.toHaveLength(0);
+    });
+  });
+
+  it("keeps read-only managed lookups available when CEO instructions are unreadable", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+      });
+      const ceo = await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      await fs.rm(ceo.adapterConfig.instructionsFilePath as string);
+
+      const resolved = await services.agents.managedGet({
+        companyId,
+        agentKey: "release-devops",
+      });
+      expect(resolved.status).toBe("resolved");
+      expect(resolved.agentId).toBe(created.agentId);
+      expect(resolved.defaultDrift).toBeNull();
     });
   });
 

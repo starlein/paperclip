@@ -17,6 +17,7 @@ import { agentService } from "./agents.js";
 import { approvalService } from "./approvals.js";
 import { logActivity } from "./activity-log.js";
 import { agentInstructionsService } from "./agent-instructions.js";
+import { redactSensitiveText } from "../redaction.js";
 import {
   authoritativeImplementationPrLimit,
   reconcileManagedAgentInstructionPolicy,
@@ -252,7 +253,12 @@ export function pluginManagedAgentService(
     return {
       instructionsBundle: {
         entryFile,
-        files,
+        files: Object.fromEntries(
+          Object.entries(files).map(([filePath, content]) => [
+            filePath,
+            redactSensitiveText(content),
+          ]),
+        ),
       },
     };
   }
@@ -264,6 +270,7 @@ export function pluginManagedAgentService(
     companyInstructions: string | null,
   ) {
     if (agent.role === "ceo") return agent;
+    if (agent.status === "pending_approval") return agent;
     if (!companyInstructions) return agent;
 
     const bundle = await instructions.getBundle(agent);
@@ -492,6 +499,7 @@ export function pluginManagedAgentService(
     const updated = await agentSvc.update(agent.id, {
       adapterConfig: materialized.adapterConfig,
     }, {
+      allowPendingApprovalConfigUpdate: agent.status === "pending_approval",
       recordRevision: {
         source: `plugin:${optionsForRevisionSource()}:managed-agent-instructions`,
       },
@@ -544,7 +552,7 @@ export function pluginManagedAgentService(
     agent: Agent | null,
     status: PluginManagedAgentResolution["status"],
     approvalId?: string | null,
-    companyInstructions: string | null = null,
+    companyInstructions?: string | null,
   ): Promise<PluginManagedAgentResolution> {
     return {
       pluginKey: options.pluginKey,
@@ -555,12 +563,14 @@ export function pluginManagedAgentService(
       agent,
       status,
       approvalId: approvalId ?? null,
-      defaultDrift: await managedInstructionDefaultDrift(
-        companyId,
-        agent,
-        declaration,
-        companyInstructions,
-      ),
+      defaultDrift: companyInstructions === undefined
+        ? null
+        : await managedInstructionDefaultDrift(
+            companyId,
+            agent,
+            declaration,
+            companyInstructions,
+          ),
     };
   }
 
@@ -736,7 +746,7 @@ export function pluginManagedAgentService(
         return resolution(companyId, declaration, null, "missing");
       }
       const companyInstructions = resolvedCompanyInstructions === undefined
-        ? await companyInstructionPolicy(companyId)
+        ? await companyInstructionPolicy(companyId).catch(() => undefined)
         : resolvedCompanyInstructions;
       return resolution(
         companyId,
