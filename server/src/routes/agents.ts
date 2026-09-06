@@ -3456,6 +3456,9 @@ export function agentRoutes(
     if (!rollbackConfig) {
       throw unprocessable("Invalid revision snapshot");
     }
+    if (Object.prototype.hasOwnProperty.call(rollbackConfig, "instructionsBundle")) {
+      await assertCanManageInstructionsPath(req, existing);
+    }
     assertProviderTraceSettingTransition(
       req,
       rollbackConfig.runtimeConfig,

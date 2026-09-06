@@ -124,6 +124,7 @@ interface UpdateAgentOptions {
   allowBuiltInAgentMetadata?: boolean;
   allowPendingApprovalConfigUpdate?: boolean;
   claudeLogin?: ClaudeLoginContext;
+  beforePersist?: () => Promise<void>;
 }
 
 interface CreateAgentOptions {
@@ -885,6 +886,7 @@ export function agentService(db: Db) {
     const transaction = (db as unknown as {
       transaction?: (callback: (tx: unknown) => Promise<AgentUpdateResult>) => Promise<AgentUpdateResult>;
     }).transaction;
+    await options?.beforePersist?.();
     if (typeof transaction !== "function") return applyUpdate(db);
     return transaction.call(db, async (tx) => applyUpdate(tx as unknown as Db));
   }
@@ -1242,6 +1244,9 @@ export function agentService(db: Db) {
       const patch = configPatchFromSnapshot(revision.afterConfig);
       const targetInstructionBundle = instructionBundleFromConfigSnapshot(revision.afterConfig);
       let beforeInstructionBundle: InstructionBundleRevisionSnapshot | null = null;
+      let preparedInstructionBundle: Awaited<
+        ReturnType<ReturnType<typeof agentInstructionsService>["prepareManagedBundleReplacement"]>
+      > | null = null;
       if (targetInstructionBundle) {
         const existing = await getById(id);
         if (!existing) return null;
@@ -1253,32 +1258,43 @@ export function agentService(db: Db) {
           entryFile: exported.entryFile,
           files: exported.files,
         });
-        const materialized = await agentInstructionsService().materializeManagedBundle(
+        preparedInstructionBundle = await agentInstructionsService().prepareManagedBundleReplacement(
           { ...existing, adapterConfig: patch.adapterConfig },
           targetInstructionBundle.files,
           {
             entryFile: targetInstructionBundle.entryFile,
-            replaceExisting: true,
             clearLegacyPromptTemplate: true,
           },
         );
-        patch.adapterConfig = materialized.adapterConfig;
+        patch.adapterConfig = preparedInstructionBundle.adapterConfig;
       }
-      return updateAgent(id, patch, {
-        recordRevision: {
-          createdByAgentId: actor.agentId ?? null,
-          createdByUserId: actor.userId ?? null,
-          source: "rollback",
-          rolledBackFromRevisionId: revision.id,
-          beforeConfigExtension: beforeInstructionBundle
-            ? { instructionsBundle: beforeInstructionBundle }
-            : undefined,
-          afterConfigExtension: targetInstructionBundle
-            ? { instructionsBundle: targetInstructionBundle }
-            : undefined,
-          changedKeys: targetInstructionBundle ? ["instructionsBundle"] : undefined,
-        },
-      });
+      try {
+        const updated = await updateAgent(id, patch, {
+          beforePersist: preparedInstructionBundle?.commit,
+          recordRevision: {
+            createdByAgentId: actor.agentId ?? null,
+            createdByUserId: actor.userId ?? null,
+            source: "rollback",
+            rolledBackFromRevisionId: revision.id,
+            beforeConfigExtension: beforeInstructionBundle
+              ? { instructionsBundle: beforeInstructionBundle }
+              : undefined,
+            afterConfigExtension: targetInstructionBundle
+              ? { instructionsBundle: targetInstructionBundle }
+              : undefined,
+            changedKeys: targetInstructionBundle ? ["instructionsBundle"] : undefined,
+          },
+        });
+        if (!updated) {
+          await preparedInstructionBundle?.rollback();
+          return null;
+        }
+        await preparedInstructionBundle?.finalize();
+        return updated;
+      } catch (error) {
+        await preparedInstructionBundle?.rollback();
+        throw error;
+      }
     },
 
     createApiKey: async (

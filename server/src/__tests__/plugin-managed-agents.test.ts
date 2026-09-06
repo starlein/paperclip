@@ -561,6 +561,72 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     }
   });
 
+  it("keeps agent config and instruction files unchanged when instruction rollback validation fails", async () => {
+    await withTempInstructionsHome(async () => {
+      const pluginManifest = releaseDevopsManifest();
+      const { companyId, services } = await seedCompanyAndPlugin({ manifest: pluginManifest });
+      await createCeoWithPolicy(
+        companyId,
+        "Enforce a WIP limit of at most 5 open implementation PRs per repository.",
+      );
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      const instructionsPath = created.agent?.adapterConfig.instructionsFilePath as string;
+      await fs.writeFile(
+        instructionsPath,
+        "Drive each repository to at most two open implementation PRs.",
+        "utf8",
+      );
+      await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+
+      const [revision] = await db
+        .select()
+        .from(agentConfigRevisions)
+        .where(eq(
+          agentConfigRevisions.source,
+          "plugin:paperclip.managed-agents-test:company-instruction-policy:prewrite-snapshot",
+        ));
+      expect(revision).toBeDefined();
+      await db
+        .update(agentConfigRevisions)
+        .set({
+          afterConfig: {
+            ...(revision!.afterConfig as Record<string, unknown>),
+            reportsTo: randomUUID(),
+          },
+        })
+        .where(eq(agentConfigRevisions.id, revision!.id));
+      const beforeAgent = await agentService(db).getById(created.agentId!);
+      const beforeRevisionCount = await db.select().from(agentConfigRevisions);
+
+      await expect(
+        agentService(db).rollbackConfigRevision(created.agentId!, revision!.id, {}),
+      ).rejects.toThrow("Manager not found");
+
+      await expect(fs.readFile(instructionsPath, "utf8")).resolves.toContain(
+        "at most 5 open implementation PRs",
+      );
+      await expect(fs.readFile(instructionsPath, "utf8")).resolves.not.toContain(
+        "at most two open implementation PRs",
+      );
+      const agentDirectoryEntries = await fs.readdir(path.dirname(path.dirname(instructionsPath)));
+      expect(agentDirectoryEntries.filter((entry) => entry.startsWith(".instructions.tmp-"))).toEqual([]);
+      const afterAgent = await agentService(db).getById(created.agentId!);
+      expect(afterAgent).toMatchObject({
+        reportsTo: beforeAgent?.reportsTo,
+        adapterConfig: beforeAgent?.adapterConfig,
+      });
+      await expect(db.select().from(agentConfigRevisions)).resolves.toHaveLength(
+        beforeRevisionCount.length,
+      );
+    });
+  });
+
   it("ignores an unapproved CEO candidate when resolving company policy", async () => {
     await withTempInstructionsHome(async () => {
       const { companyId, services } = await seedCompanyAndPlugin({
@@ -642,7 +708,19 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
         instructionsPath,
         [
           "Drive each repository to at most two open implementation PRs.",
+          "- **API key:** review-fixture-opaque-123456",
           "OPENAI_API_KEY=sk-review-fixture-secret",
+          '{"accessToken":"review-fixture-json"}',
+          "Never commit secrets, credentials, or customer data.",
+        ].join("\n"),
+        "utf8",
+      );
+      await fs.writeFile(
+        path.join(path.dirname(instructionsPath), "operations.yml"),
+        [
+          "password: review-fixture-password",
+          "ToKeN: review-fixture-token",
+          "safe_note: preserve this secondary-file guidance",
         ].join("\n"),
         "utf8",
       );
@@ -661,6 +739,19 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       const serialized = JSON.stringify(revisions[0]?.afterConfig);
       expect(serialized).toContain("***REDACTED***");
       expect(serialized).not.toContain("sk-review-fixture-secret");
+      expect(serialized).not.toContain("review-fixture-opaque-123456");
+      expect(serialized).not.toContain("review-fixture-json");
+      expect(serialized).not.toContain("review-fixture-password");
+      expect(serialized).not.toContain("review-fixture-token");
+      expect(serialized).toContain("Never commit secrets, credentials, or customer data.");
+      expect(serialized).toContain("preserve this secondary-file guidance");
+      expect(revisions[0]?.afterConfig).toMatchObject({
+        instructionsBundle: {
+          files: {
+            "operations.yml": expect.stringContaining("***REDACTED***"),
+          },
+        },
+      });
       await expect(
         agentService(db).rollbackConfigRevision(created.agentId!, revisions[0]!.id, {}),
       ).rejects.toThrow("Cannot roll back a revision that contains redacted secret values");

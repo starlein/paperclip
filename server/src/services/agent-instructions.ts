@@ -65,6 +65,13 @@ type AgentInstructionsBundle = {
   files: AgentInstructionsFileSummary[];
 };
 
+type PreparedManagedBundleReplacement = {
+  adapterConfig: Record<string, unknown>;
+  commit: () => Promise<void>;
+  rollback: () => Promise<void>;
+  finalize: () => Promise<void>;
+};
+
 type BundleState = {
   config: Record<string, unknown>;
   mode: BundleMode | null;
@@ -742,6 +749,90 @@ export function agentInstructionsService() {
     return { bundle, adapterConfig };
   }
 
+  async function prepareManagedBundleReplacement(
+    agent: AgentLike,
+    files: Record<string, string>,
+    options?: {
+      clearLegacyPromptTemplate?: boolean;
+      entryFile?: string;
+    },
+  ): Promise<PreparedManagedBundleReplacement> {
+    const rootPath = resolveManagedInstructionsRoot(agent);
+    const parentPath = path.dirname(rootPath);
+    const entryFile = options?.entryFile ? normalizeRelativeFilePath(options.entryFile) : ENTRY_FILE_DEFAULT;
+    await fs.mkdir(parentPath, { recursive: true });
+    const stagingPath = await fs.mkdtemp(path.join(parentPath, `.${path.basename(rootPath)}.tmp-`));
+    const previousPath = `${stagingPath}.previous`;
+
+    try {
+      const normalizedEntries = Object.entries(files).map(([relativePath, content]) => [
+        normalizeRelativeFilePath(relativePath),
+        content,
+      ] as const);
+      for (const [relativePath, content] of normalizedEntries) {
+        const absolutePath = resolvePathWithinRoot(stagingPath, relativePath);
+        await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+        await fs.writeFile(absolutePath, content, "utf8");
+      }
+      if (!normalizedEntries.some(([relativePath]) => relativePath === entryFile)) {
+        await fs.writeFile(resolvePathWithinRoot(stagingPath, entryFile), "", "utf8");
+      }
+    } catch (error) {
+      await fs.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
+
+    const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), {
+      mode: "managed",
+      rootPath,
+      entryFile,
+      clearLegacyPromptTemplate: options?.clearLegacyPromptTemplate,
+    });
+    let committed = false;
+    let hasPrevious = false;
+
+    return {
+      adapterConfig,
+      async commit() {
+        if (committed) return;
+        try {
+          await fs.rename(rootPath, previousPath);
+          hasPrevious = true;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        try {
+          await fs.rename(stagingPath, rootPath);
+          committed = true;
+        } catch (error) {
+          if (hasPrevious) {
+            await fs.rename(previousPath, rootPath).catch(() => undefined);
+          }
+          throw error;
+        }
+      },
+      async rollback() {
+        if (!committed) {
+          await fs.rm(stagingPath, { recursive: true, force: true });
+          return;
+        }
+        await fs.rm(rootPath, { recursive: true, force: true });
+        if (hasPrevious) {
+          await fs.rename(previousPath, rootPath);
+        }
+        committed = false;
+      },
+      async finalize() {
+        await Promise.all([
+          fs.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined),
+          fs.rm(previousPath, { recursive: true, force: true }).catch(() => undefined),
+        ]);
+        committed = false;
+        hasPrevious = false;
+      },
+    };
+  }
+
   return {
     getBundle,
     readFile,
@@ -751,5 +842,6 @@ export function agentInstructionsService() {
     exportFiles,
     ensureManagedBundle: ensureWritableBundle,
     materializeManagedBundle,
+    prepareManagedBundleReplacement,
   };
 }

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_OPENCODE_LOCAL_MODEL } from "@paperclipai/adapter-opencode-local";
 import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 import { hoistModuleGraph } from "./helpers/hoist-module-graph.js";
+import { forbidden } from "../errors.js";
 
 vi.mock("acpx/runtime", () => ({
   createAcpRuntime: vi.fn(),
@@ -117,6 +118,9 @@ const mockEnsureOpenCodeModelConfiguredAndAvailable = vi.hoisted(() => vi.fn());
 const mockEnvironmentService = vi.hoisted(() => ({
   getById: vi.fn(),
 }));
+const mockChangeConsentGateService = vi.hoisted(() => ({
+  assertConsented: vi.fn(),
+}));
 
 const mockInstanceSettingsService = vi.hoisted(() => ({
   getGeneral: vi.fn(),
@@ -179,6 +183,16 @@ function registerModuleMocks() {
   vi.doMock("../services/environments.js", () => ({
     environmentService: () => mockEnvironmentService,
   }));
+
+  vi.doMock("../services/change-consent-gate.js", async () => {
+    const actual = await vi.importActual<typeof import("../services/change-consent-gate.js")>(
+      "../services/change-consent-gate.js",
+    );
+    return {
+      ...actual,
+      changeConsentGateService: () => mockChangeConsentGateService,
+    };
+  });
 
   vi.doMock("../services/agent-instructions.js", () => ({
     agentInstructionsService: () => mockAgentInstructionsService,
@@ -332,6 +346,7 @@ describe.sequential("agent permission routes", () => {
     mockSyncInstructionsBundleConfigFromFilePath.mockReset();
     mockInstanceSettingsService.getGeneral.mockReset();
     mockEnvironmentService.getById.mockReset();
+    mockChangeConsentGateService.assertConsented.mockReset();
     mockEnsureOpenCodeModelConfiguredAndAvailable.mockReset();
     mockSyncInstructionsBundleConfigFromFilePath.mockImplementation((_agent, config) => config);
     mockGetTelemetryClient.mockReturnValue({ track: vi.fn() });
@@ -396,6 +411,7 @@ describe.sequential("agent permission routes", () => {
     mockInstanceSettingsService.getGeneral.mockResolvedValue({
       censorUsernameInLogs: false,
     });
+    mockChangeConsentGateService.assertConsented.mockResolvedValue(undefined);
     mockLogActivity.mockResolvedValue(undefined);
   });
 
@@ -626,6 +642,120 @@ describe.sequential("agent permission routes", () => {
 
     expect(response.status).toBe(403);
     expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+  });
+
+  it("denies agent-authenticated instruction rollback without accepted consent", async () => {
+    const revisionId = "33333333-3333-4333-8333-333333333333";
+    mockAgentService.getConfigRevision.mockResolvedValue({
+      id: revisionId,
+      afterConfig: {
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        instructionsBundle: {
+          entryFile: "AGENTS.md",
+          files: { "AGENTS.md": "restored instructions" },
+        },
+      },
+    });
+    mockAccessService.decide.mockImplementation(async (input: { scope?: Record<string, unknown> }) => (
+      input.scope?.requiresChangeGrant
+        ? {
+            allowed: false,
+            reason: "deny_missing_consent",
+            explanation: "Accepted consent is required for this suggested change.",
+          }
+        : {
+            allowed: true,
+            reason: "allow_agent_self",
+            explanation: "Agents may update their own ordinary configuration.",
+          }
+    ));
+    mockChangeConsentGateService.assertConsented.mockRejectedValue(
+      forbidden("Accepted consent is required for this suggested change."),
+    );
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const response = await requestApp(app, (baseUrl) => request(baseUrl).post(
+      `/api/agents/${agentId}/config-revisions/${revisionId}/rollback`,
+    ));
+
+    expect(response.status).toBe(403);
+    expect(mockChangeConsentGateService.assertConsented).toHaveBeenCalledWith({
+      companyId,
+      actorAgentId: agentId,
+      actorRunId: "run-1",
+      targetKeys: [`agent:${agentId}:instructions`],
+    });
+    expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+  });
+
+  it("allows agent-authenticated instruction rollback after accepted consent", async () => {
+    const revisionId = "33333333-3333-4333-8333-333333333333";
+    mockAgentService.getConfigRevision.mockResolvedValue({
+      id: revisionId,
+      afterConfig: {
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        instructionsBundle: {
+          entryFile: "AGENTS.md",
+          files: { "AGENTS.md": "restored instructions" },
+        },
+      },
+    });
+    mockAgentService.rollbackConfigRevision.mockResolvedValue(baseAgent);
+    mockAccessService.decide.mockImplementation(async (input: { scope?: Record<string, unknown> }) => {
+      if (input.scope?.consentedChange) {
+        return {
+          allowed: true,
+          reason: "allow_consented_change",
+          explanation: "Allowed by accepted consent.",
+        };
+      }
+      if (input.scope?.requiresChangeGrant) {
+        return {
+          allowed: false,
+          reason: "deny_missing_consent",
+          explanation: "Accepted consent is required for this suggested change.",
+        };
+      }
+      return {
+        allowed: true,
+        reason: "allow_agent_self",
+        explanation: "Agents may update their own ordinary configuration.",
+      };
+    });
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      runId: "run-1",
+      source: "agent_key",
+    });
+
+    const response = await requestApp(app, (baseUrl) => request(baseUrl).post(
+      `/api/agents/${agentId}/config-revisions/${revisionId}/rollback`,
+    ));
+
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(mockChangeConsentGateService.assertConsented).toHaveBeenCalledWith({
+      companyId,
+      actorAgentId: agentId,
+      actorRunId: "run-1",
+      targetKeys: [`agent:${agentId}:instructions`],
+    });
+    expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalledWith(
+      agentId,
+      revisionId,
+      { agentId, userId: null },
+    );
   });
 
   it("blocks api key creation for authenticated company members without agent admin permission", async () => {
