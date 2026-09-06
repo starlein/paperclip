@@ -2144,6 +2144,8 @@ describe("agent issue mutation checkout ownership", () => {
         issueId,
         expect.objectContaining({ status }),
         expect.anything(),
+        undefined,
+        [],
       );
     });
 
@@ -2306,6 +2308,8 @@ describe("agent issue mutation checkout ownership", () => {
         issueId,
         expect.objectContaining({ status: "in_review" }),
         expect.anything(),
+        undefined,
+        [],
       );
     });
 
@@ -2578,6 +2582,8 @@ describe("agent issue mutation checkout ownership", () => {
         issueId,
         expect.objectContaining({ assigneeAgentId: peerAgentId }),
         expect.anything(),
+        undefined,
+        [],
       );
     });
 
