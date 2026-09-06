@@ -1240,6 +1240,8 @@ describe("Daytona sandbox provider plugin", () => {
       providerLeaseId: "sandbox-reuse",
       metadata: {
         resumedLease: true,
+        resumedFromState: "stopped",
+        sandboxState: "started",
         workspaceSentinel: {
           result: "matched",
           token: "sentinel-token",
@@ -2806,6 +2808,10 @@ describe("Daytona sandbox provider plugin", () => {
         ],
       });
       // Let syncIn register on the activity gate and reach the hung upload.
+      // The real `fs.stat` and `mkdir` round trip run before the upload call,
+      // so a fixed tick count can race ahead of them on a slower or busier
+      // host. Poll for the actual upload call instead of guessing a tick
+      // count, so this assertion never fires before syncIn reaches the hang.
       await vi.waitFor(() => {
         expect(sandbox.fs.uploadFiles).toHaveBeenCalledTimes(1);
       });
@@ -4054,6 +4060,35 @@ describe("daytona native file-sync hooks", () => {
         { operationId: "sync-op-out", filesTransferred: 2, bytesTransferred: "result-bytes".length + "secret-bytes".length },
       ],
     });
+  });
+
+  it("classifies a deleted sandbox during syncOut with a stable unrecoverable code", async () => {
+    const hostDir = await makeHostDir();
+    mockGet.mockRejectedValue(
+      new MockDaytonaNotFoundError("provider detail must not escape"),
+    );
+
+    await expect(
+      plugin.definition.onEnvironmentSyncOut?.({
+        driverKey: "daytona",
+        companyId: "company-1",
+        environmentId: "env-1",
+        config: { timeoutMs: 300000, reuseLease: true },
+        lease: syncLease(),
+        operations: [
+          {
+            operationId: "sync-op-missing-sandbox",
+            files: [
+              {
+                sourcePath: `${REMOTE_DIR}/out/result.txt`,
+                targetPath: path.join(hostDir, "result.txt"),
+                kind: "file",
+              },
+            ],
+          },
+        ],
+      }),
+    ).rejects.toThrow("daytona_sandbox_not_found");
   });
 
   it("syncOut snapshot guard re-checks the resolved source is a non-symlink regular file immediately before copying (validation→copy TOCTOU)", async () => {

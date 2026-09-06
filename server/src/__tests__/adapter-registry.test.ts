@@ -231,29 +231,89 @@ describe("server adapter registry", () => {
     expect(adapter!.supportsLocalAgentJwt).toBe(true);
   });
 
-  it("rejects an unsupported persisted runner provider before probing Codex", async () => {
+  it("rejects an incomplete managed runner provider before probing Codex", async () => {
     const adapter = requireServerAdapter("paperclip_runner");
+    expect(adapter.supportsInstructionsBundle).toBe(true);
+    expect(adapter.instructionsPathKey).toBe("instructionsFilePath");
     const result = await adapter.testEnvironment({
       companyId: "company-1",
       adapterType: "paperclip_runner",
-      config: { provider: "opencode" },
+      config: { provider: "claude_managed" },
     });
 
     expect(result).toMatchObject({
       adapterType: "paperclip_runner",
       status: "fail",
       checks: [{
-        code: "paperclip_runner_provider_unsupported",
+        code: "paperclip_runner_claude_managed_profile_required",
         level: "error",
       }],
     });
   });
 
+  it.each([
+    ["claude_managed", {
+      managedProfileId: "managed-primary",
+      managedAgentsRetentionAcknowledged: true,
+    }, "claude_managed_profile_selected"],
+    ["aws_agentcore", {
+      agentCoreProfileId: "agentcore-primary",
+      agentCoreRetentionAcknowledged: true,
+    }, "aws_agentcore_profile_selected"],
+  ] as const)("accepts a complete %s profile selection", async (provider, config, code) => {
+    const result = await requireServerAdapter("paperclip_runner").testEnvironment({
+      companyId: "company-1",
+      adapterType: "paperclip_runner",
+      config: { provider, ...config },
+    });
+
+    expect(result).toMatchObject({
+      adapterType: "paperclip_runner",
+      status: "warn",
+      checks: expect.arrayContaining([expect.objectContaining({ code, level: "info" })]),
+    });
+  });
+
+  it.each([
+    ["claude", "claude-sonnet-5"],
+    ["codex", "gpt-5.6-sol"],
+  ] as const)("accepts the qualified ACPX %s environment profile", async (acpxAgent, model) => {
+    const result = await requireServerAdapter("paperclip_runner").testEnvironment({
+      companyId: "company-1",
+      adapterType: "paperclip_runner",
+      config: { provider: "acpx", acpxAgent, model },
+    });
+
+    expect(result).toMatchObject({
+      adapterType: "paperclip_runner",
+      status: "pass",
+      checks: [{ code: "acpx_profile_qualified", level: "info" }],
+    });
+  });
+
+  it("keeps the ACPX Pi profile unavailable", async () => {
+    const result = await requireServerAdapter("paperclip_runner").testEnvironment({
+      companyId: "company-1",
+      adapterType: "paperclip_runner",
+      config: {
+        provider: "acpx",
+        acpxAgent: "pi",
+        model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "fail",
+      checks: [{ code: "paperclip_runner_acpx_agent_unavailable" }],
+    });
+  });
   it("wraps built-in npm runtime installs with the sandbox-aware install helper", () => {
     const expectedClaudeInstall = `if ! command -v 'claude' >/dev/null 2>&1; then ${buildSandboxNpmInstallCommand("@anthropic-ai/claude-code")}; fi`;
     const expectedCodexInstall = `if ! command -v 'codex' >/dev/null 2>&1; then ${buildSandboxNpmInstallCommand("@openai/codex")}; fi`;
     const expectedGeminiInstall = `if ! command -v 'gemini' >/dev/null 2>&1; then ${buildSandboxNpmInstallCommand("@google/gemini-cli")}; fi`;
     const expectedOpenCodeInstall = `if ! command -v 'opencode' >/dev/null 2>&1; then ${buildSandboxNpmInstallCommand("opencode-ai")}; fi`;
+    const expectedRunnerCodexInstall = `if ! command -v 'codex' >/dev/null 2>&1; then ${buildSandboxNpmInstallCommand("@openai/codex@0.148.0")}; fi`;
+    const expectedRunnerOpenCodeInstall = `if ! command -v 'opencode' >/dev/null 2>&1; then ${buildSandboxNpmInstallCommand("opencode-ai@1.18.17")}; fi`;
 
     expect(findActiveServerAdapter("claude_local")?.getRuntimeCommandSpec?.({})).toEqual({
       command: "claude",
@@ -274,6 +334,21 @@ describe("server adapter registry", () => {
       command: "opencode",
       detectCommand: "opencode",
       installCommand: expectedOpenCodeInstall,
+    });
+    expect(findActiveServerAdapter("paperclip_runner")?.getRuntimeCommandSpec?.({ provider: "codex" })).toEqual({
+      command: "codex",
+      detectCommand: "codex",
+      installCommand: expectedRunnerCodexInstall,
+    });
+    expect(findActiveServerAdapter("paperclip_runner")?.getRuntimeCommandSpec?.({ provider: "opencode" })).toEqual({
+      command: "opencode",
+      detectCommand: "opencode",
+      installCommand: expectedRunnerOpenCodeInstall,
+    });
+    expect(findActiveServerAdapter("paperclip_runner")?.getRuntimeCommandSpec?.({ provider: "acpx" })).toEqual({
+      command: "paperclip-runnerd",
+      detectCommand: null,
+      installCommand: null,
     });
   });
 
