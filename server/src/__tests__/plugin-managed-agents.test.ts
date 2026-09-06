@@ -9,6 +9,7 @@ import {
   agentConfigRevisions,
   agents,
   approvals,
+  budgetPolicies,
   companies,
   createDb,
   pluginEntities,
@@ -24,6 +25,7 @@ import {
 import { buildHostServices } from "../services/plugin-host-services.js";
 import { agentService } from "../services/agents.js";
 import { agentInstructionsService } from "../services/agent-instructions.js";
+import { approvalService } from "../services/approvals.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -123,6 +125,7 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     await db.delete(pluginManagedResources);
     await db.delete(pluginCompanySettings);
     await db.delete(approvals);
+    await db.delete(budgetPolicies);
     await db.delete(agents);
     await db.delete(plugins);
     await db.delete(companies);
@@ -690,6 +693,47 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     });
   });
 
+  it.each([
+    ["linked hire approval", true],
+    ["direct pending-agent approval", false],
+  ])("reconciles changed company policy before %s activates a managed hire", async (_label, linkedApproval) => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+        requireApproval: true,
+      });
+      const ceo = await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      expect(created.agent?.status).toBe("pending_approval");
+      const candidatePath = created.agent?.adapterConfig.instructionsFilePath as string;
+
+      await fs.writeFile(
+        ceo.adapterConfig.instructionsFilePath as string,
+        "Enforce at most 6 open implementation PRs per repository.",
+        "utf8",
+      );
+
+      if (linkedApproval) {
+        await approvalService(db).approve(created.approvalId!, randomUUID());
+      } else {
+        const result = await agentService(db).activatePendingApproval(created.agentId!);
+        expect(result?.activated).toBe(true);
+      }
+
+      const activated = await agentService(db).getById(created.agentId!);
+      expect(activated?.status).toBe("idle");
+      const activeContent = await fs.readFile(candidatePath, "utf8");
+      expect(activeContent).toContain("at most 6 open implementation PRs");
+      expect(activeContent).not.toContain("at most 5 open implementation PRs");
+    });
+  });
+
   it("redacts inline secrets from stored instruction-bundle revisions", async () => {
     await withTempInstructionsHome(async () => {
       const { companyId, services } = await seedCompanyAndPlugin({
@@ -709,9 +753,11 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
         [
           "Drive each repository to at most two open implementation PRs.",
           "- **API key:** review-fixture-opaque-123456",
+          "Authorization: Basic review-fixture-basic",
           "OPENAI_API_KEY=sk-review-fixture-secret",
           '{"accessToken":"review-fixture-json"}',
           "Never commit secrets, credentials, or customer data.",
+          "token_budget: 200000",
         ].join("\n"),
         "utf8",
       );
@@ -720,6 +766,9 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
         [
           "password: review-fixture-password",
           "ToKeN: review-fixture-token",
+          "authorization: review-fixture-authorization",
+          "access_token_ttl: 3600",
+          "secret_handling: never paste credentials",
           "safe_note: preserve this secondary-file guidance",
         ].join("\n"),
         "utf8",
@@ -743,7 +792,12 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       expect(serialized).not.toContain("review-fixture-json");
       expect(serialized).not.toContain("review-fixture-password");
       expect(serialized).not.toContain("review-fixture-token");
+      expect(serialized).not.toContain("review-fixture-basic");
+      expect(serialized).not.toContain("review-fixture-authorization");
       expect(serialized).toContain("Never commit secrets, credentials, or customer data.");
+      expect(serialized).toContain("token_budget: 200000");
+      expect(serialized).toContain("access_token_ttl: 3600");
+      expect(serialized).toContain("secret_handling: never paste credentials");
       expect(serialized).toContain("preserve this secondary-file guidance");
       expect(revisions[0]?.afterConfig).toMatchObject({
         instructionsBundle: {
@@ -803,6 +857,56 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       const companyAgents = await db.select().from(agents).where(eq(agents.companyId, companyId));
       expect(companyAgents).toHaveLength(1);
       await expect(db.select().from(pluginEntities)).resolves.toHaveLength(0);
+    });
+  });
+
+  it("reads only the active CEO entry file and ignores unrelated sibling hazards", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+      });
+      const ceo = await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const ceoRoot = path.dirname(ceo.adapterConfig.instructionsFilePath as string);
+      await fs.symlink("missing-target.md", path.join(ceoRoot, "unrelated-link.md"));
+      const unreadableSibling = path.join(ceoRoot, "unreadable-sibling.md");
+      await fs.writeFile(unreadableSibling, "not policy", "utf8");
+      await fs.chmod(unreadableSibling, 0o000);
+
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      const content = await fs.readFile(
+        created.agent?.adapterConfig.instructionsFilePath as string,
+        "utf8",
+      );
+      expect(content).toContain("at most 5 open implementation PRs");
+      expect(content).not.toContain("at most two open implementation PRs");
+    });
+  });
+
+  it("fails closed when the active CEO entry file is a symlink", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+      });
+      const ceo = await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const ceoPath = ceo.adapterConfig.instructionsFilePath as string;
+      const targetPath = path.join(path.dirname(ceoPath), "policy-target.md");
+      await fs.writeFile(targetPath, "Enforce at most 5 open implementation PRs per repository.", "utf8");
+      await fs.rm(ceoPath);
+      await fs.symlink(path.basename(targetPath), ceoPath);
+
+      await expect(services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      })).rejects.toThrow("Instructions entry file may not contain symlinks: AGENTS.md");
     });
   });
 

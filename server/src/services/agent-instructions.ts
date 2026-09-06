@@ -163,6 +163,13 @@ async function statIfExists(targetPath: string) {
   return fs.stat(targetPath).catch(() => null);
 }
 
+async function lstatIfExists(targetPath: string) {
+  return fs.lstat(targetPath).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+}
+
 function shouldIgnoreInstructionsEntry(entry: { name: string; isDirectory(): boolean; isFile(): boolean }) {
   if (entry.name === "." || entry.name === "..") return true;
   if (entry.isDirectory()) {
@@ -470,6 +477,61 @@ export function syncInstructionsBundleConfigFromFilePath(
 }
 
 export function agentInstructionsService() {
+  async function readEntryFile(agent: AgentLike, options?: {
+    rejectSymlinks?: boolean;
+    strictRead?: boolean;
+  }): Promise<{
+    content: string;
+    entryFile: string;
+    warnings: string[];
+  }> {
+    const state = deriveBundleState(agent);
+    if (!state.rootPath) {
+      const content = asString(state.config[PROMPT_KEY]);
+      if (content !== null) {
+        return { content, entryFile: state.entryFile, warnings: state.warnings };
+      }
+      if (options?.strictRead) {
+        throw notFound(`Instructions entry file does not exist: ${state.entryFile}`);
+      }
+      return { content: "", entryFile: state.entryFile, warnings: state.warnings };
+    }
+
+    const rootStat = await lstatIfExists(state.rootPath);
+    if (options?.rejectSymlinks && rootStat?.isSymbolicLink()) {
+      throw unprocessable("Instructions root may not be a symlink");
+    }
+    if (!rootStat?.isDirectory()) {
+      if (options?.strictRead) {
+        throw notFound(`Instructions root does not exist: ${state.rootPath}`);
+      }
+      return { content: "", entryFile: state.entryFile, warnings: state.warnings };
+    }
+
+    const pathParts = normalizeRelativeFilePath(state.entryFile).split("/");
+    let currentPath = state.rootPath;
+    for (const [index, pathPart] of pathParts.entries()) {
+      currentPath = path.join(currentPath, pathPart);
+      const currentStat = await lstatIfExists(currentPath);
+      if (options?.rejectSymlinks && currentStat?.isSymbolicLink()) {
+        throw unprocessable(`Instructions entry file may not contain symlinks: ${state.entryFile}`);
+      }
+      const isEntry = index === pathParts.length - 1;
+      if (!currentStat || (isEntry ? !currentStat.isFile() : !currentStat.isDirectory())) {
+        if (options?.strictRead) {
+          throw notFound(`Instructions entry file does not exist: ${state.entryFile}`);
+        }
+        return { content: "", entryFile: state.entryFile, warnings: state.warnings };
+      }
+    }
+
+    return {
+      content: await fs.readFile(currentPath, "utf8"),
+      entryFile: state.entryFile,
+      warnings: state.warnings,
+    };
+  }
+
   async function getBundle(agent: AgentLike): Promise<AgentInstructionsBundle> {
     const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
     if (!state.rootPath) return toBundle(agent, state, []);
@@ -835,6 +897,7 @@ export function agentInstructionsService() {
 
   return {
     getBundle,
+    readEntryFile,
     readFile,
     updateBundle,
     writeFile,

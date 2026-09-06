@@ -1119,73 +1119,117 @@ export function agentService(db: Db) {
     },
 
     activatePendingApproval: async (id: string, approvedPayload?: Record<string, unknown> | null) => {
-      const activatedAgent = await db.transaction(async (tx) => {
-        const txDb = tx as unknown as Db;
-        const existing = await agentService(txDb).getById(id);
-        if (!existing || existing.status !== "pending_approval") return null;
-        const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
-        let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
-        let approvalBindingDecision: ClaudeOAuthBindingInvariantDecision | null = null;
-        if (
-          Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
-          isPlainRecord(patch.adapterConfig)
-        ) {
-          patch.adapterConfig = await secretService(txDb).normalizeAdapterConfigForPersistence(
-            existing.companyId,
-            patch.adapterConfig,
-            { adapterType: (patch.adapterType ?? existing.adapterType) as string },
-          );
-          // The approval activation keeps an existing fixed binding but rejects a
-          // newly introduced binding, because it carries no stored-session claim.
-          approvalBindingDecision = assertClaudeOAuthBindingInvariant({
+      type PreparedPolicy = Awaited<ReturnType<
+        (typeof import("./plugin-managed-agents.js"))["preparePendingManagedAgentPolicyActivation"]
+      >>;
+      const preparedPolicyState: { current: PreparedPolicy } = { current: null };
+      try {
+        const activatedAgent = await db.transaction(async (tx) => {
+          const txDb = tx as unknown as Db;
+          const existing = await agentService(txDb).getById(id);
+          if (!existing || existing.status !== "pending_approval") return null;
+          const approvedPatch = approvedPayload ? configPatchFromApprovalPayload(approvedPayload) : {};
+          let patch = { ...approvedPatch } as Partial<typeof agents.$inferInsert>;
+          let approvalBindingDecision: ClaudeOAuthBindingInvariantDecision | null = null;
+          if (
+            Object.prototype.hasOwnProperty.call(patch, "adapterConfig") &&
+            isPlainRecord(patch.adapterConfig)
+          ) {
+            patch.adapterConfig = await secretService(txDb).normalizeAdapterConfigForPersistence(
+              existing.companyId,
+              patch.adapterConfig,
+              { adapterType: (patch.adapterType ?? existing.adapterType) as string },
+            );
+            // The approval activation keeps an existing fixed binding but rejects a
+            // newly introduced binding, because it carries no stored-session claim.
+            approvalBindingDecision = assertClaudeOAuthBindingInvariant({
+              adapterType: (patch.adapterType ?? existing.adapterType) as string,
+              nextConfig: patch.adapterConfig,
+              priorConfig: existing.adapterConfig,
+            });
+          }
+          assertPaperclipRunnerOperationalSkillInvariant({
             adapterType: (patch.adapterType ?? existing.adapterType) as string,
-            nextConfig: patch.adapterConfig,
+            nextConfig: Object.prototype.hasOwnProperty.call(patch, "adapterConfig")
+              ? patch.adapterConfig
+              : existing.adapterConfig,
+            priorAdapterType: existing.adapterType,
             priorConfig: existing.adapterConfig,
           });
-        }
-        assertPaperclipRunnerOperationalSkillInvariant({
-          adapterType: (patch.adapterType ?? existing.adapterType) as string,
-          nextConfig: Object.prototype.hasOwnProperty.call(patch, "adapterConfig")
-            ? patch.adapterConfig
-            : existing.adapterConfig,
-          priorAdapterType: existing.adapterType,
-          priorConfig: existing.adapterConfig,
-        });
-        if (patch.permissions !== undefined) {
-          patch.permissions = normalizeAgentPermissions(
-            patch.permissions,
-            (patch.role ?? existing.role) as string,
+          if (patch.permissions !== undefined) {
+            patch.permissions = normalizeAgentPermissions(
+              patch.permissions,
+              (patch.role ?? existing.role) as string,
+            );
+          }
+
+          const { preparePendingManagedAgentPolicyActivation } = await import("./plugin-managed-agents.js");
+          preparedPolicyState.current = await preparePendingManagedAgentPolicyActivation(
+            txDb,
+            existing,
+            isPlainRecord(patch.adapterConfig) ? patch.adapterConfig : existing.adapterConfig,
           );
-        }
-        const updated = await tx
-          .update(agents)
-          .set({ ...patch, status: "idle", updatedAt: new Date() })
-          .where(and(eq(agents.id, id), eq(agents.status, "pending_approval")))
-          .returning()
-          .then((rows) => rows[0] ?? null);
-        if (!updated) return null;
-        if (approvalBindingDecision) {
-          await enforceClaudeOAuthBindingClaim(txDb, {
-            companyId: existing.companyId,
-            decision: approvalBindingDecision,
-            consume: false,
-            environmentId: null,
-          });
-        }
-        await syncAgentSecretBindings(updated, txDb, existing.adapterConfig);
-        const agent = await agentService(txDb).getById(updated.id);
-        if (!agent) {
-          throw notFound("Agent not found");
-        }
-        return agent;
-      });
+          const preparedPolicy = preparedPolicyState.current;
+          if (preparedPolicy) {
+            patch.adapterConfig = preparedPolicy.replacement.adapterConfig;
+            await preparedPolicy.replacement.commit();
+          }
 
-      if (activatedAgent) {
-        return { agent: activatedAgent, activated: true };
+          const updated = await tx
+            .update(agents)
+            .set({ ...patch, status: "idle", updatedAt: new Date() })
+            .where(and(eq(agents.id, id), eq(agents.status, "pending_approval")))
+            .returning()
+            .then((rows) => rows[0] ?? null);
+          if (!updated) {
+            await preparedPolicy?.replacement.rollback();
+            preparedPolicyState.current = null;
+            return null;
+          }
+          if (approvalBindingDecision) {
+            await enforceClaudeOAuthBindingClaim(txDb, {
+              companyId: existing.companyId,
+              decision: approvalBindingDecision,
+              consume: false,
+              environmentId: null,
+            });
+          }
+          await syncAgentSecretBindings(updated, txDb, existing.adapterConfig);
+          if (preparedPolicy) {
+            await logActivity(txDb, {
+              companyId: existing.companyId,
+              actorType: "plugin",
+              actorId: preparedPolicy.marker.pluginId,
+              action: "plugin.managed_agent.company_instruction_policy_reconciled",
+              entityType: "agent",
+              entityId: existing.id,
+              details: {
+                sourcePluginKey: preparedPolicy.marker.pluginKey,
+                managedResourceKey: preparedPolicy.marker.resourceKey,
+                companyImplementationPrCap: preparedPolicy.authoritativeLimit,
+                replacedImplementationPrLimits: preparedPolicy.replacedLimits,
+                activationBoundary: true,
+              },
+            });
+          }
+          const agent = await agentService(txDb).getById(updated.id);
+          if (!agent) {
+            throw notFound("Agent not found");
+          }
+          return agent;
+        });
+
+        await preparedPolicyState.current?.replacement.finalize();
+        if (activatedAgent) {
+          return { agent: activatedAgent, activated: true };
+        }
+
+        const existing = await getById(id);
+        return existing ? { agent: existing, activated: false } : null;
+      } catch (error) {
+        await preparedPolicyState.current?.replacement.rollback();
+        throw error;
       }
-
-      const existing = await getById(id);
-      return existing ? { agent: existing, activated: false } : null;
     },
 
     updatePermissions: async (id: string, permissions: Record<string, unknown> & { canCreateAgents: boolean }) => {

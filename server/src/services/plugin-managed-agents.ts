@@ -179,6 +179,103 @@ function rowIsManagedAgent(
   );
 }
 
+function managedAgentMarker(agent: { metadata: unknown }) {
+  const metadata = agent.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const marker = (metadata as Record<string, unknown>).paperclipManagedResource;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return null;
+  const record = marker as Record<string, unknown>;
+  if (
+    record.resourceKind !== "agent"
+    || typeof record.pluginId !== "string"
+    || typeof record.pluginKey !== "string"
+    || typeof record.resourceKey !== "string"
+  ) {
+    return null;
+  }
+  return {
+    pluginId: record.pluginId,
+    pluginKey: record.pluginKey,
+    resourceKey: record.resourceKey,
+  };
+}
+
+async function resolveCompanyInstructionPolicy(db: Db, companyId: string) {
+  const companyCeos = await db
+    .select()
+    .from(agents)
+    .where(and(
+      eq(agents.companyId, companyId),
+      eq(agents.role, "ceo"),
+      notInArray(agents.status, ["pending_approval", "terminated"]),
+    ));
+  if (companyCeos.length === 0) return null;
+
+  const instructions = agentInstructionsService();
+  const policyContents = await Promise.all(companyCeos.map(async (companyCeo) => {
+    const entry = await instructions.readEntryFile(companyCeo as Agent, {
+      rejectSymlinks: true,
+      strictRead: true,
+    });
+    return entry.content;
+  }));
+  const companyInstructions = policyContents.join("\n\n");
+  authoritativeImplementationPrLimit(companyInstructions);
+  return companyInstructions;
+}
+
+export async function preparePendingManagedAgentPolicyActivation(
+  db: Db,
+  agent: Pick<typeof agents.$inferSelect, "id" | "companyId" | "name" | "role" | "metadata"> & {
+    adapterConfig: unknown;
+  },
+  adapterConfig: Record<string, unknown>,
+) {
+  const marker = managedAgentMarker(agent);
+  if (!marker || agent.role === "ceo") return null;
+
+  const companyInstructions = await resolveCompanyInstructionPolicy(db, agent.companyId);
+  if (!companyInstructions) return null;
+
+  const instructions = agentInstructionsService();
+  const effectiveAgent = { ...agent, adapterConfig };
+  const bundle = await instructions.getBundle(effectiveAgent);
+  if (bundle.mode !== "managed") {
+    throw notFound("Managed agent instructions bundle is not available");
+  }
+  const exported = await instructions.exportFiles(effectiveAgent, {
+    rejectSymlinks: true,
+    strictRead: true,
+  });
+  const currentContent = exported.files[exported.entryFile];
+  if (currentContent === undefined) {
+    throw notFound(`Managed instructions entry file not found: ${exported.entryFile}`);
+  }
+  const reconciled = reconcileManagedAgentInstructionPolicy({
+    agentInstructions: currentContent,
+    companyInstructions,
+  });
+  if (!reconciled.changed) return null;
+
+  const replacement = await instructions.prepareManagedBundleReplacement(
+    effectiveAgent,
+    {
+      ...exported.files,
+      [exported.entryFile]: reconciled.content,
+    },
+    {
+      entryFile: exported.entryFile,
+      clearLegacyPromptTemplate: true,
+    },
+  );
+  return {
+    replacement,
+    marker,
+    authoritativeLimit: reconciled.authoritativeLimit,
+    replacedLimits: reconciled.replacedLimits,
+  };
+}
+
 export function pluginManagedAgentService(
   db: Db,
   options: PluginManagedAgentServiceOptions,
@@ -188,30 +285,7 @@ export function pluginManagedAgentService(
   const instructions = agentInstructionsService();
 
   async function companyInstructionPolicy(companyId: string) {
-    const companyCeos = await db
-      .select()
-      .from(agents)
-      .where(and(
-        eq(agents.companyId, companyId),
-        eq(agents.role, "ceo"),
-        notInArray(agents.status, ["pending_approval", "terminated"]),
-      ));
-    if (companyCeos.length === 0) return null;
-
-    const policyContents = await Promise.all(companyCeos.map(async (companyCeo) => {
-      const exported = await instructions.exportFiles(companyCeo as Agent, {
-        rejectSymlinks: true,
-        strictRead: true,
-      });
-      const content = exported.files[exported.entryFile];
-      if (content === undefined) {
-        throw notFound(`CEO instructions entry file not found: ${exported.entryFile}`);
-      }
-      return content;
-    }));
-    const companyInstructions = policyContents.join("\n\n");
-    authoritativeImplementationPrLimit(companyInstructions);
-    return companyInstructions;
+    return resolveCompanyInstructionPolicy(db, companyId);
   }
 
   function applyCompanyPolicyToDeclaredInstructions(
