@@ -1552,6 +1552,12 @@ export function builtInAgentService(db: Db) {
         await approvalSvc.cancel(
           openApproval.id,
           `Cancelled: duplicate built-in ${definition.key} agent resolved during reconciliation.`,
+          {
+            actorType: "system",
+            actorId: "built-in-agents",
+            agentId: null,
+            runId: null,
+          },
         );
       }
       await logActivity(db, {

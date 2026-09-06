@@ -3696,8 +3696,12 @@ export function agentRoutes(
 
       if (sourceIssueIds.length > 0) {
         await issueApprovalsSvc.linkManyForApproval(approval.id, sourceIssueIds, {
+          actorType: actor.actorType,
+          actorId: actor.actorId,
           agentId: actor.actorType === "agent" ? actor.actorId : null,
           userId: actor.actorType === "user" ? actor.actorId : null,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
         });
       }
     }

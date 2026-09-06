@@ -1,9 +1,15 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns } from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
+export const ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID =
+  "issue-blockers-resolved-intent";
+
+export function isIssueBlockersResolvedWakeIntentActorId(value: string | null | undefined) {
+  return value === ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID;
+}
 
 // A wake counts as "already delivered or in flight for the current ready state"
 // for these statuses. The level-triggered state key uses this full set so that
@@ -29,6 +35,13 @@ const IN_FLIGHT_DEPENDENCY_WAKE_STATUSES = [
 
 const IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET = new Set<string>(IDEMPOTENT_DEPENDENCY_WAKE_STATUSES);
 const IN_FLIGHT_DEPENDENCY_WAKE_STATUS_SET = new Set<string>(IN_FLIGHT_DEPENDENCY_WAKE_STATUSES);
+const TERMINAL_DEPENDENCY_WAKE_RUN_STATUS_SET = new Set([
+  "succeeded",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "timed_out",
+]);
 
 export type IssueBlockersResolvedWakeCycleInput = Date | string | null | undefined;
 
@@ -173,7 +186,9 @@ function wakeCoversIssueBlockersResolvedReadyState(
 
 /**
  * Find a wake that already covers the current dependency-ready state of the
- * dependent issue. The check is level-triggered and cycle-aware:
+ * dependent issue for its current assignee. The check is level-triggered and
+ * cycle-aware. Scoping the lookup to the assignee prevents reviewer or mention
+ * participants on the same thread from satisfying delivery for the owner:
  *
  * - The cycle-aware state key matches a wake in any idempotent status
  *   (including `completed`). This suppresses a duplicate for the SAME ready
@@ -190,9 +205,11 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
   db: Db,
   input: {
     companyId: string;
+    assigneeAgentId: string;
     dependentIssueId: string;
     blockerIssueIds: string[];
     blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+    lockForUpdate?: boolean;
   },
 ) {
   const cycleKey = buildIssueBlockersResolvedWakeStateKey(input);
@@ -212,28 +229,56 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
   const lookupKeys = [...new Set([cycleKey, oldStateKey, ...legacyKeyList])];
   const blockedTransitionAt = parseWakeCycleDate(input.blockedTransitionAt);
 
-  const rows = await db
+  const query = db
     .select({
       id: agentWakeupRequests.id,
+      agentId: agentWakeupRequests.agentId,
       status: agentWakeupRequests.status,
+      runId: agentWakeupRequests.runId,
+      runStatus: heartbeatRuns.status,
       idempotencyKey: agentWakeupRequests.idempotencyKey,
       requestedAt: agentWakeupRequests.requestedAt,
+      requestedByActorId: agentWakeupRequests.requestedByActorId,
     })
     .from(agentWakeupRequests)
+    .leftJoin(
+      heartbeatRuns,
+      and(
+        eq(heartbeatRuns.id, agentWakeupRequests.runId),
+        eq(heartbeatRuns.companyId, input.companyId),
+        eq(heartbeatRuns.agentId, input.assigneeAgentId),
+      ),
+    )
     .where(
       and(
         eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.agentId, input.assigneeAgentId),
         inArray(agentWakeupRequests.idempotencyKey, lookupKeys),
       ),
     );
+  const rows = input.lockForUpdate
+    ? await query.for("update", { of: agentWakeupRequests })
+    : await query;
 
-  const covering = rows.find((row) =>
-    wakeCoversIssueBlockersResolvedReadyState(row, {
+  const covering = rows.filter((row) => {
+    if (!wakeCoversIssueBlockersResolvedReadyState(row, {
       cycleKey,
       oldStateKey,
       legacyKeys: new Set(legacyKeyList),
       blockedTransitionAt,
-    }),
-  );
-  return covering ?? null;
+    })) return false;
+    if (row.status === "completed") return true;
+    if (!row.runId) {
+      return row.status !== "claimed" ||
+        row.requestedByActorId === ISSUE_BLOCKERS_RESOLVED_WAKE_INTENT_ACTOR_ID ||
+        row.requestedByActorId === "native-status-committer";
+    }
+    return Boolean(
+      row.runStatus && !TERMINAL_DEPENDENCY_WAKE_RUN_STATUS_SET.has(row.runStatus),
+    );
+  });
+  // Prefer a durable in-flight delivery over a historical completion. The
+  // reconciliation caller uses the returned status to decide whether it can
+  // repair only the disposition or must emit a new wake.
+  return covering.find((row) => row.status !== "completed") ?? covering[0] ?? null;
 }

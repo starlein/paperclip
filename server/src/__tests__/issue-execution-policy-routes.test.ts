@@ -384,6 +384,9 @@ describe("issue execution policy routes", () => {
       ...issue,
       ...patch,
       updatedAt: new Date(),
+      changes: {
+        status: { from: "todo", to: "in_review" },
+      },
     }));
 
     const res = await request(await createApp({
@@ -400,6 +403,8 @@ describe("issue execution policy routes", () => {
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       expect.objectContaining({ status: "in_review" }),
       expect.anything(),
+      undefined,
+      expect.any(Array),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -438,6 +443,9 @@ describe("issue execution policy routes", () => {
       ...issue,
       ...patch,
       updatedAt: new Date(),
+      changes: {
+        status: { from: "todo", to: "in_review" },
+      },
     }));
 
     const res = await request(await createApp({
@@ -457,6 +465,8 @@ describe("issue execution policy routes", () => {
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       expect.not.objectContaining({ reviewInteractionId: expect.anything() }),
       expect.anything(),
+      undefined,
+      expect.any(Array),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -512,6 +522,8 @@ describe("issue execution policy routes", () => {
       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
       expect.not.objectContaining({ reviewInteractionId: expect.anything() }),
       expect.anything(),
+      undefined,
+      expect.any(Array),
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
@@ -671,6 +683,8 @@ describe("issue execution policy routes", () => {
         }),
       }),
       expect.anything(),
+      undefined,
+      expect.any(Array),
     );
   });
 
@@ -725,6 +739,8 @@ describe("issue execution policy routes", () => {
         monitorNextCheckAt: new Date("2026-12-01T12:00:00.000Z"),
       }),
       expect.anything(),
+      undefined,
+      expect.any(Array),
     );
   });
 
@@ -746,6 +762,9 @@ describe("issue execution policy routes", () => {
       ...issue,
       ...patch,
       updatedAt: new Date(),
+      changes: {
+        status: { from: "todo", to: "in_review" },
+      },
     }));
 
     const res = await request(await createApp())
@@ -1232,6 +1251,9 @@ describe("issue execution policy routes", () => {
         actorAgentId: null,
         actorUserId: "local-board",
       }),
+      expect.anything(),
+      undefined,
+      expect.any(Array),
     );
     const updatePatch = mockIssueService.update.mock.calls[0]?.[1] as Record<string, unknown>;
     expect(updatePatch.status).toBeUndefined();

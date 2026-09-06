@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   activityLog,
   agents,
+  approvals,
   companySecretBindings,
   companySecrets,
   companySecretVersions,
@@ -17,6 +18,7 @@ import {
   connectionGrants,
   createDb,
   heartbeatRuns,
+  issueApprovals,
   issueThreadInteractions,
   issues,
   principalPermissionGrants,
@@ -570,6 +572,8 @@ describeEmbeddedPostgres("tool gateway acceptance", () => {
     await db.delete(companySecrets);
     await db.delete(userSecretDefinitions);
     await db.delete(issueThreadInteractions);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
     await db.delete(projects);
@@ -5228,6 +5232,70 @@ rl.on("line", (line) => {
       status: "pending",
       continuationPolicy: "wake_assignee",
     });
+  });
+
+  it("serializes destructive-tool approval links on the issue row", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { issue, run } = await createIssueAndRun(db, company.id, agent.id);
+    const remoteTool = await createRemoteMcpTool(db, company.id, {
+      applicationKey: "destructive-lock-test",
+      toolName: "delete_record",
+      riskLevel: "destructive",
+    });
+    const toolName = expectedConnectedToolName({
+      applicationKey: remoteTool.application.applicationKey,
+      connectionId: remoteTool.connection.id,
+      toolName: remoteTool.catalogEntry.toolName,
+    });
+    await allowToolsForAgent(db, company.id, agent.id, [toolName]);
+    await db.insert(toolPolicies).values({
+      companyId: company.id,
+      name: "Review destructive calls",
+      policyType: "require_approval",
+      selectors: { toolName },
+    });
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession({
+      companyId: company.id,
+      agentId: agent.id,
+      runId: run.id,
+    });
+
+    let releaseIssue!: () => void;
+    const issueCanUnlock = new Promise<void>((resolve) => { releaseIssue = resolve; });
+    let issueLocked!: () => void;
+    const issueIsLocked = new Promise<void>((resolve) => { issueLocked = resolve; });
+    const issueHolder = db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issue.id)).for("update");
+      issueLocked();
+      await issueCanUnlock;
+    });
+    await issueIsLocked;
+
+    let requestSettled = false;
+    const requestApproval = gateway.executeTool({
+      sessionToken: session.token,
+      tool: toolName,
+      parameters: { key: "record-1", value: "delete" },
+    }).then(
+      () => null,
+      (error) => error,
+    ).finally(() => { requestSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(requestSettled).toBe(false);
+
+    releaseIssue();
+    await issueHolder;
+    expectGatewayError(await requestApproval, 409, "approval_required");
+
+    const [formalApproval] = await db.select().from(approvals).where(eq(approvals.companyId, company.id));
+    expect(formalApproval).toMatchObject({ status: "pending", type: "request_board_approval" });
+    const links = await db.select().from(issueApprovals).where(and(
+      eq(issueApprovals.issueId, issue.id),
+      eq(issueApprovals.approvalId, formalApproval.id),
+    ));
+    expect(links).toHaveLength(1);
   });
 
   it("wraps plugin tool discovery and execution behind the same gateway policy", async () => {

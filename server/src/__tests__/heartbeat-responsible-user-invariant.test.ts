@@ -13,6 +13,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueRelations,
   issues,
 } from "@paperclipai/db";
 import {
@@ -22,6 +23,7 @@ import {
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { buildIssueBlockersResolvedWakeStateKey } from "../services/issue-dependency-wakeups.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -163,7 +165,7 @@ describeEmbeddedPostgres("heartbeat responsible-user invariant", () => {
       responsibleUserId: issueResponsibleUserId,
     });
 
-    for (const wakeReason of ["issue_commented", "issue_comment_mentioned", "issue_blockers_resolved"]) {
+    for (const wakeReason of ["issue_commented", "issue_comment_mentioned"]) {
       const run = await heartbeat.wakeup(agentId, {
         source: "automation",
         triggerDetail: "system",
@@ -177,6 +179,41 @@ describeEmbeddedPostgres("heartbeat responsible-user invariant", () => {
       const completed = await waitForRun(db, run!.id);
       expect(completed?.responsibleUserId).toBe(issueResponsibleUserId);
     }
+
+    const blockerIssueId = randomUUID();
+    const blockedTransitionAt = new Date("2026-09-02T08:00:00.000Z");
+    await db.insert(issues).values({
+      id: blockerIssueId,
+      companyId,
+      title: "Completed dependency",
+      status: "done",
+    });
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerIssueId,
+      relatedIssueId: issueId,
+      type: "blocks",
+    });
+    await db.update(issues)
+      .set({ status: "blocked", blockedTransitionAt })
+      .where(eq(issues.id, issueId));
+    const dependencyRun = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "issue_blockers_resolved",
+      payload: { issueId, resolvedBlockerIssueId: blockerIssueId },
+      requestedByActorType: "user",
+      requestedByActorId: commenterUserId,
+      idempotencyKey: buildIssueBlockersResolvedWakeStateKey({
+        dependentIssueId: issueId,
+        blockerIssueIds: [blockerIssueId],
+        blockedTransitionAt,
+      }),
+      contextSnapshot: { issueId, taskId: issueId, wakeReason: "issue_blockers_resolved" },
+    });
+    expect(dependencyRun).not.toBeNull();
+    const completedDependencyRun = await waitForRun(db, dependencyRun!.id);
+    expect(completedDependencyRun?.responsibleUserId).toBe(issueResponsibleUserId);
   });
 
   it("uses the triggering user for manual UI/API runs", async () => {

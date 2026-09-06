@@ -14,6 +14,7 @@ import {
   issueComments,
   issueInboxArchives,
   issueReadStates,
+  issueRelations,
   issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
@@ -54,6 +55,7 @@ describeEmbeddedPostgres("issueService.remove referential integrity", () => {
     await db.delete(financeEvents);
     await db.delete(costEvents);
     await db.delete(heartbeatRuns);
+    await db.delete(issueRelations);
     await db.delete(issues);
     await db.delete(goals);
     await db.delete(agents);
@@ -244,5 +246,37 @@ describeEmbeddedPostgres("issueService.remove referential integrity", () => {
 
     // The delete failed, so the issue row must still exist.
     expect(await db.select().from(issues).where(eq(issues.id, issueId))).toHaveLength(1);
+  });
+
+  it("rejects deleting a blocker before its non-terminal dependent", async () => {
+    const { companyId, goalId } = await seedCompanyAgentRun();
+    const blockerId = await seedIssue(companyId, goalId);
+    const dependentId = await seedIssue(companyId, goalId);
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, dependentId));
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: dependentId,
+      type: "blocks",
+    });
+
+    await expect(svc.remove(blockerId)).rejects.toMatchObject({ status: 409 });
+    await expect(db.select().from(issues).where(eq(issues.id, blockerId))).resolves.toHaveLength(1);
+  });
+
+  it("allows deleting a dependent before deleting its former blocker", async () => {
+    const { companyId, goalId } = await seedCompanyAgentRun();
+    const blockerId = await seedIssue(companyId, goalId);
+    const dependentId = await seedIssue(companyId, goalId);
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, dependentId));
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: dependentId,
+      type: "blocks",
+    });
+
+    await expect(svc.remove(dependentId)).resolves.toMatchObject({ id: dependentId });
+    await expect(svc.remove(blockerId)).resolves.toMatchObject({ id: blockerId });
   });
 });

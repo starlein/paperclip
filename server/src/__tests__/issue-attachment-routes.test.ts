@@ -7,9 +7,11 @@ import type { StorageService } from "../storage/types.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getByIdForUpdate: vi.fn(),
   getByIdentifier: vi.fn(),
   createAttachment: vi.fn(),
   getAttachmentById: vi.fn(),
+  removeAttachment: vi.fn(),
 }));
 const mockCompanyService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -171,7 +173,19 @@ async function createApp(storage: StorageService, options?: { companyIds?: strin
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, storage));
+  const lockedIssueQuery: any = {
+    from: () => lockedIssueQuery,
+    where: () => lockedIssueQuery,
+    for: () => lockedIssueQuery,
+    then: (resolve: (rows: Array<{ id: string }>) => unknown) => Promise.resolve([
+      { id: "11111111-1111-4111-8111-111111111111" },
+    ]).then(resolve),
+  };
+  const db: any = {
+    select: () => lockedIssueQuery,
+  };
+  db.transaction = async (callback: (tx: unknown) => unknown) => callback(db);
+  app.use("/api", issueRoutes(db as any, storage));
   app.use(errorHandler);
   return app;
 }
@@ -251,12 +265,45 @@ describe("issue attachment routes", () => {
       assigneeUserId: null,
       identifier: "PAP-1",
     });
+    mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
+    mockIssueService.getAttachmentById.mockResolvedValue(makeAttachment("text/plain", "report.txt"));
+    mockIssueService.removeAttachment.mockResolvedValue(makeAttachment("text/plain", "report.txt"));
     mockCompanyService.getById.mockResolvedValue({
       id: "company-1",
     });
     mockWorkProductService.createForIssue.mockReset();
     mockWorkProductService.getById.mockReset();
     mockWorkProductService.update.mockReset();
+  });
+
+  it("deletes storage only after attachment metadata commits", async () => {
+    const storage = createStorageService();
+    const res = await request(await createApp(storage))
+      .delete("/api/attachments/attachment-1");
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockIssueService.removeAttachment).toHaveBeenCalledWith(
+      "attachment-1",
+      expect.objectContaining({ actorType: "user" }),
+    );
+    expect(storage.deleteObject).toHaveBeenCalledWith(
+      "company-1",
+      "issues/issue-1/report.txt",
+    );
+    expect(mockIssueService.removeAttachment.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(storage.deleteObject).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("preserves storage when attachment metadata removal rolls back", async () => {
+    const storage = createStorageService();
+    mockIssueService.removeAttachment.mockRejectedValueOnce(new Error("transaction rolled back"));
+
+    const res = await request(await createApp(storage))
+      .delete("/api/attachments/attachment-1");
+
+    expect(res.status).toBe(500);
+    expect(storage.deleteObject).not.toHaveBeenCalled();
   });
 
   it("accepts zip uploads for issue attachments", async () => {
@@ -287,8 +334,10 @@ describe("issue attachment routes", () => {
         issueId: "11111111-1111-4111-8111-111111111111",
         contentType: "application/zip",
         originalFilename: "bundle.zip",
+        activityActor: expect.objectContaining({ actorType: "user" }),
       }),
     );
+    expect(mockLogActivity).not.toHaveBeenCalled();
     expect(res.body.contentType).toBe("application/zip");
   });
 

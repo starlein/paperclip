@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
+  assets,
   companies,
   createDb,
   documentRevisions,
@@ -15,6 +17,7 @@ import {
   heartbeatRuns,
   instanceSettings,
   issueComments,
+  issueAttachments,
   issueInboxArchives,
   issueDocuments,
   issuePlanDecompositions,
@@ -62,6 +65,154 @@ describe("issue list limit helpers", () => {
     expect(clampIssueListLimit(0)).toBe(1);
     expect(clampIssueListLimit(25.9)).toBe(25);
     expect(clampIssueListLimit(ISSUE_LIST_MAX_LIMIT + 10)).toBe(ISSUE_LIST_MAX_LIMIT);
+  });
+});
+
+describeEmbeddedPostgres("issue attachment activity atomicity", () => {
+  let db!: ReturnType<typeof createDb>;
+  let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+
+  beforeAll(async () => {
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-attachment-activity-");
+    db = createDb(tempDb.connectionString);
+  }, 20_000);
+
+  afterAll(async () => {
+    await tempDb?.cleanup();
+  });
+
+  async function seedAttachmentIssue(name: string) {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name,
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: `${name} issue`,
+      status: "todo",
+      priority: "medium",
+    });
+    return { companyId, issueId };
+  }
+
+  async function holdIssueLock(issueId: string) {
+    const acquired = deferred<void>();
+    const release = deferred<void>();
+    const transaction = db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT id FROM ${issues} WHERE id = ${issueId} FOR UPDATE`);
+      acquired.resolve();
+      await release.promise;
+    });
+    await acquired.promise;
+    return { release: release.resolve, transaction };
+  }
+
+  async function expectBlockedOnIssueLock<T>(operation: Promise<T>, release: () => void) {
+    let settled = false;
+    operation.finally(() => {
+      settled = true;
+    }).catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    release();
+    return operation;
+  }
+
+  it("rolls back the attachment rows when its activity row cannot persist", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const objectKey = `issues/${issueId}/atomicity.txt`;
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Attachment Atomicity",
+      issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Attachment activity boundary",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await expect(issueService(db).createAttachment({
+      issueId,
+      provider: "local",
+      objectKey,
+      contentType: "text/plain",
+      byteSize: 6,
+      sha256: "a".repeat(64),
+      originalFilename: "atomicity.txt",
+      activityActor: {
+        actorType: "agent",
+        actorId: "missing-agent",
+        agentId: randomUUID(),
+        runId: null,
+      },
+    })).rejects.toThrow();
+
+    const [persistedAssets, persistedAttachments, persistedActivities] = await Promise.all([
+      db.select({ id: assets.id }).from(assets).where(eq(assets.objectKey, objectKey)),
+      db.select({ id: issueAttachments.id }).from(issueAttachments).where(eq(issueAttachments.issueId, issueId)),
+      db.select({ id: activityLog.id }).from(activityLog).where(and(
+        eq(activityLog.entityId, issueId),
+        eq(activityLog.action, "issue.attachment_added"),
+      )),
+    ]);
+    expect(persistedAssets).toHaveLength(0);
+    expect(persistedAttachments).toHaveLength(0);
+    expect(persistedActivities).toHaveLength(0);
+  });
+
+  it("serializes attachment creation on the owning issue row", async () => {
+    const { issueId } = await seedAttachmentIssue("Attachment Create Lock");
+    const lock = await holdIssueLock(issueId);
+    const objectKey = `issues/${issueId}/create-lock.txt`;
+    try {
+      const creation = issueService(db).createAttachment({
+        issueId,
+        provider: "local",
+        objectKey,
+        contentType: "text/plain",
+        byteSize: 4,
+        sha256: "b".repeat(64),
+        originalFilename: "create-lock.txt",
+      });
+      const created = await expectBlockedOnIssueLock(creation, lock.release);
+      expect(created).toMatchObject({ issueId, objectKey });
+    } finally {
+      lock.release();
+      await lock.transaction;
+    }
+  });
+
+  it("serializes attachment removal on the owning issue row", async () => {
+    const { issueId } = await seedAttachmentIssue("Attachment Remove Lock");
+    const service = issueService(db);
+    const attachment = await service.createAttachment({
+      issueId,
+      provider: "local",
+      objectKey: `issues/${issueId}/remove-lock.txt`,
+      contentType: "text/plain",
+      byteSize: 4,
+      sha256: "c".repeat(64),
+      originalFilename: "remove-lock.txt",
+    });
+    const lock = await holdIssueLock(issueId);
+    try {
+      const removal = service.removeAttachment(attachment.id);
+      const removed = await expectBlockedOnIssueLock(removal, lock.release);
+      expect(removed).toMatchObject({ id: attachment.id, issueId });
+    } finally {
+      lock.release();
+      await lock.transaction;
+    }
   });
 });
 
@@ -3816,6 +3967,7 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(issueRelations);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
+    await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(workspaceOperations);
     await db.delete(executionWorkspaces);
@@ -4028,6 +4180,62 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
 
     expect(blockerRelations.blocks.map((relation) => relation.id)).toEqual([blockedId]);
     expect(blockedRelations.blockedBy.map((relation) => relation.id)).toEqual([blockerId]);
+  });
+
+  it("preserves creator provenance for retained blocker relations", async () => {
+    const companyId = randomUUID();
+    const blockedId = randomUUID();
+    const retainedBlockerId = randomUUID();
+    const addedBlockerId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(issues).values([
+      { id: blockedId, companyId, title: "Blocked", status: "blocked", priority: "medium" },
+      { id: retainedBlockerId, companyId, title: "Retained", status: "todo", priority: "medium" },
+      { id: addedBlockerId, companyId, title: "Added", status: "todo", priority: "medium" },
+    ]);
+    const retainedCreatedAt = new Date("2026-08-05T10:00:00.000Z");
+    const [retainedRelation] = await db.insert(issueRelations).values({
+      companyId,
+      issueId: retainedBlockerId,
+      relatedIssueId: blockedId,
+      type: "blocks",
+      createdByActorType: "user",
+      createdByUserId: "outside-board-user",
+      createdAt: retainedCreatedAt,
+    }).returning({ id: issueRelations.id });
+
+    await svc.update(blockedId, {
+      blockedByIssueIds: [retainedBlockerId, addedBlockerId],
+    });
+
+    const relations = await db.select({
+      id: issueRelations.id,
+      blockerIssueId: issueRelations.issueId,
+      createdByActorType: issueRelations.createdByActorType,
+      createdByUserId: issueRelations.createdByUserId,
+      createdAt: issueRelations.createdAt,
+    }).from(issueRelations).where(and(
+      eq(issueRelations.companyId, companyId),
+      eq(issueRelations.relatedIssueId, blockedId),
+      eq(issueRelations.type, "blocks"),
+    ));
+    expect(relations.find((relation) => relation.blockerIssueId === retainedBlockerId)).toEqual({
+      id: retainedRelation!.id,
+      blockerIssueId: retainedBlockerId,
+      createdByActorType: "user",
+      createdByUserId: "outside-board-user",
+      createdAt: retainedCreatedAt,
+    });
+    expect(relations.find((relation) => relation.blockerIssueId === addedBlockerId)).toMatchObject({
+      blockerIssueId: addedBlockerId,
+      createdByActorType: "system",
+      createdByUserId: null,
+    });
   });
 
   it("returns blocked-by summaries on newly created issues", async () => {
@@ -4252,6 +4460,81 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         id: blockedIssueId,
         assigneeAgentId,
         blockerIssueIds: expect.arrayContaining([blockerA, blockerB]),
+      }),
+    ]);
+  });
+
+  it("persists the last-blocker dependency wake intent before the completion transaction commits", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const blockerId = randomUUID();
+    const dependentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Durable dependency wake",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "Dependent owner",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Last blocker", status: "todo", priority: "high" },
+      {
+        id: dependentId,
+        companyId,
+        title: "Blocked dependent",
+        status: "blocked",
+        priority: "high",
+        assigneeAgentId,
+        blockedTransitionAt: new Date(),
+      },
+    ]);
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: blockerId,
+      relatedIssueId: dependentId,
+      type: "blocks",
+    });
+
+    const postCommitActions: Parameters<typeof svc.update>[4] = [];
+    await db.transaction(async (tx) => {
+      const updated = await svc.update(
+        blockerId,
+        { status: "done" },
+        tx,
+        undefined,
+        postCommitActions,
+      );
+      expect(updated?.status).toBe("done");
+      await expect(tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId),
+        eq(agentWakeupRequests.agentId, assigneeAgentId),
+        eq(agentWakeupRequests.reason, "issue_blockers_resolved"),
+      ))).resolves.toEqual([
+        expect.objectContaining({
+          status: "queued",
+          runId: null,
+          requestedByActorId: "issue-blockers-resolved-intent",
+        }),
+      ]);
+      await expect(tx.select({ status: issues.status }).from(issues).where(eq(issues.id, dependentId)))
+        .resolves.toEqual([{ status: "blocked" }]);
+    });
+
+    expect(postCommitActions).toEqual([
+      expect.objectContaining({
+        type: "dispatch_dependency_wake_intents",
+        companyId,
+        wakeupRequestIds: [expect.any(String)],
       }),
     ]);
   });

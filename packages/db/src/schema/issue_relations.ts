@@ -11,6 +11,10 @@ export const issueRelations = pgTable(
     issueId: uuid("issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
     relatedIssueId: uuid("related_issue_id").notNull().references(() => issues.id, { onDelete: "cascade" }),
     type: text("type").$type<"blocks">().notNull(),
+    createdByActorType: text("created_by_actor_type")
+      .$type<"system" | "agent" | "user" | "unknown">()
+      .notNull()
+      .default("unknown"),
     createdByAgentId: uuid("created_by_agent_id").references(() => agents.id, { onDelete: "set null" }),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

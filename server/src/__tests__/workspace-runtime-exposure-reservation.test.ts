@@ -201,12 +201,12 @@ const GUEST_COMMAND =
       else process.env.PAPERCLIP_INSTANCE_ID = previousInstanceId;
       await fs.rm(workspaceRoot, { recursive: true, force: true });
       await fs.rm(paperclipHome, { recursive: true, force: true });
+      // Drift reporting writes activity rows, which hold a company FK.
+      await db.delete(activityLog);
       await db.delete(workspaceRuntimeServices);
       await db.delete(executionWorkspaces);
       await db.delete(projectWorkspaces);
       await db.delete(projects);
-      // Drift reporting writes activity rows, which hold a company FK.
-      await db.delete(activityLog);
       await db.delete(companies);
     });
 

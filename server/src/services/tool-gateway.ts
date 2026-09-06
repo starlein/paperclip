@@ -13,7 +13,6 @@ import {
   connectionGrants,
   documents,
   heartbeatRuns,
-  issueApprovals,
   issueDocuments,
   issueThreadInteractions,
   issues,
@@ -81,6 +80,7 @@ import {
 } from "./remote-url-credentials.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
+import { issueApprovalService } from "./issue-approvals.js";
 import {
   createToolRuntimeSupervisor,
   ToolRuntimeSupervisorError,
@@ -880,6 +880,7 @@ export function createToolGatewayService(
   });
   const pluginToolDispatcher = options.pluginToolDispatcher;
   const interactions = issueThreadInteractionService(db);
+  const linkedApprovals = issueApprovalService(db);
   const policyService = toolAccessPolicyService(db);
   const secrets = secretService(db);
   const configuredCloudConnector = options.paperclipCloudConnector ?? options.paperclipIdGmailConnector;
@@ -1779,15 +1780,13 @@ export function createToolGatewayService(
         })
         .returning();
       formalApprovalId = approval.id;
-      await db
-        .insert(issueApprovals)
-        .values({
-          companyId: input.session.companyId,
-          issueId: input.session.issueId,
-          approvalId: approval.id,
-          linkedByAgentId: input.session.agentId,
-        })
-        .onConflictDoNothing();
+      await linkedApprovals.link(input.session.issueId, approval.id, {
+        actorType: input.session.actorType ?? "agent",
+        actorId: input.session.actorId ?? input.session.agentId ?? "system",
+        agentId: input.session.agentId,
+        userId: input.session.actorType === "user" ? input.session.actorId ?? null : null,
+        runId: input.session.runId,
+      });
     }
 
     const interaction = await interactions.create(
@@ -3046,46 +3045,52 @@ export function createToolGatewayService(
         href,
       },
     };
-    const [existing] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
-      eq(issueThreadInteractions.companyId, session.companyId),
-      eq(issueThreadInteractions.issueId, session.issueId),
-      eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
-    )).limit(1);
-    if (existing) {
-      await db.update(issueThreadInteractions).set({
+    await db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.id, session.issueId!),
+        eq(issues.companyId, session.companyId),
+      )).for("update");
+      const [existing] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+        eq(issueThreadInteractions.companyId, session.companyId),
+        eq(issueThreadInteractions.issueId, session.issueId!),
+        eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
+      )).limit(1);
+      if (existing) {
+        await tx.update(issueThreadInteractions).set({
+          status: "pending",
+          continuationPolicy: "wake_assignee",
+          requestedResolverPolicy: "human_only",
+          effectiveResolverPolicy: "human_only",
+          resolverPolicyProvenance: "explicit",
+          effectiveResolverPolicySource: "requested",
+          addresseeUserId: userId,
+          payload,
+          result: null,
+          resolvedAt: null,
+          updatedAt: new Date(),
+        }).where(eq(issueThreadInteractions.id, existing.id));
+        return;
+      }
+      await tx.insert(issueThreadInteractions).values({
+        companyId: session.companyId,
+        issueId: session.issueId!,
+        kind: "request_confirmation",
         status: "pending",
         continuationPolicy: "wake_assignee",
         requestedResolverPolicy: "human_only",
         effectiveResolverPolicy: "human_only",
         resolverPolicyProvenance: "explicit",
         effectiveResolverPolicySource: "requested",
+        idempotencyKey,
+        sourceRunId: session.runId,
+        title: grantKind === "organization" ? `Reconnect ${connection.name}` : `Connect your ${connection.name}`,
+        summary: grantKind === "organization"
+          ? "Organization authorization is required before this run can continue."
+          : "Personal authorization is required before this run can continue.",
+        createdByAgentId: session.agentId,
         addresseeUserId: userId,
         payload,
-        result: null,
-        resolvedAt: null,
-        updatedAt: new Date(),
-      }).where(eq(issueThreadInteractions.id, existing.id));
-      return;
-    }
-    await db.insert(issueThreadInteractions).values({
-      companyId: session.companyId,
-      issueId: session.issueId,
-      kind: "request_confirmation",
-      status: "pending",
-      continuationPolicy: "wake_assignee",
-      requestedResolverPolicy: "human_only",
-      effectiveResolverPolicy: "human_only",
-      resolverPolicyProvenance: "explicit",
-      effectiveResolverPolicySource: "requested",
-      idempotencyKey,
-      sourceRunId: session.runId,
-      title: grantKind === "organization" ? `Reconnect ${connection.name}` : `Connect your ${connection.name}`,
-      summary: grantKind === "organization"
-        ? "Organization authorization is required before this run can continue."
-        : "Personal authorization is required before this run can continue.",
-      createdByAgentId: session.agentId,
-      addresseeUserId: userId,
-      payload,
+      });
     });
   }
 
@@ -3113,44 +3118,50 @@ export function createToolGatewayService(
         href,
       },
     };
-    const [existing] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
-      eq(issueThreadInteractions.companyId, session.companyId),
-      eq(issueThreadInteractions.issueId, session.issueId),
-      eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
-    )).limit(1);
-    if (existing) {
-      await db.update(issueThreadInteractions).set({
+    await db.transaction(async (tx) => {
+      await tx.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.id, session.issueId!),
+        eq(issues.companyId, session.companyId),
+      )).for("update");
+      const [existing] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+        eq(issueThreadInteractions.companyId, session.companyId),
+        eq(issueThreadInteractions.issueId, session.issueId!),
+        eq(issueThreadInteractions.idempotencyKey, idempotencyKey),
+      )).limit(1);
+      if (existing) {
+        await tx.update(issueThreadInteractions).set({
+          status: "pending",
+          continuationPolicy: "wake_assignee",
+          requestedResolverPolicy: "human_only",
+          effectiveResolverPolicy: "human_only",
+          resolverPolicyProvenance: "explicit",
+          effectiveResolverPolicySource: "requested",
+          addresseeUserId: userId,
+          payload,
+          result: null,
+          resolvedAt: null,
+          updatedAt: new Date(),
+        }).where(eq(issueThreadInteractions.id, existing.id));
+        return;
+      }
+      await tx.insert(issueThreadInteractions).values({
+        companyId: session.companyId,
+        issueId: session.issueId!,
+        kind: "request_confirmation",
         status: "pending",
         continuationPolicy: "wake_assignee",
         requestedResolverPolicy: "human_only",
         effectiveResolverPolicy: "human_only",
         resolverPolicyProvenance: "explicit",
         effectiveResolverPolicySource: "requested",
+        idempotencyKey,
+        sourceRunId: session.runId,
+        title: `Delegate your ${connection.name}`,
+        summary: "An explicit standing delegation is required for this autonomous run.",
+        createdByAgentId: session.agentId,
         addresseeUserId: userId,
         payload,
-        result: null,
-        resolvedAt: null,
-        updatedAt: new Date(),
-      }).where(eq(issueThreadInteractions.id, existing.id));
-      return;
-    }
-    await db.insert(issueThreadInteractions).values({
-      companyId: session.companyId,
-      issueId: session.issueId,
-      kind: "request_confirmation",
-      status: "pending",
-      continuationPolicy: "wake_assignee",
-      requestedResolverPolicy: "human_only",
-      effectiveResolverPolicy: "human_only",
-      resolverPolicyProvenance: "explicit",
-      effectiveResolverPolicySource: "requested",
-      idempotencyKey,
-      sourceRunId: session.runId,
-      title: `Delegate your ${connection.name}`,
-      summary: "An explicit standing delegation is required for this autonomous run.",
-      createdByAgentId: session.agentId,
-      addresseeUserId: userId,
-      payload,
+      });
     });
   }
 

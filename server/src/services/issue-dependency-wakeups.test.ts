@@ -10,12 +10,15 @@ import {
 const dependentIssueId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const blockerIssueId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const companyId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const assigneeAgentId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const firstCycle = new Date("2026-04-01T12:00:00.000Z");
 const secondCycle = new Date("2026-08-01T09:30:00.000Z");
 
 type WakeRow = {
   id: string;
   status: string;
+  runId?: string | null;
+  runStatus?: string | null;
   idempotencyKey: string | null;
   requestedAt: Date;
 };
@@ -25,11 +28,15 @@ function dbWithWakes(rows: WakeRow[]): Db {
     select() {
       return {
         from() {
-          return {
+          const query = {
+            leftJoin() {
+              return query;
+            },
             where() {
               return Promise.resolve(rows);
             },
           };
+          return query;
         },
       };
     },
@@ -95,6 +102,7 @@ describe("buildIssueBlockersResolvedWakeStateKey", () => {
 describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
   const readyState = {
     companyId,
+    assigneeAgentId,
     dependentIssueId,
     blockerIssueIds: [blockerIssueId],
     blockedTransitionAt: secondCycle,
@@ -114,6 +122,28 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
       readyState,
     );
     expect(existing?.id).toBe("wake-cycle");
+  });
+
+  it("prefers an in-flight assignee wake over a completed wake for the same ready state", async () => {
+    const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+    const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+      dbWithWakes([
+        {
+          id: "wake-completed",
+          status: "completed",
+          idempotencyKey: cycleKey,
+          requestedAt: firstCycle,
+        },
+        {
+          id: "wake-queued",
+          status: "queued",
+          idempotencyKey: cycleKey,
+          requestedAt: secondCycle,
+        },
+      ]),
+      readyState,
+    );
+    expect(existing?.id).toBe("wake-queued");
   });
 
   it("does not let a completed old-key wake from a previous blocked cycle suppress", async () => {
@@ -170,6 +200,7 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
       ]),
       {
         companyId,
+        assigneeAgentId,
         dependentIssueId,
         blockerIssueIds: [blockerIssueId],
         blockedTransitionAt: null,
@@ -207,6 +238,8 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
         {
           id: "wake-legacy-claimed",
           status: "claimed",
+          runId: "run-live",
+          runStatus: "running",
           idempotencyKey: legacyKey,
           requestedAt: firstCycle,
         },
@@ -228,4 +261,23 @@ describe("findExistingIssueBlockersResolvedWakeForReadyState", () => {
     );
     expect(completed).toBeNull();
   });
+
+  it.each(["queued", "claimed"])(
+    "does not treat a %s wake with a terminal linked run as in flight",
+    async (status) => {
+      const cycleKey = buildIssueBlockersResolvedWakeStateKey(readyState);
+      const existing = await findExistingIssueBlockersResolvedWakeForReadyState(
+        dbWithWakes([{
+          id: `wake-${status}-terminal`,
+          status,
+          runId: "run-terminal",
+          runStatus: "succeeded",
+          idempotencyKey: cycleKey,
+          requestedAt: secondCycle,
+        }]),
+        readyState,
+      );
+      expect(existing).toBeNull();
+    },
+  );
 });

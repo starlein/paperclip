@@ -136,6 +136,22 @@ function createStorageService(): StorageService {
   } as unknown as StorageService;
 }
 
+function createMutationDb() {
+  const mutationDb: any = {
+    select: vi.fn(() => {
+      const query: any = {
+        from: vi.fn(() => query),
+        where: vi.fn(() => query),
+        for: vi.fn(() => query),
+        then: async (resolve: (rows: unknown[]) => unknown) => resolve([{ id: ISSUE_ID }]),
+      };
+      return query;
+    }),
+  };
+  mutationDb.transaction = vi.fn(async (callback: (tx: typeof mutationDb) => Promise<unknown>) => callback(mutationDb));
+  return mutationDb;
+}
+
 async function createApp(options?: { companyIds?: string[] }) {
   const [{ errorHandler }, { issueRoutes }] = await Promise.all([
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -153,7 +169,7 @@ async function createApp(options?: { companyIds?: string[] }) {
     };
     next();
   });
-  app.use("/api", issueRoutes({} as any, createStorageService()));
+  app.use("/api", issueRoutes(createMutationDb(), createStorageService()));
   app.use(errorHandler);
   return app;
 }
@@ -272,6 +288,7 @@ describe("work product review-document route", () => {
           artifactReviewDocument: true,
         }),
       }),
+      expect.any(Array),
     );
     expect(mockSyncDocumentSafely).toHaveBeenCalledWith(makeDocument().id);
   });

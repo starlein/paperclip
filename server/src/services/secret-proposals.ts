@@ -440,6 +440,12 @@ export function createSecretProposalsService(db: Db) {
     return createWithinQuota(
       { companyId: context.companyId, agentId: run.agentId, runId: run.id, issueId: originIssueId },
       async (txDb) => {
+        if (originIssueId) {
+          await txDb.select({ id: issues.id }).from(issues).where(and(
+            eq(issues.id, originIssueId),
+            eq(issues.companyId, context.companyId),
+          )).for("update");
+        }
         if (input.secretProposalId) {
           const dependency = await txDb.select().from(companySecretProposals).where(and(
             eq(companySecretProposals.id, input.secretProposalId),

@@ -4283,6 +4283,65 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ).toBe(true);
   });
 
+  it("commits the continuation dependency transition with its canonical activity", async () => {
+    const { companyId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review",
+      runError: "Continuation parked: issue is waiting on review/approval",
+    });
+    await db.insert(issues).values({
+      id: randomUUID(),
+      companyId,
+      parentId: issueId,
+      title: "Sub-task awaiting review",
+      status: "todo",
+      priority: "medium",
+      issueNumber: 99,
+      identifier: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}-99`,
+    });
+
+    let releaseActivityLock!: () => void;
+    const activityLockRelease = new Promise<void>((resolve) => { releaseActivityLock = resolve; });
+    let signalActivityLockAcquired!: () => void;
+    const activityLockAcquired = new Promise<void>((resolve) => { signalActivityLockAcquired = resolve; });
+    const activityLock = db.transaction(async (tx) => {
+      // SHARE permits recovery's activity reads but blocks its canonical insert.
+      // The issue transition must remain invisible until that insert can commit.
+      await tx.execute(sql`LOCK TABLE ${activityLog} IN SHARE MODE`);
+      signalActivityLockAcquired();
+      await activityLockRelease;
+    });
+    await activityLockAcquired;
+
+    const reconciliation = heartbeatService(db).reconcileStrandedAssignedIssues();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const whileActivityBlocked = await db.select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(whileActivityBlocked?.status).toBe("in_progress");
+
+    releaseActivityLock();
+    await activityLock;
+    const result = await reconciliation;
+    expect(result.waitingOnReviewResolved).toBe(1);
+    const transitioned = await db.select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+    expect(transitioned?.status).toBe("blocked");
+    const canonicalActivity = await db.select({ id: activityLog.id })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.entityId, issueId),
+        eq(activityLog.action, "issue.updated"),
+        sql`${activityLog.details} ->> 'source' = 'recovery.reconcile_continuation_waiting_on_review'`,
+      ));
+    expect(canonicalActivity).toHaveLength(1);
+  });
+
   it("converts a continuation parked for review into a dependency wait on its existing blockers", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",

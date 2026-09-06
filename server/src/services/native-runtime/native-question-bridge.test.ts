@@ -62,6 +62,7 @@ describeEmbeddedPostgres("native question bridge", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await heartbeatService(db).drainActiveRunExecutions();
     nativeQuestionBridgeInternals.resetForTests();
     await db.execute(sql.raw(`
       TRUNCATE TABLE

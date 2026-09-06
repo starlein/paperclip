@@ -1,12 +1,23 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { approvalComments, approvals } from "@paperclipai/db";
+import { approvalComments, approvals, issueApprovals, issues } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { agentService } from "./agents.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import {
+  logActivity,
+  publishActivity,
+  type ActivityPublication,
+  type LogActivityInput,
+} from "./activity-log.js";
+
+type ApprovalActivityActor = Pick<
+  LogActivityInput,
+  "actorType" | "actorId" | "agentId" | "runId" | "agentApiKeyId"
+>;
 
 export function approvalService(db: Db) {
   const agentsSvc = agentService(db);
@@ -31,14 +42,35 @@ export function approvalService(db: Db) {
     await builtInAgentService(db).ensure(companyId, sourceBuiltInAgentKey);
   }
 
-  async function getExistingApproval(id: string) {
-    const existing = await db
+  async function getExistingApproval(id: string, dbOrTx: any = db, lock = false) {
+    const query = dbOrTx
       .select()
       .from(approvals)
-      .where(eq(approvals.id, id))
-      .then((rows) => rows[0] ?? null);
+      .where(eq(approvals.id, id));
+    const existing = await (lock ? query.for("update") : query)
+      .then((rows: ApprovalRecord[]) => rows[0] ?? null);
     if (!existing) throw notFound("Approval not found");
     return existing;
+  }
+
+  async function withLockedLinkedIssues<T>(
+    id: string,
+    mutation: (tx: any, existing: ApprovalRecord, linkedIssueIds: string[]) => Promise<T>,
+  ): Promise<T> {
+    return db.transaction(async (tx) => {
+      // The approval row is the serialization point for both decisions and
+      // link-set changes. Lock it before discovering linked issues so a link
+      // cannot commit between the discovery query and the decision.
+      const existing = await getExistingApproval(id, tx, true);
+      const linkedIssues = await tx
+        .select({ id: issues.id })
+        .from(issueApprovals)
+        .innerJoin(issues, eq(issueApprovals.issueId, issues.id))
+        .where(eq(issueApprovals.approvalId, id))
+        .orderBy(asc(issues.id))
+        .for("update", { of: issues });
+      return mutation(tx, existing, linkedIssues.map((issue: { id: string }) => issue.id));
+    });
   }
 
   async function resolveApproval(
@@ -47,42 +79,59 @@ export function approvalService(db: Db) {
     decidedByUserId: string,
     decisionNote: string | null | undefined,
   ): Promise<ResolutionResult> {
-    const existing = await getExistingApproval(id);
-    if (!canResolveStatuses.has(existing.status)) {
-      if (existing.status === targetStatus) {
-        return { approval: existing, applied: false };
+    const activityPublications: ActivityPublication[] = [];
+    const result = await withLockedLinkedIssues(id, async (tx, existing, linkedIssueIds) => {
+      if (!canResolveStatuses.has(existing.status)) {
+        if (existing.status === targetStatus) {
+          return { approval: existing, applied: false };
+        }
+        throw unprocessable(
+          `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
+        );
       }
+
+      const now = new Date();
+      const updated = await tx
+        .update(approvals)
+        .set({
+          status: targetStatus,
+          decidedByUserId,
+          decisionNote: decisionNote ?? null,
+          decidedAt: now,
+          updatedAt: now,
+        })
+        .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+        .returning()
+        .then((rows: ApprovalRecord[]) => rows[0] ?? null);
+
+      if (updated) {
+        await logActivity(tx as Db, {
+          companyId: updated.companyId,
+          actorType: "user",
+          actorId: decidedByUserId,
+          action: targetStatus === "approved" ? "approval.approved" : "approval.rejected",
+          entityType: "approval",
+          entityId: updated.id,
+          details: {
+            type: updated.type,
+            requestedByAgentId: updated.requestedByAgentId,
+            linkedIssueIds,
+          },
+        }, activityPublications);
+        return { approval: updated, applied: true };
+      }
+
+      const latest = await getExistingApproval(id, tx);
+      if (latest.status === targetStatus) {
+        return { approval: latest, applied: false };
+      }
+
       throw unprocessable(
         `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
       );
-    }
-
-    const now = new Date();
-    const updated = await db
-      .update(approvals)
-      .set({
-        status: targetStatus,
-        decidedByUserId,
-        decisionNote: decisionNote ?? null,
-        decidedAt: now,
-        updatedAt: now,
-      })
-      .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-
-    if (updated) {
-      return { approval: updated, applied: true };
-    }
-
-    const latest = await getExistingApproval(id);
-    if (latest.status === targetStatus) {
-      return { approval: latest, applied: false };
-    }
-
-    throw unprocessable(
-      `Only pending or revision requested approvals can be ${targetStatus === "approved" ? "approved" : "rejected"}`,
-    );
+    });
+    for (const publication of activityPublications) publishActivity(publication);
+    return result;
   }
 
   return {
@@ -124,19 +173,43 @@ export function approvalService(db: Db) {
     // Cancel an open (pending/revision_requested) approval without a board
     // decision — e.g. when its paired agent is terminated during duplicate
     // cleanup. Idempotent: a no-op on already-resolved approvals.
-    cancel: async (id: string, reason?: string | null) => {
-      const now = new Date();
-      const updated = await db
-        .update(approvals)
-        .set({
-          status: "cancelled",
-          decisionNote: reason ?? null,
-          decidedAt: now,
-          updatedAt: now,
-        })
-        .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
-        .returning()
-        .then((rows) => rows[0] ?? null);
+    cancel: async (
+      id: string,
+      reason?: string | null,
+      actor: ApprovalActivityActor = {
+        actorType: "system",
+        actorId: "approval-service",
+        agentId: null,
+        runId: null,
+      },
+    ) => {
+      const activityPublications: ActivityPublication[] = [];
+      const updated = await withLockedLinkedIssues(id, async (tx) => {
+        const now = new Date();
+        const approval = await tx
+          .update(approvals)
+          .set({
+            status: "cancelled",
+            decisionNote: reason ?? null,
+            decidedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(approvals.id, id), inArray(approvals.status, resolvableStatuses)))
+          .returning()
+          .then((rows: ApprovalRecord[]) => rows[0] ?? null);
+        if (approval) {
+          await logActivity(tx as Db, {
+            companyId: approval.companyId,
+            ...actor,
+            action: "approval.cancelled",
+            entityType: "approval",
+            entityId: approval.id,
+            details: { type: approval.type, reason: reason ?? null },
+          }, activityPublications);
+        }
+        return approval;
+      });
+      for (const publication of activityPublications) publishActivity(publication);
       return updated;
     },
 
@@ -230,46 +303,77 @@ export function approvalService(db: Db) {
     },
 
     requestRevision: async (id: string, decidedByUserId: string, decisionNote?: string | null) => {
-      const existing = await getExistingApproval(id);
-      if (existing.status !== "pending") {
-        throw unprocessable("Only pending approvals can request revision");
-      }
+      const activityPublications: ActivityPublication[] = [];
+      const updated = await withLockedLinkedIssues(id, async (tx, existing) => {
+        if (existing.status !== "pending") {
+          throw unprocessable("Only pending approvals can request revision");
+        }
 
-      const now = new Date();
-      return db
-        .update(approvals)
-        .set({
-          status: "revision_requested",
-          decidedByUserId,
-          decisionNote: decisionNote ?? null,
-          decidedAt: now,
-          updatedAt: now,
-        })
-        .where(eq(approvals.id, id))
-        .returning()
-        .then((rows) => rows[0]);
+        const now = new Date();
+        const approval = await tx
+          .update(approvals)
+          .set({
+            status: "revision_requested",
+            decidedByUserId,
+            decisionNote: decisionNote ?? null,
+            decidedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(approvals.id, id))
+          .returning()
+          .then((rows: ApprovalRecord[]) => rows[0]);
+        await logActivity(tx as Db, {
+          companyId: approval.companyId,
+          actorType: "user",
+          actorId: decidedByUserId,
+          action: "approval.revision_requested",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { type: approval.type },
+        }, activityPublications);
+        return approval;
+      });
+      for (const publication of activityPublications) publishActivity(publication);
+      return updated;
     },
 
-    resubmit: async (id: string, payload?: Record<string, unknown>) => {
-      const existing = await getExistingApproval(id);
-      if (existing.status !== "revision_requested") {
-        throw unprocessable("Only revision requested approvals can be resubmitted");
-      }
+    resubmit: async (
+      id: string,
+      payload: Record<string, unknown> | undefined,
+      actor: ApprovalActivityActor,
+    ) => {
+      const activityPublications: ActivityPublication[] = [];
+      const updated = await withLockedLinkedIssues(id, async (tx, existing) => {
+        if (existing.status !== "revision_requested") {
+          throw unprocessable("Only revision requested approvals can be resubmitted");
+        }
 
-      const now = new Date();
-      return db
-        .update(approvals)
-        .set({
-          status: "pending",
-          payload: payload ?? existing.payload,
-          decisionNote: null,
-          decidedByUserId: null,
-          decidedAt: null,
-          updatedAt: now,
-        })
-        .where(eq(approvals.id, id))
-        .returning()
-        .then((rows) => rows[0]);
+        const now = new Date();
+        const approval = await tx
+          .update(approvals)
+          .set({
+            status: "pending",
+            payload: payload ?? existing.payload,
+            decisionNote: null,
+            decidedByUserId: null,
+            decidedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(approvals.id, id))
+          .returning()
+          .then((rows: ApprovalRecord[]) => rows[0]);
+        await logActivity(tx as Db, {
+          companyId: approval.companyId,
+          ...actor,
+          action: "approval.resubmitted",
+          entityType: "approval",
+          entityId: approval.id,
+          details: { type: approval.type },
+        }, activityPublications);
+        return approval;
+      });
+      for (const publication of activityPublications) publishActivity(publication);
+      return updated;
     },
 
     listComments: async (approvalId: string) => {

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  approvals,
   agentRuntimeState,
   agentWakeupRequests,
   agents,
@@ -15,8 +16,12 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueDocuments,
+  issueApprovals,
   issueRelations,
+  issueThreadInteractions,
   issueWatchdogs,
+  issueWorkProducts,
   issues,
   principalPermissionGrants,
 } from "@paperclipai/db";
@@ -31,6 +36,7 @@ import { heartbeatService } from "../services/heartbeat.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { taskWatchdogService } from "../services/task-watchdogs.js";
 import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.js";
+import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -78,7 +84,10 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     runningProcesses.clear();
     await drainHeartbeatRunsToQuiescence(db, heartbeatService(db));
     await db.delete(activityLog);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueComments);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
@@ -195,19 +204,107 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
     watchdogAgentId: string;
     watchedIssueId: string;
     watchdogIssueId: string;
+    triggeredAt?: Date;
+    runCreatedAt?: Date;
   }) {
+    const triggeredAt = input.triggeredAt ?? new Date(Date.now() - 60_000);
     await db.insert(issueWatchdogs).values({
       companyId: input.companyId,
       issueId: input.watchedIssueId,
       watchdogAgentId: input.watchdogAgentId,
       watchdogIssueId: input.watchdogIssueId,
+      lastTriggeredAt: triggeredAt,
       status: "active",
     });
     await taskWatchdogService(db).reconcileTaskWatchdogs({ companyId: input.companyId });
+    await db.update(issueWatchdogs).set({ lastTriggeredAt: triggeredAt }).where(and(
+      eq(issueWatchdogs.companyId, input.companyId),
+      eq(issueWatchdogs.issueId, input.watchedIssueId),
+    ));
     const [watchdog] = await db
-      .select({ lastObservedFingerprint: issueWatchdogs.lastObservedFingerprint })
+      .select({
+        id: issueWatchdogs.id,
+        lastObservedFingerprint: issueWatchdogs.lastObservedFingerprint,
+        lastObservedStopSnapshot: issueWatchdogs.lastObservedStopSnapshot,
+      })
       .from(issueWatchdogs)
       .where(and(eq(issueWatchdogs.companyId, input.companyId), eq(issueWatchdogs.issueId, input.watchedIssueId)));
+    const stopSnapshot = watchdog?.lastObservedStopSnapshot as {
+      materialLeaves?: Array<{
+        issueId: string;
+        status: string;
+        assigneeAgentId: string | null;
+        assigneeUserId: string | null;
+        blockerIssueIds: string[];
+        pendingInteractionIds: string[];
+        pendingApprovalIds: string[];
+      }>;
+      waitsByIssueId?: Record<string, { pendingInteractionIds: string[]; pendingApprovalIds: string[] }>;
+    } | null;
+    const waitsByIssueId = stopSnapshot?.waitsByIssueId ?? {};
+    const [sourceIssue, sourceBlockers, sourceApprovals] = await Promise.all([
+      db.select({
+        id: issues.id,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        assigneeUserId: issues.assigneeUserId,
+        updatedAt: issues.updatedAt,
+      }).from(issues).where(eq(issues.id, input.watchedIssueId)).then((rows) => rows[0]),
+      db.select({ issueId: issueRelations.issueId })
+        .from(issueRelations)
+        .where(and(
+          eq(issueRelations.companyId, input.companyId),
+          eq(issueRelations.relatedIssueId, input.watchedIssueId),
+          eq(issueRelations.type, "blocks"),
+        )),
+      db.select({ id: approvals.id })
+        .from(issueApprovals)
+        .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+        .where(and(
+          eq(issueApprovals.companyId, input.companyId),
+          eq(issueApprovals.issueId, input.watchedIssueId),
+          eq(approvals.status, "pending"),
+        )),
+    ]);
+    const sourceWaits = waitsByIssueId[input.watchedIssueId] ?? {
+      pendingInteractionIds: [],
+      pendingApprovalIds: sourceApprovals.map((row) => row.id).sort(),
+    };
+    const boundaryIssueIds = new Set([
+      input.watchedIssueId,
+      ...(stopSnapshot?.materialLeaves ?? []).map((leaf) => leaf.issueId),
+    ]);
+    const commitOrderedActions = new Set([
+      "issue.created",
+      "issue.updated",
+      "issue.comment_added",
+      "issue.document_created",
+      "issue.document_updated",
+      "issue.document_upserted",
+      "issue.document_restored",
+      "issue.document_deleted",
+      "issue.attachment_added",
+      "issue.attachment_removed",
+      "issue.work_product_created",
+      "issue.work_product_updated",
+      "issue.work_product_deleted",
+      "approval.approved",
+      "approval.rejected",
+      "approval.cancelled",
+      "approval.revision_requested",
+      "approval.resubmitted",
+    ]);
+    const boundaryApprovalIds = new Set(sourceApprovals.map((approval) => approval.id));
+    const boundaryActivities = await db
+      .select({ entityId: activityLog.entityId, action: activityLog.action, details: activityLog.details })
+      .from(activityLog)
+      .where(eq(activityLog.companyId, input.companyId));
+    const issueActivityCount = boundaryActivities.filter((activity) =>
+      commitOrderedActions.has(activity.action) &&
+      (boundaryIssueIds.has(activity.entityId) || boundaryApprovalIds.has(activity.entityId))
+    ).length;
     const runId = randomUUID();
     await db.insert(heartbeatRuns).values({
       id: runId,
@@ -216,19 +313,55 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       status: "running",
       contextSnapshot: {
         issueId: input.watchdogIssueId,
+        watchdogId: watchdog?.id,
         taskWatchdog: {
+          triggeredAt: triggeredAt.toISOString(),
+          recoveryActivityBoundary: { version: 1, issueActivityCount },
           watchedIssueId: input.watchedIssueId,
           watchedIssueIdentifier: "WDOG-ROOT",
           watchedIssueTitle: "Watched root",
           stopFingerprint: watchdog?.lastObservedFingerprint,
+          terminalLeafSummaries: (stopSnapshot?.materialLeaves?.length ?? 0) > 0
+            ? stopSnapshot!.materialLeaves
+            : sourceIssue ? [{
+                issueId: sourceIssue.id,
+                identifier: sourceIssue.identifier,
+                title: sourceIssue.title,
+                status: sourceIssue.status,
+                assigneeAgentId: sourceIssue.assigneeAgentId,
+                assigneeUserId: sourceIssue.assigneeUserId,
+                blockerIssueIds: sourceBlockers.map((row) => row.issueId).sort(),
+                pendingInteractionIds: sourceWaits.pendingInteractionIds,
+                pendingApprovalIds: sourceWaits.pendingApprovalIds,
+                updatedAt: sourceIssue.updatedAt.toISOString(),
+              }]
+            : [],
+          pendingInteractions: Object.fromEntries(Object.entries(waitsByIssueId)
+            .filter(([, waits]) => waits.pendingInteractionIds.length > 0)
+            .map(([issueId, waits]) => [issueId, waits.pendingInteractionIds.map((id) => ({ id, kind: null }))])),
+          pendingApprovals: Object.fromEntries(Object.entries(waitsByIssueId)
+            .filter(([, waits]) => waits.pendingApprovalIds.length > 0)
+            .map(([issueId, waits]) => [issueId, waits.pendingApprovalIds])),
+          capabilities: {
+            targetScope: {
+              watchedIssueId: input.watchedIssueId,
+              watchdogIssueId: input.watchdogIssueId,
+            },
+          },
         },
       },
+      createdAt: input.runCreatedAt,
     });
     return runId;
   }
 
   async function seedWatchdogMutationWithStaleOwnership(input: {
-    sourceStatus: "in_progress" | "done";
+    sourceStatus: "in_progress" | "blocked" | "done" | "cancelled";
+    sourceChild?: boolean;
+    preexistingWatchdogBlocker?: boolean;
+    sourcePendingApproval?: boolean;
+    preexistingResolvedBlocker?: boolean;
+    sourceUnresolvedBlocker?: boolean;
   }) {
     const companyId = await seedCompany();
     const ownerAgentId = await seedAgent(companyId, { name: "Stopped owner" });
@@ -239,6 +372,14 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       status: input.sourceStatus,
       assigneeAgentId: ownerAgentId,
     });
+    const sourceChildId = input.sourceChild
+      ? await seedIssue(companyId, {
+          title: "Stopped source child",
+          status: "in_progress",
+          assigneeAgentId: ownerAgentId,
+          parentId: sourceIssueId,
+        })
+      : null;
     const watchdogIssueId = await seedIssue(companyId, {
       title: "Reusable watchdog issue",
       parentId: sourceIssueId,
@@ -246,6 +387,58 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       originKind: "task_watchdog",
       originId: sourceIssueId,
     });
+    const unresolvedBlockerIssueId = input.sourceUnresolvedBlocker
+      ? await seedIssue(companyId, {
+          title: "Unresolved source blocker",
+          status: "in_progress",
+        })
+      : null;
+    if (unresolvedBlockerIssueId) {
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: unresolvedBlockerIssueId,
+        relatedIssueId: sourceIssueId,
+        type: "blocks",
+      });
+    }
+    let sourceApprovalId: string | null = null;
+    if (input.sourcePendingApproval) {
+      sourceApprovalId = randomUUID();
+      await db.insert(approvals).values({
+        id: sourceApprovalId,
+        companyId,
+        type: "request_board_approval",
+        status: "pending",
+        payload: { title: "Pending source approval" },
+      });
+      await db.insert(issueApprovals).values({
+        companyId,
+        issueId: sourceIssueId,
+        approvalId: sourceApprovalId,
+      });
+    }
+    let resolvedBlockerIssueId: string | null = null;
+    if (input.preexistingResolvedBlocker) {
+      resolvedBlockerIssueId = await seedIssue(companyId, {
+        title: "Resolved source blocker",
+        status: "done",
+      });
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: resolvedBlockerIssueId,
+        relatedIssueId: sourceIssueId,
+        type: "blocks",
+      });
+    }
+    if (input.preexistingWatchdogBlocker) {
+      await db.insert(issueRelations).values({
+        companyId,
+        issueId: watchdogIssueId,
+        relatedIssueId: sourceIssueId,
+        type: "blocks",
+        createdByActorType: "system",
+      });
+    }
     const staleRunId = randomUUID();
     await db.insert(heartbeatRuns).values({
       id: staleRunId,
@@ -262,11 +455,15 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       executionAgentNameKey: "stopped-owner",
       executionLockedAt: new Date(),
     }).where(eq(issues.id, sourceIssueId));
+    const watchdogTriggeredAt = new Date(Date.now() - 60_000);
+    const watchdogRunCreatedAt = new Date(Date.now() - 30_000);
     const watchdogRunId = await seedWatchdogRun({
       companyId,
       watchdogAgentId,
       watchedIssueId: sourceIssueId,
       watchdogIssueId,
+      triggeredAt: watchdogTriggeredAt,
+      runCreatedAt: watchdogRunCreatedAt,
     });
     const app = createApp(companyId, {
       type: "agent",
@@ -280,11 +477,62 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
       companyId,
       ownerAgentId,
       sourceIssueId,
+      sourceChildId,
       staleRunId,
       watchdogAgentId,
       watchdogIssueId,
       watchdogRunId,
+      preexistingWatchdogBlocker: input.preexistingWatchdogBlocker === true,
+      sourceApprovalId,
+      resolvedBlockerIssueId,
+      unresolvedBlockerIssueId,
+      watchdogTriggeredAt,
+      watchdogRunCreatedAt,
     };
+  }
+
+  async function recordServerOwnedWatchdogBlockerTransition(
+    fixture: Awaited<ReturnType<typeof seedWatchdogMutationWithStaleOwnership>>,
+    previousStatus: "in_progress" | "done" | "cancelled",
+    opts: { createdAt?: Date; executionPolicy?: Record<string, unknown> } = {},
+  ) {
+    await db.update(issues).set({
+      status: "blocked",
+      executionPolicy: opts.executionPolicy ?? { mode: "auto" },
+    }).where(eq(issues.id, fixture.sourceIssueId));
+    if (!fixture.preexistingWatchdogBlocker) {
+      await db.insert(issueRelations).values({
+        companyId: fixture.companyId,
+        issueId: fixture.watchdogIssueId,
+        relatedIssueId: fixture.sourceIssueId,
+        type: "blocks",
+        createdByActorType: "system",
+        createdAt: opts.createdAt ? new Date(opts.createdAt.getTime() - 1) : undefined,
+      });
+    }
+    if (fixture.resolvedBlockerIssueId) {
+      await db.delete(issueRelations).where(and(
+        eq(issueRelations.companyId, fixture.companyId),
+        eq(issueRelations.issueId, fixture.resolvedBlockerIssueId),
+        eq(issueRelations.relatedIssueId, fixture.sourceIssueId),
+        eq(issueRelations.type, "blocks"),
+      ));
+    }
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        source: "recovery.reconcile_continuation_waiting_on_review",
+        status: "blocked",
+        previousStatus,
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+      createdAt: opts.createdAt,
+    });
   }
 
   async function waitForAssignmentWakeup(companyId: string) {
@@ -610,6 +858,1478 @@ describeEmbeddedPostgres("issue watchdog routes", () => {
         referencedRunStatuses: { [fixture.staleRunId]: "failed" },
       },
     });
+  });
+
+  it("accepts the server-owned reusable-watchdog blocker transition for source recovery", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
+    await taskWatchdogService(db).reconcileTaskWatchdogs({ companyId: fixture.companyId });
+    const [run, persistedWatchdog] = await Promise.all([
+      db.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, fixture.watchdogRunId))
+        .then((rows) => rows[0]),
+      db.select({ lastObservedFingerprint: issueWatchdogs.lastObservedFingerprint })
+        .from(issueWatchdogs)
+        .where(eq(issueWatchdogs.issueId, fixture.sourceIssueId))
+        .then((rows) => rows[0]),
+    ]);
+    expect((run?.contextSnapshot as any)?.taskWatchdog?.stopFingerprint).not.toBe(
+      persistedWatchdog?.lastObservedFingerprint,
+    );
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      executionPolicy: null,
+      checkoutRunId: null,
+      executionRunId: null,
+    });
+    const blockerRelations = await db.select().from(issueRelations).where(and(
+      eq(issueRelations.companyId, fixture.companyId),
+      eq(issueRelations.issueId, fixture.watchdogIssueId),
+      eq(issueRelations.relatedIssueId, fixture.sourceIssueId),
+      eq(issueRelations.type, "blocks"),
+    ));
+    expect(blockerRelations).toHaveLength(1);
+    const [audit] = await db.select().from(activityLog).where(and(
+      eq(activityLog.companyId, fixture.companyId),
+      eq(activityLog.entityId, fixture.sourceIssueId),
+      eq(activityLog.action, "issue.updated"),
+      eq(activityLog.runId, fixture.watchdogRunId),
+    ));
+    expect(audit).toMatchObject({
+      actorType: "agent",
+      agentId: fixture.watchdogAgentId,
+      runId: fixture.watchdogRunId,
+    });
+  });
+
+  it("keeps the same watchdog run authorized across its bounded recovery batch", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    const first = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+
+    const second = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "watchdog-recovery" });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+
+    const third = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "critical" });
+    expect(third.status, JSON.stringify(third.body)).toBe(200);
+
+    const fourth = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "must-not-commit" });
+    expect(fourth.status, JSON.stringify(fourth.body)).toBe(409);
+    expect(second.body).toMatchObject({
+      priority: "high",
+      billingCode: "watchdog-recovery",
+    });
+
+    const [source] = await db
+      .select({ priority: issues.priority, billingCode: issues.billingCode })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source).toEqual({
+      priority: "critical",
+      billingCode: "watchdog-recovery",
+    });
+
+    const ownActivities = await db
+      .select({ runId: activityLog.runId })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.entityId, fixture.sourceIssueId),
+        eq(activityLog.action, "issue.updated"),
+        eq(activityLog.runId, fixture.watchdogRunId),
+      ));
+    expect(ownActivities).toHaveLength(3);
+  });
+
+  it("applies the recovery mutation cap to the reusable watchdog issue", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    const first = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ priority: "high" });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+
+    const second = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ billingCode: "watchdog-recovery" });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+
+    const third = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ priority: "critical" });
+    expect(third.status, JSON.stringify(third.body)).toBe(200);
+
+    const fourth = await request(fixture.app)
+      .patch(`/api/issues/${fixture.watchdogIssueId}`)
+      .send({ billingCode: "must-not-commit" });
+    expect(fourth.status, JSON.stringify(fourth.body)).toBe(409);
+
+    const [watchdogIssue] = await db
+      .select({ priority: issues.priority, billingCode: issues.billingCode })
+      .from(issues)
+      .where(eq(issues.id, fixture.watchdogIssueId));
+    expect(watchdogIssue).toEqual({
+      priority: "critical",
+      billingCode: "watchdog-recovery",
+    });
+
+    const ownActivities = await db
+      .select({ runId: activityLog.runId })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.entityId, fixture.watchdogIssueId),
+        eq(activityLog.action, "issue.updated"),
+        eq(activityLog.runId, fixture.watchdogRunId),
+      ));
+    expect(ownActivities).toHaveLength(3);
+  });
+
+  it("commits each watchdog PATCH activity before another recovery mutation revalidates", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    const first = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(first.status, JSON.stringify(first.body)).toBe(200);
+
+    const second = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "watchdog-recovery" });
+    expect(second.status, JSON.stringify(second.body)).toBe(200);
+
+    const concurrent = await Promise.all([
+      request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ priority: "critical" }),
+      request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ billingCode: "must-not-commit" }),
+    ]);
+    expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
+
+    const ownActivities = await db
+      .select({ runId: activityLog.runId })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.entityId, fixture.sourceIssueId),
+        eq(activityLog.action, "issue.updated"),
+        eq(activityLog.runId, fixture.watchdogRunId),
+      ));
+    expect(ownActivities).toHaveLength(3);
+  });
+
+  it("serializes concurrent watchdog comments at the recovery mutation cap", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+
+    await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" })
+      .expect(200);
+    await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ billingCode: "watchdog-recovery" })
+      .expect(200);
+
+    const concurrent = await Promise.all([
+      request(fixture.app)
+        .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+        .send({ body: "First concurrent disposition." }),
+      request(fixture.app)
+        .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+        .send({ body: "Second concurrent disposition." }),
+    ]);
+    expect(concurrent.map((response) => response.status).sort()).toEqual([201, 409]);
+
+    const ownRecoveryActivities = await db
+      .select({ action: activityLog.action })
+      .from(activityLog)
+      .where(and(
+        eq(activityLog.companyId, fixture.companyId),
+        eq(activityLog.runId, fixture.watchdogRunId),
+        eq(activityLog.entityType, "issue"),
+      ));
+    expect(ownRecoveryActivities.filter((activity) =>
+      activity.action === "issue.updated" || activity.action === "issue.comment_added"
+    )).toHaveLength(3);
+  });
+
+  it("rolls back a watchdog PATCH when its locked activity receipt cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const constraintName = `watchdog_activity_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (run_id IS DISTINCT FROM '${fixture.watchdogRunId}'::uuid OR action <> 'issue.updated')`,
+    ));
+
+    try {
+      const response = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ priority: "high" });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const [source] = await db
+        .select({ priority: issues.priority })
+        .from(issues)
+        .where(eq(issues.id, fixture.sourceIssueId));
+      expect(source?.priority).toBe("medium");
+    } finally {
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
+  it("rejects watchdog recovery after a newer external comment on the watched source", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "blocked",
+      sourceUnresolvedBlocker: true,
+    });
+    const boardApp = createApp(fixture.companyId);
+
+    const comment = await request(boardApp)
+      .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+      .send({ body: "New operator evidence must invalidate the older recovery snapshot." });
+    expect(comment.status, JSON.stringify(comment.body)).toBe(201);
+
+    const [source] = await db
+      .select({ status: issues.status })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.status).toBe("blocked");
+
+    const response = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
+  });
+
+  it("rolls back an external comment when its activity boundary cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "blocked",
+      sourceUnresolvedBlocker: true,
+    });
+    const boardApp = createApp(fixture.companyId);
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId: fixture.companyId,
+      issueId: fixture.sourceIssueId,
+      kind: "request_confirmation",
+      status: "pending",
+      continuationPolicy: "wake_assignee_on_accept",
+      payload: { version: 1, prompt: "Continue?", supersedeOnUserComment: true },
+    });
+    const liveEvents: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const unsubscribe = subscribeCompanyLiveEvents(
+      fixture.companyId,
+      (event) => liveEvents.push(event),
+    );
+    const constraintName = `watchdog_comment_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (entity_id IS DISTINCT FROM '${fixture.sourceIssueId}' OR action <> 'issue.comment_added')`,
+    ));
+
+    try {
+      const response = await request(boardApp)
+        .post(`/api/issues/${fixture.sourceIssueId}/comments`)
+        .send({ body: "This comment must not outlive its missing recovery boundary." });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const comments = await db
+        .select({ id: issueComments.id })
+        .from(issueComments)
+        .where(eq(issueComments.issueId, fixture.sourceIssueId));
+      expect(comments).toHaveLength(0);
+      const [interaction] = await db
+        .select({ status: issueThreadInteractions.status })
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interactionId));
+      expect(interaction?.status).toBe("pending");
+      expect(liveEvents).not.toContainEqual(expect.objectContaining({
+        type: "activity.logged",
+        payload: expect.objectContaining({
+          action: "issue.thread_interaction_expired",
+          entityId: fixture.sourceIssueId,
+        }),
+      }));
+    } finally {
+      unsubscribe();
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
+  it("rolls back a document write when its material activity boundary cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardApp = createApp(fixture.companyId);
+    const constraintName = `watchdog_document_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (entity_id IS DISTINCT FROM '${fixture.sourceIssueId}' OR action <> 'issue.document_created')`,
+    ));
+
+    try {
+      const response = await request(boardApp)
+        .put(`/api/issues/${fixture.sourceIssueId}/documents/recovery-evidence`)
+        .send({ format: "markdown", body: "# Must roll back" });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const documents = await db
+        .select({ id: issueDocuments.id })
+        .from(issueDocuments)
+        .where(eq(issueDocuments.issueId, fixture.sourceIssueId));
+      expect(documents).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
+  it("rolls back a work-product write when its material activity boundary cannot persist", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardApp = createApp(fixture.companyId);
+    const constraintName = `watchdog_work_product_${randomUUID().replace(/-/g, "")}`;
+    await db.execute(sql.raw(
+      `ALTER TABLE activity_log ADD CONSTRAINT ${constraintName} `
+      + `CHECK (entity_id IS DISTINCT FROM '${fixture.sourceIssueId}' OR action <> 'issue.work_product_created')`,
+    ));
+
+    try {
+      const response = await request(boardApp)
+        .post(`/api/issues/${fixture.sourceIssueId}/work-products`)
+        .send({ type: "artifact", provider: "test", title: "Must roll back" });
+      expect(response.status, JSON.stringify(response.body)).toBe(500);
+
+      const products = await db
+        .select({ id: issueWorkProducts.id })
+        .from(issueWorkProducts)
+        .where(eq(issueWorkProducts.issueId, fixture.sourceIssueId));
+      expect(products).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`ALTER TABLE activity_log DROP CONSTRAINT ${constraintName}`));
+    }
+  });
+
+  it("rejects recovery provenance superseded by a later user source transition", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const boardApp = createApp(fixture.companyId);
+    const todo = await request(boardApp)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ status: "todo" });
+    expect(todo.status, JSON.stringify(todo.body)).toBe(200);
+    const blocked = await request(boardApp)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ status: "blocked" });
+    expect(blocked.status, JSON.stringify(blocked.body)).toBe(200);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
+  });
+
+  it("rejects a watchdog mutation after a descendant material boundary", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      sourceChild: true,
+    });
+    expect(fixture.sourceChildId).not.toBeNull();
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const canonicalBoundary = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceChildId}`)
+      .send({ priority: "medium" });
+    expect(canonicalBoundary.status, JSON.stringify(canonicalBoundary.body)).toBe(200);
+
+    const boardApp = createApp(fixture.companyId);
+    const boardMutation = await request(boardApp)
+      .patch(`/api/issues/${fixture.sourceChildId}`)
+      .send({ priority: "high" });
+    expect(boardMutation.status, JSON.stringify(boardMutation.body)).toBe(200);
+
+    const watchdogMutation = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceChildId}`)
+      .send({ priority: "low" });
+
+    expect(watchdogMutation.status, JSON.stringify(watchdogMutation.body)).toBe(409);
+    const [child] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceChildId!));
+    expect(child?.priority).toBe("high");
+  });
+
+  it("treats an externally created descendant as a recovery boundary", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardApp = createApp(fixture.companyId);
+
+    const created = await request(boardApp)
+      .post(`/api/issues/${fixture.sourceIssueId}/children`)
+      .send({ title: "Operator-created recovery path" });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+
+    const watchdogMutation = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(watchdogMutation.status, JSON.stringify(watchdogMutation.body)).toBe(409);
+
+    const [source] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
+  });
+
+  it("locks every mutable descendant before transactional watchdog revalidation", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      sourceChild: true,
+    });
+    const untargetedDescendantId = fixture.sourceChildId!;
+
+    let requestSettled = false;
+    let watchdogRequest!: Promise<request.Response>;
+    await db.transaction(async (tx) => {
+      await tx
+        .select({ id: issues.id })
+        .from(issues)
+        .where(eq(issues.id, untargetedDescendantId))
+        .for("update");
+
+      watchdogRequest = request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ priority: "low" })
+        .then((response) => {
+          requestSettled = true;
+          return response;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(requestSettled).toBe(false);
+
+      const boundaryAt = new Date();
+      await tx.update(issues)
+        .set({ priority: "high", updatedAt: boundaryAt })
+        .where(eq(issues.id, untargetedDescendantId));
+      await tx.insert(activityLog).values({
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "concurrent-board-user",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: untargetedDescendantId,
+        details: { priority: "high" },
+        createdAt: boundaryAt,
+      });
+    });
+
+    const res = await watchdogRequest;
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [target, sibling] = await Promise.all([
+      db.select({ priority: issues.priority }).from(issues)
+        .where(eq(issues.id, fixture.sourceIssueId)).then((rows) => rows[0]),
+      db.select({ priority: issues.priority }).from(issues)
+        .where(eq(issues.id, untargetedDescendantId)).then((rows) => rows[0]),
+    ]);
+    expect(target?.priority).toBe("medium");
+    expect(sibling?.priority).toBe("high");
+  });
+
+  it("rejects recovery provenance superseded by a later unrelated agent run transition", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const unrelatedAgentId = await seedAgent(fixture.companyId, { name: "Unrelated transition agent" });
+    const unrelatedRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: unrelatedRunId,
+      companyId: fixture.companyId,
+      agentId: unrelatedAgentId,
+      status: "succeeded",
+      finishedAt: new Date(),
+      contextSnapshot: { issueId: fixture.sourceIssueId },
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "agent",
+      actorId: unrelatedAgentId,
+      agentId: unrelatedAgentId,
+      runId: unrelatedRunId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        status: "blocked",
+        previousStatus: "todo",
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+      createdAt: new Date(),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects recovery provenance superseded by plugin-host issue patch transitions", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const transitionAt = Date.now();
+    await db.insert(activityLog).values([
+      {
+        companyId: fixture.companyId,
+        actorType: "plugin",
+        actorId: "test-plugin",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: {
+          patch: { status: "todo" },
+          _previous: { status: "blocked" },
+        },
+        createdAt: new Date(transitionAt),
+      },
+      {
+        companyId: fixture.companyId,
+        actorType: "plugin",
+        actorId: "test-plugin",
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: {
+          patch: { status: "blocked" },
+          _previous: { status: "todo" },
+        },
+        createdAt: new Date(transitionAt + 1),
+      },
+    ]);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects a watchdog blocker edge whose agent provenance survives creator deletion", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const unrelatedAgentId = await seedAgent(fixture.companyId, { name: "Deleted blocker author" });
+    const transitionAt = new Date(Date.now() - 5_000);
+    await db.update(issues).set({
+      status: "blocked",
+      executionPolicy: { mode: "auto" },
+    }).where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(issueRelations).values({
+      companyId: fixture.companyId,
+      issueId: fixture.watchdogIssueId,
+      relatedIssueId: fixture.sourceIssueId,
+      type: "blocks",
+      createdByActorType: "agent",
+      createdByAgentId: unrelatedAgentId,
+      createdAt: new Date(transitionAt.getTime() - 1),
+    });
+    await db.delete(agents).where(eq(agents.id, unrelatedAgentId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "system",
+      actorId: "system",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        source: "recovery.reconcile_continuation_waiting_on_review",
+        status: "blocked",
+        previousStatus: "in_progress",
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+      createdAt: transitionAt,
+    });
+
+    const [persistedEdge] = await db.select({
+      createdByActorType: issueRelations.createdByActorType,
+      createdByAgentId: issueRelations.createdByAgentId,
+    }).from(issueRelations).where(and(
+      eq(issueRelations.companyId, fixture.companyId),
+      eq(issueRelations.issueId, fixture.watchdogIssueId),
+      eq(issueRelations.relatedIssueId, fixture.sourceIssueId),
+    ));
+    expect(persistedEdge).toEqual({ createdByActorType: "agent", createdByAgentId: null });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it.each([
+    ["title", { title: "Board-renamed source" }],
+    ["description", { description: "Board-authored source details" }],
+    ["priority", { priority: "high" }],
+  ] as const)("rejects watchdog recovery authority after a board %s edit", async (_field, patch) => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const contentUpdate = await request(createApp(fixture.companyId))
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send(patch);
+    expect(contentUpdate.status, JSON.stringify(contentUpdate.body)).toBe(200);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source).toMatchObject(patch);
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("uses the immutable run trigger when the shared watchdog timestamp advances", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const boardEditAt = new Date(fixture.watchdogTriggeredAt.getTime() + 10_000);
+    await db.update(issues)
+      .set({ title: "Board edit after run snapshot" })
+      .where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: { title: "Board edit after run snapshot" },
+      createdAt: boardEditAt,
+    });
+    await db.update(issueWatchdogs)
+      .set({ lastTriggeredAt: new Date(boardEditAt.getTime() + 10_000) })
+      .where(eq(issueWatchdogs.issueId, fixture.sourceIssueId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ title: "Stale watchdog overwrite" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.title).toBe("Board edit after run snapshot");
+  });
+
+  it("rejects watchdog recovery after a content edit that resubmits an unchanged policy", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const unchangedPolicy = {
+      mode: "normal",
+      commentRequired: true,
+      stages: [{
+        id: randomUUID(),
+        type: "review",
+        approvalsNeeded: 1,
+        participants: [{
+          id: randomUUID(),
+          type: "agent",
+          agentId: fixture.watchdogAgentId,
+          userId: null,
+        }],
+      }],
+    };
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+      executionPolicy: unchangedPolicy,
+    });
+    const titleUpdate = await request(createApp(fixture.companyId))
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({
+        title: "Renamed with unchanged policy",
+        executionPolicy: unchangedPolicy,
+      });
+    expect(titleUpdate.status, JSON.stringify(titleUpdate.body)).toBe(200);
+    expect(titleUpdate.body.changes).not.toHaveProperty("executionPolicy");
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source).toMatchObject({
+      status: "blocked",
+      title: "Renamed with unchanged policy",
+      executionPolicy: unchangedPolicy,
+    });
+  });
+
+  it("rejects recovery provenance superseded by an execution-policy edit", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const policyUpdate = await request(createApp(fixture.companyId))
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({
+        executionPolicy: {
+          mode: "normal",
+          stages: [{
+            type: "review",
+            participants: [{ type: "agent", agentId: fixture.watchdogAgentId }],
+          }],
+        },
+      });
+    expect(policyUpdate.status, JSON.stringify(policyUpdate.body)).toBe(200);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toMatchObject({
+      mode: "normal",
+      stages: [{
+        type: "review",
+        participants: [{ type: "agent", agentId: fixture.watchdogAgentId }],
+      }],
+    });
+  });
+
+  it("rejects an unseen execution-policy edit whose activity timestamp predates the watchdog snapshot", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const executionPolicy = {
+      mode: "normal",
+      stages: [{
+        type: "review",
+        participants: [{ type: "agent", agentId: fixture.watchdogAgentId }],
+      }],
+    };
+    await db.update(issues)
+      .set({ executionPolicy })
+      .where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "transaction-started-before-watchdog",
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: { executionPolicy },
+      createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual(executionPolicy);
+  });
+
+  it("fails closed when a persisted watchdog run lacks its recovery activity boundary", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const [run] = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, fixture.watchdogRunId));
+    const contextSnapshot = structuredClone(run?.contextSnapshot) as {
+      taskWatchdog?: { recoveryActivityBoundary?: unknown };
+    };
+    delete contextSnapshot.taskWatchdog?.recoveryActivityBoundary;
+    await db.update(heartbeatRuns)
+      .set({ contextSnapshot })
+      .where(eq(heartbeatRuns.id, fixture.watchdogRunId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
+  });
+
+  it.each([
+    ["interaction", "issue.thread_interaction_created", "issue.thread_interaction_accepted"],
+    ["approval", "issue.approval_linked", "issue.approval_unlinked"],
+  ] as const)(
+    "rejects recovery provenance superseded by a completed %s wait lifecycle",
+    async (_kind, openedAction, closedAction) => {
+      const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+      await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+        createdAt: new Date(Date.now() - 5_000),
+      });
+      const interactionId = _kind === "interaction" ? randomUUID() : null;
+      const approvalId = _kind === "approval" ? randomUUID() : null;
+      if (interactionId) {
+        await db.insert(issueThreadInteractions).values({
+          id: interactionId,
+          companyId: fixture.companyId,
+          issueId: fixture.sourceIssueId,
+          kind: "request_confirmation",
+          status: "accepted",
+          continuationPolicy: "wake_assignee_on_accept",
+          payload: { version: 1, prompt: "Continue?" },
+        });
+      }
+      if (approvalId) {
+        await db.insert(approvals).values({
+          id: approvalId,
+          companyId: fixture.companyId,
+          type: "task",
+          status: "pending",
+          payload: {},
+        });
+      }
+      await db.insert(activityLog).values([
+        {
+          companyId: fixture.companyId,
+          actorType: "user",
+          actorId: "outside-board-user",
+          action: openedAction,
+          entityType: "issue",
+          entityId: fixture.sourceIssueId,
+          details: interactionId ? { interactionId } : { approvalId },
+          createdAt: new Date(Date.now() - 2_000),
+        },
+        {
+          companyId: fixture.companyId,
+          actorType: "user",
+          actorId: "outside-board-user",
+          action: closedAction,
+          entityType: "issue",
+          entityId: fixture.sourceIssueId,
+          details: interactionId ? { interactionId } : { approvalId },
+          createdAt: new Date(Date.now() - 1_000),
+        },
+      ]);
+
+      const res = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ executionPolicy: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+      expect(source?.executionPolicy).toEqual({ mode: "auto" });
+    },
+  );
+
+  it.each([
+    "issue.document_created",
+    "issue.document_updated",
+    "issue.document_upserted",
+    "issue.document_restored",
+    "issue.document_deleted",
+    "issue.attachment_added",
+    "issue.attachment_removed",
+    "issue.work_product_created",
+    "issue.work_product_updated",
+    "issue.work_product_deleted",
+  ] as const)("rejects recovery provenance superseded by %s", async (action) => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action,
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: action.startsWith("issue.document_")
+        ? { documentId: randomUUID() }
+        : action.startsWith("issue.attachment_")
+          ? { attachmentId: randomUUID() }
+          : { workProductId: randomUUID() },
+      createdAt: new Date(Date.now() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("keeps recovery authority across a non-waking interaction lifecycle", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId: fixture.companyId,
+      issueId: fixture.sourceIssueId,
+      kind: "request_confirmation",
+      status: "accepted",
+      continuationPolicy: "none",
+      payload: { version: 1, prompt: "Informational only" },
+    });
+    await db.insert(activityLog).values([
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.thread_interaction_created",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { interactionId },
+        createdAt: new Date(Date.now() - 2_000),
+      },
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.thread_interaction_accepted",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { interactionId },
+        createdAt: new Date(Date.now() - 1_000),
+      },
+    ]);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.executionPolicy).toBeNull();
+  });
+
+  it.each([
+    ["an already-approved link", "approved", false, "issue.approval_linked"],
+    ["a repeated pending link", "pending", true, "issue.approval_linked"],
+    ["a missing pending unlink", "pending", false, "issue.approval_unlinked"],
+  ] as const)(
+    "keeps recovery authority across %s that does not change a wait",
+    async (_label, approvalStatus, sourcePendingApproval, action) => {
+      const fixture = await seedWatchdogMutationWithStaleOwnership({
+        sourceStatus: "in_progress",
+        sourcePendingApproval,
+      });
+      await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+        createdAt: new Date(Date.now() - 5_000),
+      });
+      const approvalId = fixture.sourceApprovalId ?? randomUUID();
+      if (!fixture.sourceApprovalId) {
+        await db.insert(approvals).values({
+          id: approvalId,
+          companyId: fixture.companyId,
+          type: "task",
+          status: approvalStatus,
+          payload: {},
+        });
+      }
+      await db.insert(activityLog).values({
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action,
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { approvalId },
+        createdAt: new Date(Date.now() - 1_000),
+      });
+
+      const res = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ executionPolicy: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.executionPolicy).toBeNull();
+    },
+  );
+
+  it("rejects recovery provenance superseded by a linked approval decision cycle", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      sourcePendingApproval: true,
+    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    await db.update(approvals)
+      .set({ status: "revision_requested" })
+      .where(eq(approvals.id, fixture.sourceApprovalId!));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "approval.revision_requested",
+      entityType: "approval",
+      entityId: fixture.sourceApprovalId!,
+      details: {},
+      createdAt: new Date(Date.now() - 2_000),
+    });
+    await db.update(approvals)
+      .set({ status: "pending" })
+      .where(eq(approvals.id, fixture.sourceApprovalId!));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "agent",
+      actorId: fixture.ownerAgentId,
+      agentId: fixture.ownerAgentId,
+      action: "approval.resubmitted",
+      entityType: "approval",
+      entityId: fixture.sourceApprovalId!,
+      details: {},
+      createdAt: new Date(Date.now() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("ignores state changes for an approval detached before the watchdog trigger", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const detachedApprovalId = randomUUID();
+    await db.insert(approvals).values({
+      id: detachedApprovalId,
+      companyId: fixture.companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: { title: "Detached historical approval" },
+    });
+    await db.insert(activityLog).values([
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.approval_linked",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { approvalId: detachedApprovalId },
+        createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 2_000),
+      },
+      {
+        companyId: fixture.companyId,
+        actorType: "user",
+        actorId: "outside-board-user",
+        action: "issue.approval_unlinked",
+        entityType: "issue",
+        entityId: fixture.sourceIssueId,
+        details: { approvalId: detachedApprovalId },
+        createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 1_000),
+      },
+    ]);
+    await db.update(approvals)
+      .set({ status: "approved" })
+      .where(eq(approvals.id, detachedApprovalId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "approval.approved",
+      entityType: "approval",
+      entityId: detachedApprovalId,
+      details: {},
+    });
+
+    const response = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+  });
+
+  it("rejects recovery provenance superseded by a linked approval cancellation", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      sourcePendingApproval: true,
+    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: new Date(Date.now() - 5_000),
+    });
+    await db.update(approvals)
+      .set({ status: "cancelled" })
+      .where(eq(approvals.id, fixture.sourceApprovalId!));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "system",
+      actorId: "built-in-agents",
+      action: "approval.cancelled",
+      entityType: "approval",
+      entityId: fixture.sourceApprovalId!,
+      details: { reason: "Duplicate cleanup" },
+      createdAt: new Date(Date.now() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects a linked approval decision that commits with a pre-trigger timestamp", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+    });
+    const approvalId = randomUUID();
+    await db.insert(approvals).values({
+      id: approvalId,
+      companyId: fixture.companyId,
+      type: "request_board_approval",
+      status: "pending",
+      payload: { title: "Late-committing source approval" },
+    });
+    await db.insert(issueApprovals).values({
+      companyId: fixture.companyId,
+      issueId: fixture.sourceIssueId,
+      approvalId,
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "issue.approval_linked",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: { approvalId },
+      createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 2_000),
+    });
+    await db.update(approvals)
+      .set({ status: "approved" })
+      .where(eq(approvals.id, approvalId));
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: "user",
+      actorId: "outside-board-user",
+      action: "approval.approved",
+      entityType: "approval",
+      entityId: approvalId,
+      details: {},
+      createdAt: new Date(fixture.watchdogTriggeredAt.getTime() - 1_000),
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ priority: "high" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db
+      .select({ priority: issues.priority })
+      .from(issues)
+      .where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.priority).toBe("medium");
+  });
+
+  it("accepts a server-owned blocker transition that returns to an already-reviewed snapshot", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
+    await taskWatchdogService(db).reconcileTaskWatchdogs({ companyId: fixture.companyId });
+    const [observed] = await db
+      .select({
+        fingerprint: issueWatchdogs.lastObservedFingerprint,
+        snapshot: issueWatchdogs.lastObservedStopSnapshot,
+      })
+      .from(issueWatchdogs)
+      .where(eq(issueWatchdogs.issueId, fixture.sourceIssueId));
+    await db
+      .update(issueWatchdogs)
+      .set({
+        lastReviewedFingerprint: observed?.fingerprint,
+        lastReviewedStopSnapshot: observed?.snapshot,
+      })
+      .where(eq(issueWatchdogs.issueId, fixture.sourceIssueId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      executionPolicy: null,
+    });
+  });
+
+  it.each(
+    [
+      ["outside board user", { createdByUserId: "outside-board-user" }],
+      ["unrelated agent", { createAgent: true }],
+    ] as Array<[string, { createdByUserId?: string; createAgent?: boolean }]>,
+  )("rejects a reusable-watchdog blocker transition created by an %s", async (_label, creator) => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const unrelatedAgentId = creator.createAgent
+      ? await seedAgent(fixture.companyId, { name: "Unrelated recovery actor" })
+      : null;
+    const unrelatedRunId = unrelatedAgentId ? randomUUID() : null;
+    if (unrelatedAgentId && unrelatedRunId) {
+      await db.insert(heartbeatRuns).values({
+        id: unrelatedRunId,
+        companyId: fixture.companyId,
+        agentId: unrelatedAgentId,
+        status: "succeeded",
+        finishedAt: new Date(),
+        contextSnapshot: { issueId: fixture.sourceIssueId },
+      });
+    }
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(issueRelations).values({
+      companyId: fixture.companyId,
+      issueId: fixture.watchdogIssueId,
+      relatedIssueId: fixture.sourceIssueId,
+      type: "blocks",
+      createdByAgentId: unrelatedAgentId,
+      createdByUserId: creator.createdByUserId ?? null,
+    });
+    await db.insert(activityLog).values({
+      companyId: fixture.companyId,
+      actorType: unrelatedAgentId ? "agent" : "user",
+      actorId: unrelatedAgentId ?? creator.createdByUserId ?? "outside",
+      agentId: unrelatedAgentId,
+      runId: unrelatedRunId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: fixture.sourceIssueId,
+      details: {
+        status: "blocked",
+        previousStatus: "in_progress",
+        blockedByIssueIds: [fixture.watchdogIssueId],
+      },
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ title: "Must remain unchanged" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.title).toBe("Stopped source");
+  });
+
+  it("accepts an attributable status-only transition when the reusable blocker predates the wake", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      preexistingWatchdogBlocker: true,
+    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      executionPolicy: null,
+    });
+  });
+
+  it.each(["done", "cancelled"] as const)(
+    "accepts an attributable reusable-blocker transition from terminal status %s",
+    async (sourceStatus) => {
+      const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus });
+      await recordServerOwnedWatchdogBlockerTransition(fixture, sourceStatus);
+
+      const res = await request(fixture.app)
+        .patch(`/api/issues/${fixture.sourceIssueId}`)
+        .send({ executionPolicy: null });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toMatchObject({
+        id: fixture.sourceIssueId,
+        status: "blocked",
+        executionPolicy: null,
+      });
+    },
+  );
+
+  it("accepts recovery provenance recorded after the watchdog trigger but before run creation", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const recoveryCreatedAt = new Date(
+      fixture.watchdogTriggeredAt.getTime() +
+      (fixture.watchdogRunCreatedAt.getTime() - fixture.watchdogTriggeredAt.getTime()) / 2,
+    );
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress", {
+      createdAt: recoveryCreatedAt,
+    });
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(recoveryCreatedAt.getTime()).toBeLessThan(fixture.watchdogRunCreatedAt.getTime());
+    expect(res.body).toMatchObject({
+      id: fixture.sourceIssueId,
+      status: "blocked",
+      executionPolicy: null,
+    });
+  });
+
+  it("accepts unchanged terminal-source waits represented only in the leaf summary", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "done",
+      sourcePendingApproval: true,
+    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "done");
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(fixture.sourceApprovalId).not.toBeNull();
+    const linkedApprovals = await db.select().from(issueApprovals).where(and(
+      eq(issueApprovals.issueId, fixture.sourceIssueId),
+      eq(issueApprovals.approvalId, fixture.sourceApprovalId!),
+    ));
+    expect(linkedApprovals).toHaveLength(1);
+  });
+
+  it("rejects the reusable-blocker exception after the authorizing watchdog run completes", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
+    await db.update(heartbeatRuns).set({
+      status: "succeeded",
+      finishedAt: new Date(),
+    }).where(eq(heartbeatRuns.id, fixture.watchdogRunId));
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("accepts server recovery that removes a terminal observed blocker", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({
+      sourceStatus: "in_progress",
+      preexistingResolvedBlocker: true,
+    });
+    await recordServerOwnedWatchdogBlockerTransition(fixture, "in_progress");
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const blockerRelations = await db.select().from(issueRelations).where(and(
+      eq(issueRelations.companyId, fixture.companyId),
+      eq(issueRelations.relatedIssueId, fixture.sourceIssueId),
+      eq(issueRelations.type, "blocks"),
+    ));
+    expect(blockerRelations.map((relation) => relation.issueId)).toEqual([fixture.watchdogIssueId]);
+  });
+
+  it("rejects an old run after its immutable reusable watchdog issue is replaced", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    await db.delete(issues).where(eq(issues.id, fixture.watchdogIssueId));
+    const replacementWatchdogIssueId = await seedIssue(fixture.companyId, {
+      title: "Replacement reusable watchdog issue",
+      parentId: fixture.sourceIssueId,
+      assigneeAgentId: fixture.watchdogAgentId,
+      originKind: "task_watchdog",
+      originId: fixture.sourceIssueId,
+    });
+    await db.update(issueWatchdogs).set({
+      watchdogIssueId: replacementWatchdogIssueId,
+      lastTriggeredAt: new Date(),
+    }).where(eq(issueWatchdogs.issueId, fixture.sourceIssueId));
+    await recordServerOwnedWatchdogBlockerTransition({
+      ...fixture,
+      watchdogIssueId: replacementWatchdogIssueId,
+    }, "in_progress");
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ executionPolicy: null });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.executionPolicy).toEqual({ mode: "auto" });
+  });
+
+  it("rejects a source mutation when another blocker changes the self-blocked fingerprint", async () => {
+    const fixture = await seedWatchdogMutationWithStaleOwnership({ sourceStatus: "in_progress" });
+    const concurrentBlockerId = await seedIssue(fixture.companyId, {
+      title: "Concurrent outside blocker",
+      status: "in_progress",
+      assigneeAgentId: fixture.ownerAgentId,
+    });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, fixture.sourceIssueId));
+    await db.insert(issueRelations).values([
+      {
+        companyId: fixture.companyId,
+        issueId: fixture.watchdogIssueId,
+        relatedIssueId: fixture.sourceIssueId,
+        type: "blocks",
+      },
+      {
+        companyId: fixture.companyId,
+        issueId: concurrentBlockerId,
+        relatedIssueId: fixture.sourceIssueId,
+        type: "blocks",
+      },
+    ]);
+
+    const res = await request(fixture.app)
+      .patch(`/api/issues/${fixture.sourceIssueId}`)
+      .send({ title: "Must remain unchanged" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(409);
+    expect(res.body).toMatchObject({
+      error: "Task-watchdog review is stale because the watched subtree stop fingerprint changed; refresh the source state before mutating it.",
+      details: {
+        currentState: "stopped",
+      },
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    expect(source?.title).toBe("Stopped source");
   });
 
   it("lets a watchdog add a disposition-only comment after clearing terminal stale ownership", async () => {

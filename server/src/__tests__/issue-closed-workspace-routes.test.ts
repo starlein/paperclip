@@ -15,9 +15,11 @@ const REOPEN_PENDING_WAIT_TIMEOUT_MS = 5_000;
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
+  getByIdForUpdate: vi.fn(),
   update: vi.fn(),
   checkout: vi.fn(),
   addComment: vi.fn(),
+  findMentionedAgents: vi.fn(async () => []),
 }));
 
 const mockExecutionWorkspaceService = vi.hoisted(() => ({
@@ -44,7 +46,15 @@ const mockProjectService = vi.hoisted(() => ({
   getById: vi.fn(async () => null),
 }));
 
+const mockExternalObjectService = vi.hoisted(() => ({
+  syncCommentSafely: vi.fn(async () => undefined),
+  syncIssueSafely: vi.fn(async () => undefined),
+}));
+
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockDb = vi.hoisted(() => ({
+  transaction: vi.fn(async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({})),
+}));
 
 function registerServiceMocks() {
   vi.doMock("../routes/authz.js", async () => vi.importActual("../routes/authz.js"));
@@ -73,6 +83,10 @@ function registerServiceMocks() {
 
   vi.doMock("../services/heartbeat.js", () => ({
     heartbeatService: () => mockHeartbeatService,
+  }));
+
+  vi.doMock("../services/external-objects.js", () => ({
+    externalObjectService: () => mockExternalObjectService,
   }));
 
   vi.doMock("../services/issues.js", () => ({
@@ -217,7 +231,7 @@ describe.sequential("closed isolated workspace issue routes", () => {
       };
       next();
     });
-    app.use("/api", issueRoutes({} as any, {} as any));
+    app.use("/api", issueRoutes(mockDb as any, {} as any));
     app.use(errorHandler);
     return app;
   }
@@ -225,6 +239,7 @@ describe.sequential("closed isolated workspace issue routes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIssueService.getById.mockResolvedValue(makeIssue());
+    mockIssueService.getByIdForUpdate.mockResolvedValue(makeIssue());
     mockExecutionWorkspaceService.getById.mockResolvedValue(makeClosedWorkspace());
     mockExecutionWorkspaceService.refreshReopenPendingConsumption.mockResolvedValue({ refreshed: true });
     // The guard reopens a closed isolated workspace and lets the request
