@@ -84,6 +84,9 @@ interface RevisionMetadata {
   createdByUserId?: string | null;
   source?: string;
   rolledBackFromRevisionId?: string | null;
+  beforeConfigExtension?: Record<string, unknown>;
+  afterConfigExtension?: Record<string, unknown>;
+  changedKeys?: string[];
 }
 
 /**
@@ -190,6 +193,17 @@ function buildConfigSnapshot(
     defaultEnvironmentId: row.defaultEnvironmentId,
     budgetMonthlyCents: row.budgetMonthlyCents,
     metadata,
+  };
+}
+
+function extendConfigSnapshot(
+  snapshot: AgentConfigSnapshot,
+  extension: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  if (!extension) return { ...snapshot };
+  return {
+    ...sanitizeRecord(extension),
+    ...snapshot,
   };
 }
 
@@ -738,8 +752,19 @@ export function agentService(db: Db) {
         })
       : null;
 
-    const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
-    const beforeConfig = shouldRecordRevision ? buildConfigSnapshot(existing) : null;
+    const explicitRevisionKeys = options?.recordRevision?.changedKeys
+      ?.map((key) => key.trim())
+      .filter((key, index, keys) => key.length > 0 && keys.indexOf(key) === index) ?? [];
+    const shouldRecordRevision = Boolean(options?.recordRevision) && (
+      hasConfigPatchFields(normalizedPatch)
+      || explicitRevisionKeys.length > 0
+    );
+    const beforeConfig = shouldRecordRevision
+      ? extendConfigSnapshot(
+          buildConfigSnapshot(existing),
+          options?.recordRevision?.beforeConfigExtension,
+        )
+      : null;
 
     type AgentUpdateResult = Awaited<ReturnType<typeof getById>>;
     const applyUpdate = async (txDb: Db): Promise<AgentUpdateResult> => {
@@ -775,8 +800,19 @@ export function agentService(db: Db) {
       }
 
       if (shouldRecordRevision && beforeConfig) {
-        const afterConfig = buildConfigSnapshot(normalizedUpdated);
-        const changedKeys = diffConfigSnapshot(beforeConfig, afterConfig);
+        const afterConfig = extendConfigSnapshot(
+          buildConfigSnapshot(normalizedUpdated),
+          options?.recordRevision?.afterConfigExtension,
+        );
+        const changedKeys = [
+          ...new Set([
+            ...diffConfigSnapshot(
+              beforeConfig as unknown as AgentConfigSnapshot,
+              afterConfig as unknown as AgentConfigSnapshot,
+            ),
+            ...explicitRevisionKeys,
+          ]),
+        ];
         if (changedKeys.length > 0) {
           await txDb.insert(agentConfigRevisions).values({
             companyId: normalizedUpdated.companyId,

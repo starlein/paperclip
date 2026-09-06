@@ -172,12 +172,14 @@ function shouldIgnoreInstructionsEntry(entry: { name: string; isDirectory(): boo
 
 async function listFilesRecursive(
   rootPath: string,
-  options?: { rejectSymlinks?: boolean },
+  options?: { rejectSymlinks?: boolean; strictRead?: boolean },
 ): Promise<string[]> {
   const output: string[] = [];
 
   async function walk(currentPath: string, relativeDir: string) {
-    const entries = await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
+    const entries = options?.strictRead
+      ? await fs.readdir(currentPath, { withFileTypes: true })
+      : await fs.readdir(currentPath, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (shouldIgnoreInstructionsEntry(entry)) continue;
       const absolutePath = path.join(currentPath, entry.name);
@@ -662,7 +664,10 @@ export function agentInstructionsService() {
     return { bundle, adapterConfig };
   }
 
-  async function exportFiles(agent: AgentLike, options?: { rejectSymlinks?: boolean }): Promise<{
+  async function exportFiles(agent: AgentLike, options?: {
+    rejectSymlinks?: boolean;
+    strictRead?: boolean;
+  }): Promise<{
     files: Record<string, string>;
     entryFile: string;
     warnings: string[];
@@ -670,6 +675,9 @@ export function agentInstructionsService() {
     const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
     if (state.rootPath) {
       const stat = await statIfExists(state.rootPath);
+      if (options?.strictRead && !stat?.isDirectory()) {
+        throw notFound(`Instructions root does not exist: ${state.rootPath}`);
+      }
       if (stat?.isDirectory()) {
         const relativePaths = await listFilesRecursive(state.rootPath, options);
         const files = Object.fromEntries(await Promise.all(relativePaths.map(async (relativePath) => {
@@ -677,6 +685,9 @@ export function agentInstructionsService() {
           const content = await fs.readFile(absolutePath, "utf8");
           return [relativePath, content] as const;
         })));
+        if (options?.strictRead && files[state.entryFile] === undefined) {
+          throw notFound(`Instructions entry file does not exist: ${state.entryFile}`);
+        }
         if (Object.keys(files).length > 0) {
           return { files, entryFile: state.entryFile, warnings: state.warnings };
         }

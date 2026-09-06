@@ -45,6 +45,20 @@ describe("managed agent instruction policy", () => {
     expect(second.content).toBe(first.content);
   });
 
+  it.each(["0", "zero"])("honors an intentional %s-PR company freeze", (limit) => {
+    const result = reconcileManagedAgentInstructionPolicy({
+      agentInstructions: "Drive each repository to at most 2 open implementation PRs.",
+      companyInstructions: `Freeze delivery at at most ${limit} open implementation PRs.`,
+    });
+
+    expect(result).toMatchObject({
+      changed: true,
+      authoritativeLimit: 0,
+      replacedLimits: [2],
+    });
+    expect(result.content).toContain("at most 0 open implementation PRs");
+  });
+
   it("fails closed when the governing instructions contradict themselves", () => {
     expect(() => authoritativeImplementationPrLimit([
       "Enforce at most 5 open implementation PRs.",

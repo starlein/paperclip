@@ -1,4 +1,4 @@
-import { and, eq, isNull, ne } from "drizzle-orm";
+import { and, eq, isNull, ne, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -17,7 +17,10 @@ import { agentService } from "./agents.js";
 import { approvalService } from "./approvals.js";
 import { logActivity } from "./activity-log.js";
 import { agentInstructionsService } from "./agent-instructions.js";
-import { reconcileManagedAgentInstructionPolicy } from "./managed-agent-instruction-policy.js";
+import {
+  authoritativeImplementationPrLimit,
+  reconcileManagedAgentInstructionPolicy,
+} from "./managed-agent-instruction-policy.js";
 
 const MANAGED_AGENT_ENTITY_TYPE = "managed_agent";
 const DEFAULT_MANAGED_AGENT_ADAPTER_TYPE = "process";
@@ -190,24 +193,31 @@ export function pluginManagedAgentService(
       .where(and(
         eq(agents.companyId, companyId),
         eq(agents.role, "ceo"),
-        ne(agents.status, "terminated"),
+        notInArray(agents.status, ["pending_approval", "terminated"]),
       ));
     if (companyCeos.length === 0) return null;
 
     const policyContents = await Promise.all(companyCeos.map(async (companyCeo) => {
-      const exported = await instructions.exportFiles(companyCeo as Agent).catch(() => null);
-      return exported?.files[exported.entryFile] ?? null;
+      const exported = await instructions.exportFiles(companyCeo as Agent, {
+        rejectSymlinks: true,
+        strictRead: true,
+      });
+      const content = exported.files[exported.entryFile];
+      if (content === undefined) {
+        throw notFound(`CEO instructions entry file not found: ${exported.entryFile}`);
+      }
+      return content;
     }));
-    const readablePolicies = policyContents.filter((content): content is string => content !== null);
-    return readablePolicies.length > 0 ? readablePolicies.join("\n\n") : null;
+    const companyInstructions = policyContents.join("\n\n");
+    authoritativeImplementationPrLimit(companyInstructions);
+    return companyInstructions;
   }
 
-  async function applyCompanyPolicyToDeclaredInstructions(
-    companyId: string,
+  function applyCompanyPolicyToDeclaredInstructions(
     declared: ReturnType<typeof declaredInstructionFiles>,
+    companyInstructions: string | null,
   ) {
     if (!declared) return null;
-    const companyInstructions = await companyInstructionPolicy(companyId);
     if (!companyInstructions) return declared;
     const entryContent = declared.files[declared.entryFile] ?? "";
     const reconciled = reconcileManagedAgentInstructionPolicy({
@@ -223,33 +233,83 @@ export function pluginManagedAgentService(
     };
   }
 
+  async function declaredInstructionsForPolicy(
+    companyId: string,
+    declaration: PluginManagedAgentDeclaration,
+    companyInstructions: string | null,
+  ) {
+    const variables = await optionsForInstructionVariables(companyId);
+    return applyCompanyPolicyToDeclaredInstructions(
+      declaredInstructionFiles(declaration, variables),
+      companyInstructions,
+    );
+  }
+
+  function instructionBundleRevisionSnapshot(
+    entryFile: string,
+    files: Record<string, string>,
+  ) {
+    return {
+      instructionsBundle: {
+        entryFile,
+        files,
+      },
+    };
+  }
+
   async function reconcileActiveCompanyPolicy(
     companyId: string,
     declaration: PluginManagedAgentDeclaration,
     agent: Agent,
+    companyInstructions: string | null,
   ) {
-    if (declaration.role === "ceo" || agent.role === "ceo") return agent;
-    const companyInstructions = await companyInstructionPolicy(companyId);
+    if (agent.role === "ceo") return agent;
     if (!companyInstructions) return agent;
 
-    const bundle = await instructions.getBundle(agent).catch(() => null);
-    if (bundle?.mode !== "managed") return agent;
-    const exported = await instructions.exportFiles(agent).catch(() => null);
-    if (!exported) return agent;
+    const bundle = await instructions.getBundle(agent);
+    if (bundle.mode !== "managed") return agent;
+    const exported = await instructions.exportFiles(agent, { strictRead: true });
     const currentContent = exported.files[exported.entryFile];
-    if (currentContent === undefined) return agent;
+    if (currentContent === undefined) {
+      throw notFound(`Managed instructions entry file not found: ${exported.entryFile}`);
+    }
     const reconciled = reconcileManagedAgentInstructionPolicy({
       agentInstructions: currentContent,
       companyInstructions,
     });
     if (!reconciled.changed) return agent;
 
-    const written = await instructions.writeFile(agent, exported.entryFile, reconciled.content);
+    const priorSnapshot = instructionBundleRevisionSnapshot(exported.entryFile, exported.files);
+    const nextSnapshot = instructionBundleRevisionSnapshot(exported.entryFile, {
+      ...exported.files,
+      [exported.entryFile]: reconciled.content,
+    });
+    const revisionSource = `plugin:${optionsForRevisionSource()}:company-instruction-policy`;
+    const snapshotted = await agentSvc.update(agent.id, {
+      adapterConfig: agent.adapterConfig,
+    }, {
+      recordRevision: {
+        source: `${revisionSource}:prewrite-snapshot`,
+        beforeConfigExtension: priorSnapshot,
+        afterConfigExtension: priorSnapshot,
+        changedKeys: ["instructionsBundle"],
+      },
+    });
+    if (!snapshotted) throw notFound("Managed agent not found");
+
+    const written = await instructions.writeFile(
+      snapshotted as Agent,
+      exported.entryFile,
+      reconciled.content,
+    );
     const updated = await agentSvc.update(agent.id, {
       adapterConfig: written.adapterConfig,
     }, {
       recordRevision: {
-        source: `plugin:${optionsForRevisionSource()}:company-instruction-policy`,
+        source: revisionSource,
+        beforeConfigExtension: priorSnapshot,
+        afterConfigExtension: nextSnapshot,
+        changedKeys: ["instructionsBundle"],
       },
     });
     await logActivity(db, {
@@ -414,16 +474,10 @@ export function pluginManagedAgentService(
   }
 
   async function materializeDeclaredInstructions(
-    companyId: string,
     agent: Agent,
-    declaration: PluginManagedAgentDeclaration,
+    declared: ReturnType<typeof declaredInstructionFiles>,
     materializeOptions: { replaceExisting: boolean },
   ): Promise<Agent> {
-    const variables = await optionsForInstructionVariables(companyId);
-    const declared = await applyCompanyPolicyToDeclaredInstructions(
-      companyId,
-      declaredInstructionFiles(declaration, variables),
-    );
     if (!declared) return agent;
 
     const materialized = await instructions.materializeManagedBundle(
@@ -449,12 +503,13 @@ export function pluginManagedAgentService(
     companyId: string,
     agent: Agent | null,
     declaration: PluginManagedAgentDeclaration,
+    companyInstructions: string | null,
   ): Promise<PluginManagedAgentResolution["defaultDrift"]> {
     if (!agent) return null;
-    const variables = await optionsForInstructionVariables(companyId);
-    const declared = await applyCompanyPolicyToDeclaredInstructions(
+    const declared = await declaredInstructionsForPolicy(
       companyId,
-      declaredInstructionFiles(declaration, variables),
+      declaration,
+      companyInstructions,
     );
     if (!declared) return null;
 
@@ -489,6 +544,7 @@ export function pluginManagedAgentService(
     agent: Agent | null,
     status: PluginManagedAgentResolution["status"],
     approvalId?: string | null,
+    companyInstructions: string | null = null,
   ): Promise<PluginManagedAgentResolution> {
     return {
       pluginKey: options.pluginKey,
@@ -499,11 +555,20 @@ export function pluginManagedAgentService(
       agent,
       status,
       approvalId: approvalId ?? null,
-      defaultDrift: await managedInstructionDefaultDrift(companyId, agent, declaration),
+      defaultDrift: await managedInstructionDefaultDrift(
+        companyId,
+        agent,
+        declaration,
+        companyInstructions,
+      ),
     };
   }
 
-  async function createManagedAgent(companyId: string, declaration: PluginManagedAgentDeclaration) {
+  async function createManagedAgent(
+    companyId: string,
+    declaration: PluginManagedAgentDeclaration,
+    companyInstructions: string | null,
+  ) {
     const company = await db
       .select()
       .from(companies)
@@ -511,6 +576,11 @@ export function pluginManagedAgentService(
       .then((rows) => rows[0] ?? null);
     if (!company) throw notFound("Company not found");
 
+    const declaredInstructions = await declaredInstructionsForPolicy(
+      companyId,
+      declaration,
+      companyInstructions,
+    );
     const requiresApproval = company.requireBoardApprovalForNewAgents;
     const adapterType = await resolveManagedAdapterType(companyId, declaration);
     const initialStatus = requiresApproval ? "pending_approval" : declaration.status ?? "idle";
@@ -523,7 +593,11 @@ export function pluginManagedAgentService(
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
     }) as Agent;
-    created = await materializeDeclaredInstructions(companyId, created, declaration, { replaceExisting: true });
+    created = await materializeDeclaredInstructions(
+      created,
+      declaredInstructions,
+      { replaceExisting: true },
+    );
 
     let approvalId: string | null = null;
     if (requiresApproval) {
@@ -587,7 +661,14 @@ export function pluginManagedAgentService(
         approvalId,
       },
     });
-    return resolution(companyId, declaration, created as Agent, "created", approvalId);
+    return resolution(
+      companyId,
+      declaration,
+      created as Agent,
+      "created",
+      approvalId,
+      companyInstructions,
+    );
   }
 
   async function backfillManagedPauseReason(
@@ -641,7 +722,11 @@ export function pluginManagedAgentService(
     return refreshed ?? agent;
   }
 
-  async function get(agentKey: string, companyId: string) {
+  async function get(
+    agentKey: string,
+    companyId: string,
+    resolvedCompanyInstructions?: string | null,
+  ) {
       const declaration = declarationFor(agentKey);
       const binding = await getBinding(companyId, agentKey);
       const boundAgentId = typeof binding?.data?.agentId === "string" ? binding.data.agentId : null;
@@ -650,48 +735,85 @@ export function pluginManagedAgentService(
       if (!agent || agent.companyId !== companyId || agent.status === "terminated") {
         return resolution(companyId, declaration, null, "missing");
       }
-      return resolution(companyId, declaration, agent as Agent, "resolved");
+      const companyInstructions = resolvedCompanyInstructions === undefined
+        ? await companyInstructionPolicy(companyId)
+        : resolvedCompanyInstructions;
+      return resolution(
+        companyId,
+        declaration,
+        agent as Agent,
+        "resolved",
+        null,
+        companyInstructions,
+      );
   }
 
-  async function reconcile(agentKey: string, companyId: string) {
+  async function reconcile(
+    agentKey: string,
+    companyId: string,
+    resolvedCompanyInstructions?: string | null,
+  ) {
       const declaration = declarationFor(agentKey);
-      const current = await get(agentKey, companyId);
+      const companyInstructions = resolvedCompanyInstructions === undefined
+        ? await companyInstructionPolicy(companyId)
+        : resolvedCompanyInstructions;
+      const current = await get(agentKey, companyId, companyInstructions);
       if (current.agent) {
         const policyReconciled = await reconcileActiveCompanyPolicy(
           companyId,
           declaration,
           current.agent,
+          companyInstructions,
         );
         const agent = await backfillManagedPauseReason(companyId, declaration, policyReconciled);
         await upsertBinding(companyId, declaration, agent.id);
-        return resolution(companyId, declaration, agent, current.status, current.approvalId);
+        return resolution(
+          companyId,
+          declaration,
+          agent,
+          current.status,
+          current.approvalId,
+          companyInstructions,
+        );
       }
 
       const relinkCandidate = await findRelinkCandidate(companyId, declaration);
       if (relinkCandidate) {
-        await upsertBinding(companyId, declaration, relinkCandidate.id);
-        const relinkedAgent = await agentSvc.getById(relinkCandidate.id) as Agent | null;
-        if (!relinkedAgent) throw notFound("Managed agent not found");
         const policyReconciled = await reconcileActiveCompanyPolicy(
           companyId,
           declaration,
-          relinkedAgent,
+          relinkCandidate as Agent,
+          companyInstructions,
         );
         const agent = await backfillManagedPauseReason(
           companyId,
           declaration,
           policyReconciled,
         );
-        return resolution(companyId, declaration, agent, "relinked");
+        await upsertBinding(companyId, declaration, agent.id);
+        return resolution(
+          companyId,
+          declaration,
+          agent,
+          "relinked",
+          null,
+          companyInstructions,
+        );
       }
 
-      return createManagedAgent(companyId, declaration);
+      return createManagedAgent(companyId, declaration, companyInstructions);
   }
 
   async function reset(agentKey: string, companyId: string) {
       const declaration = declarationFor(agentKey);
-      const reconciled = await reconcile(agentKey, companyId);
+      const companyInstructions = await companyInstructionPolicy(companyId);
+      const reconciled = await reconcile(agentKey, companyId, companyInstructions);
       if (!reconciled.agent) return reconciled;
+      const declaredInstructions = await declaredInstructionsForPolicy(
+        companyId,
+        declaration,
+        companyInstructions,
+      );
       const currentMetadata = reconciled.agent.metadata && typeof reconciled.agent.metadata === "object"
         ? reconciled.agent.metadata
         : {};
@@ -705,7 +827,11 @@ export function pluginManagedAgentService(
         },
       });
       if (!updated) throw notFound("Managed agent not found");
-      const updatedAgent = await materializeDeclaredInstructions(companyId, updated as Agent, declaration, { replaceExisting: true });
+      const updatedAgent = await materializeDeclaredInstructions(
+        updated as Agent,
+        declaredInstructions,
+        { replaceExisting: true },
+      );
       await upsertBinding(companyId, declaration, updatedAgent.id, {}, adapterType);
       await logActivity(db, {
         companyId,
@@ -719,7 +845,14 @@ export function pluginManagedAgentService(
           managedResourceKey: declaration.agentKey,
         },
       });
-      return resolution(companyId, declaration, updatedAgent, "reset");
+      return resolution(
+        companyId,
+        declaration,
+        updatedAgent,
+        "reset",
+        null,
+        companyInstructions,
+      );
   }
 
   return {

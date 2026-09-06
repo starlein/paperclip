@@ -80,6 +80,27 @@ function pausedManifest(): PaperclipPluginManifestV1 {
   return pluginManifest;
 }
 
+function releaseDevopsManifest(role = "devops"): PaperclipPluginManifestV1 {
+  const pluginManifest = manifest();
+  pluginManifest.agents![0] = {
+    ...pluginManifest.agents![0]!,
+    agentKey: "release-devops",
+    displayName: "Release DevOps",
+    role,
+    adapterConfig: {},
+    instructions: {
+      entryFile: "AGENTS.md",
+      content: [
+        "# Release DevOps",
+        "",
+        "Drive each repository to at most two open implementation PRs.",
+        "Preserve the full owner/repo#number identity.",
+      ].join("\n"),
+    },
+  };
+  return pluginManifest;
+}
+
 if (!embeddedPostgresSupport.supported) {
   console.warn(
     `Skipping embedded Postgres plugin-managed agent tests on this host: ${embeddedPostgresSupport.reason ?? "unsupported environment"}`,
@@ -136,6 +157,50 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       manifest: pluginManifest,
     });
     return { companyId, pluginId, pluginManifest, services };
+  }
+
+  async function createCeoWithPolicy(
+    companyId: string,
+    policy: string,
+    status: "idle" | "pending_approval" = "idle",
+  ) {
+    const ceo = await agentService(db).create(companyId, {
+      name: status === "pending_approval" ? "CEO Candidate" : "CEO",
+      role: "ceo",
+      status,
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+      budgetMonthlyCents: 0,
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+    const ceoInstructions = await agentInstructionsService().materializeManagedBundle(
+      ceo,
+      { "AGENTS.md": policy },
+    );
+    const updated = await agentService(db).update(ceo.id, { adapterConfig: ceoInstructions.adapterConfig }, {
+      allowPendingApprovalConfigUpdate: true,
+    });
+    return updated!;
+  }
+
+  async function withTempInstructionsHome(run: () => Promise<void>) {
+    const previousHome = process.env.PAPERCLIP_HOME;
+    const previousInstance = process.env.PAPERCLIP_INSTANCE_ID;
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-managed-agent-policy-"));
+    process.env.PAPERCLIP_HOME = tempHome;
+    process.env.PAPERCLIP_INSTANCE_ID = "test";
+    try {
+      await run();
+    } finally {
+      if (previousHome === undefined) delete process.env.PAPERCLIP_HOME;
+      else process.env.PAPERCLIP_HOME = previousHome;
+      if (previousInstance === undefined) delete process.env.PAPERCLIP_INSTANCE_ID;
+      else process.env.PAPERCLIP_INSTANCE_ID = previousInstance;
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
   }
 
   it("creates and resolves managed agents by stable resource key", async () => {
@@ -387,47 +452,16 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
     process.env.PAPERCLIP_HOME = tempHome;
     process.env.PAPERCLIP_INSTANCE_ID = "test";
     try {
-      const pluginManifest = manifest();
-      pluginManifest.agents![0] = {
-        ...pluginManifest.agents![0]!,
-        agentKey: "release-devops",
-        displayName: "Release DevOps",
-        role: "devops",
-        adapterConfig: {},
-        instructions: {
-          entryFile: "AGENTS.md",
-          content: [
-            "# Release DevOps",
-            "",
-            "Drive each repository to at most two open implementation PRs.",
-            "Preserve the full owner/repo#number identity.",
-          ].join("\n"),
-        },
-      };
+      const pluginManifest = releaseDevopsManifest();
       const { companyId, services } = await seedCompanyAndPlugin({ manifest: pluginManifest });
-      const ceo = await agentService(db).create(companyId, {
-        name: "CEO",
-        role: "ceo",
-        status: "idle",
-        adapterType: "process",
-        adapterConfig: {},
-        runtimeConfig: {},
-        permissions: {},
-        budgetMonthlyCents: 0,
-        spentMonthlyCents: 0,
-        lastHeartbeatAt: null,
-      });
-      const ceoInstructions = await agentInstructionsService().materializeManagedBundle(
-        ceo,
-        {
-          "AGENTS.md": [
-            "# Company delivery policy",
-            "",
-            "Enforce a WIP limit of at most 5 open implementation PRs per repository.",
-          ].join("\n"),
-        },
+      await createCeoWithPolicy(
+        companyId,
+        [
+          "# Company delivery policy",
+          "",
+          "Enforce a WIP limit of at most 5 open implementation PRs per repository.",
+        ].join("\n"),
       );
-      await agentService(db).update(ceo.id, { adapterConfig: ceoInstructions.adapterConfig });
 
       const created = await services.agents.managedReconcile({
         companyId,
@@ -467,6 +501,47 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
         companyImplementationPrCap: 5,
         replacedImplementationPrLimits: [2],
       });
+      const policyRevisions = await db
+        .select()
+        .from(agentConfigRevisions)
+        .where(eq(
+          agentConfigRevisions.source,
+          "plugin:paperclip.managed-agents-test:company-instruction-policy",
+        ));
+      expect(policyRevisions).toHaveLength(1);
+      expect(policyRevisions[0]?.changedKeys).toContain("instructionsBundle");
+      expect(policyRevisions[0]?.beforeConfig).toMatchObject({
+        instructionsBundle: {
+          entryFile: "AGENTS.md",
+          files: {
+            "AGENTS.md": expect.stringContaining("at most two open implementation PRs"),
+          },
+        },
+      });
+      expect(policyRevisions[0]?.afterConfig).toMatchObject({
+        instructionsBundle: {
+          entryFile: "AGENTS.md",
+          files: {
+            "AGENTS.md": expect.stringContaining("at most 5 open implementation PRs"),
+          },
+        },
+      });
+      const prewriteRevisions = await db
+        .select()
+        .from(agentConfigRevisions)
+        .where(eq(
+          agentConfigRevisions.source,
+          "plugin:paperclip.managed-agents-test:company-instruction-policy:prewrite-snapshot",
+        ));
+      expect(prewriteRevisions).toHaveLength(1);
+      expect(prewriteRevisions[0]?.afterConfig).toMatchObject({
+        instructionsBundle: {
+          entryFile: "AGENTS.md",
+          files: {
+            "AGENTS.md": expect.stringContaining("at most two open implementation PRs"),
+          },
+        },
+      });
     } finally {
       if (previousHome === undefined) delete process.env.PAPERCLIP_HOME;
       else process.env.PAPERCLIP_HOME = previousHome;
@@ -474,6 +549,129 @@ describeEmbeddedPostgres("plugin-managed agents", () => {
       else process.env.PAPERCLIP_INSTANCE_ID = previousInstance;
       await fs.rm(tempHome, { recursive: true, force: true });
     }
+  });
+
+  it("ignores an unapproved CEO candidate when resolving company policy", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+      });
+      await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 2 open implementation PRs per repository.",
+        "pending_approval",
+      );
+
+      const created = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      const instructionsPath = created.agent?.adapterConfig.instructionsFilePath as string;
+      const content = await fs.readFile(instructionsPath, "utf8");
+      expect(content).toContain("at most 5 open implementation PRs");
+      expect(content).not.toContain("at most 2 open implementation PRs");
+    });
+  });
+
+  it("fails closed before creating a managed agent when CEO policy is contradictory", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+      });
+      await createCeoWithPolicy(
+        companyId,
+        [
+          "Enforce at most 5 open implementation PRs per repository.",
+          "Freeze at most 0 open implementation PRs per repository.",
+        ].join("\n"),
+      );
+
+      await expect(services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      })).rejects.toThrow("contradictory implementation PR limits: 5, 0");
+
+      const companyAgents = await db.select().from(agents).where(eq(agents.companyId, companyId));
+      expect(companyAgents).toHaveLength(1);
+      await expect(db.select().from(pluginEntities)).resolves.toHaveLength(0);
+      await expect(db.select().from(pluginManagedResources)).resolves.toHaveLength(0);
+    });
+  });
+
+  it("fails closed before creating a managed agent when active CEO instructions are unreadable", async () => {
+    await withTempInstructionsHome(async () => {
+      const { companyId, services } = await seedCompanyAndPlugin({
+        manifest: releaseDevopsManifest(),
+      });
+      const ceo = await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const instructionsPath = ceo.adapterConfig.instructionsFilePath as string;
+      await fs.rm(instructionsPath);
+
+      await expect(services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      })).rejects.toThrow("Instructions entry file does not exist: AGENTS.md");
+
+      const companyAgents = await db.select().from(agents).where(eq(agents.companyId, companyId));
+      expect(companyAgents).toHaveLength(1);
+      await expect(db.select().from(pluginEntities)).resolves.toHaveLength(0);
+    });
+  });
+
+  it("uses the persisted role when a declaration changes an existing managed agent to CEO", async () => {
+    await withTempInstructionsHome(async () => {
+      const pluginManifest = releaseDevopsManifest("ceo");
+      const { companyId, pluginId, services } = await seedCompanyAndPlugin({ manifest: pluginManifest });
+      await createCeoWithPolicy(
+        companyId,
+        "Enforce at most 5 open implementation PRs per repository.",
+      );
+      const agentId = randomUUID();
+      const [candidate] = await db.insert(agents).values({
+        id: agentId,
+        companyId,
+        name: "Release DevOps",
+        role: "devops",
+        status: "idle",
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+        metadata: {
+          paperclipManagedResource: {
+            pluginId,
+            pluginKey: pluginManifest.id,
+            resourceKind: "agent",
+            resourceKey: "release-devops",
+          },
+        },
+      }).returning();
+      const materialized = await agentInstructionsService().materializeManagedBundle(
+        candidate!,
+        {
+          "AGENTS.md": "Drive each repository to at most two open implementation PRs.",
+        },
+      );
+      await agentService(db).update(agentId, { adapterConfig: materialized.adapterConfig });
+
+      const relinked = await services.agents.managedReconcile({
+        companyId,
+        agentKey: "release-devops",
+      });
+      expect(relinked.status).toBe("relinked");
+      expect(relinked.agent?.role).toBe("devops");
+      const instructionsPath = relinked.agent?.adapterConfig.instructionsFilePath as string;
+      await expect(fs.readFile(instructionsPath, "utf8")).resolves.toContain(
+        "at most 5 open implementation PRs",
+      );
+    });
   });
 
   it("repairs a missing binding by relinking a same-company managed agent marker", async () => {

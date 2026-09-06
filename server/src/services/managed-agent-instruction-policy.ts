@@ -1,4 +1,5 @@
 const NUMBER_WORDS = new Map<string, number>([
+  ["zero", 0],
   ["one", 1],
   ["two", 2],
   ["three", 3],
@@ -12,14 +13,14 @@ const NUMBER_WORDS = new Map<string, number>([
 ]);
 
 const IMPLEMENTATION_PR_LIMIT_PATTERN =
-  /\bat most\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+open implementation PRs?\b/gi;
+  /\bat most\s+(zero|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+open implementation PRs?\b/gi;
 
 function parseLimit(raw: string) {
   const normalized = raw.toLowerCase();
   const wordValue = NUMBER_WORDS.get(normalized);
   if (wordValue !== undefined) return wordValue;
   const numericValue = Number.parseInt(normalized, 10);
-  return Number.isSafeInteger(numericValue) && numericValue > 0 ? numericValue : null;
+  return Number.isSafeInteger(numericValue) && numericValue >= 0 ? numericValue : null;
 }
 
 export function implementationPrLimits(instructions: string) {
