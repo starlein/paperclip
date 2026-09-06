@@ -178,6 +178,14 @@ describe("redaction", () => {
     expect(redactSensitiveText(input)).toBe(input);
   });
 
+  it("composes bearer and dotenv redaction on a shared line", () => {
+    expect(redactSensitiveText(
+      "Authorization: Bearer live-bearer-token-value OPENAI_API_KEY=paperclip-shell-secret",
+    )).toBe(
+      `Authorization: Bearer ${REDACTED_EVENT_VALUE} OPENAI_API_KEY=${REDACTED_EVENT_VALUE}`,
+    );
+  });
+
   it("redacts inline secrets from command metadata without hiding safe command text", () => {
     const input = {
       command: "custom-acp --token ghp_example_secret env OPENAI_API_KEY=sk-live-example custom-acp",
