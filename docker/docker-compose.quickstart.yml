@@ -17,7 +17,7 @@ services:
     # dies visibly rather than starving the host of pids.
     pids_limit: 2048
     ports:
-      - "${PAPERCLIP_PORT:-3100}:3100"
+      - "127.0.0.1:${PAPERCLIP_PORT:-3100}:3100"
     environment:
       HOST: "0.0.0.0"
       PAPERCLIP_HOME: "/paperclip"
@@ -33,9 +33,47 @@ services:
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
       # Base URL users will access the UI at
       PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
+      PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
+      # Trust only private-network proxy peers. Port 3100 is loopback-only.
+      TRUST_PROXY: "uniquelocal"
+      # Set true only when every non-loopback request enters through the TLS proxy.
+      CLAUDE_LOGIN_EDGE_TLS_TERMINATED: "${CLAUDE_LOGIN_EDGE_TLS_TERMINATED:-false}"
 
       # ── Required secret for session signing (generate with: openssl rand -hex 32) ──
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
     volumes:
       # Persistent data directory (database, agent workspaces, uploads)
       - "${PAPERCLIP_DATA_DIR:-../data/docker-paperclip}:/paperclip"
+    networks:
+      default:
+        aliases:
+          - paperclip-app
+
+  proxy:
+    profiles: [proxy]
+    image: paperclip-nginx-selfsigned:local
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      paperclip:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PAPERCLIP_TLS_SERVER_NAME: "${PAPERCLIP_TLS_SERVER_NAME:-localhost}"
+      PAPERCLIP_TLS_CERT_ALT_NAMES: "${PAPERCLIP_TLS_CERT_ALT_NAMES:-DNS:localhost,IP:127.0.0.1}"
+      NGINX_ENVSUBST_FILTER: "^PAPERCLIP_TLS_SERVER_NAME$"
+    volumes:
+      - proxy-certs:/etc/nginx/certs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO /dev/null https://127.0.0.1/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  proxy-certs:

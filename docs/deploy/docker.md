@@ -27,6 +27,28 @@ PAPERCLIP_PORT=3200 PAPERCLIP_DATA_DIR=../data/pc \
 
 **Note:** `PAPERCLIP_DATA_DIR` is resolved relative to the compose file (`docker/`), so `../data/pc` maps to `data/pc` in the project root.
 
+## HTTPS reverse proxy
+
+The quickstart includes an optional Nginx profile. It redirects HTTP to HTTPS,
+terminates TLS on port `443`, and forwards requests to Paperclip over the private
+Compose network. Paperclip's direct port is bound to host loopback only.
+
+For a local self-signed certificate:
+
+```sh
+BETTER_AUTH_SECRET="$(openssl rand -hex 32)" COMPOSE_PROFILES=proxy \
+  CLAUDE_LOGIN_EDGE_TLS_TERMINATED=true \
+  PAPERCLIP_PUBLIC_URL=https://localhost \
+  docker compose -f docker/docker-compose.quickstart.yml up --build
+```
+
+For a real hostname, set `PAPERCLIP_PUBLIC_URL`,
+`PAPERCLIP_ALLOWED_HOSTNAMES`, `PAPERCLIP_TLS_SERVER_NAME`,
+`PAPERCLIP_TLS_CERT_ALT_NAMES`, and `CLAUDE_LOGIN_EDGE_TLS_TERMINATED=true`, then
+mount the certificate and key onto
+`/etc/nginx/certs/fullchain.pem` and `/etc/nginx/certs/key.pem` through a local,
+gitignored Compose override.
+
 ## Manual Docker Build
 
 ```sh

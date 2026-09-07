@@ -29,7 +29,7 @@ services:
     # the whole host of pids.
     pids_limit: 2048
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     environment:
       DATABASE_URL: postgres://paperclip:paperclip@db:5432/paperclip
       PORT: "3100"
@@ -37,13 +37,47 @@ services:
       PAPERCLIP_DEPLOYMENT_MODE: "authenticated"
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "private"
       PAPERCLIP_PUBLIC_URL: "${PAPERCLIP_PUBLIC_URL:-http://localhost:3100}"
+      PAPERCLIP_ALLOWED_HOSTNAMES: "${PAPERCLIP_ALLOWED_HOSTNAMES:-localhost,127.0.0.1}"
+      TRUST_PROXY: "uniquelocal"
+      CLAUDE_LOGIN_EDGE_TLS_TERMINATED: "${CLAUDE_LOGIN_EDGE_TLS_TERMINATED:-false}"
       BETTER_AUTH_SECRET: "${BETTER_AUTH_SECRET:?BETTER_AUTH_SECRET must be set}"
     volumes:
       - paperclip-data:/paperclip
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      default:
+        aliases:
+          - paperclip-app
+
+  proxy:
+    profiles: [proxy]
+    image: paperclip-nginx-selfsigned:local
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PAPERCLIP_TLS_SERVER_NAME: "${PAPERCLIP_TLS_SERVER_NAME:-localhost}"
+      PAPERCLIP_TLS_CERT_ALT_NAMES: "${PAPERCLIP_TLS_CERT_ALT_NAMES:-DNS:localhost,IP:127.0.0.1}"
+      NGINX_ENVSUBST_FILTER: "^PAPERCLIP_TLS_SERVER_NAME$"
+    volumes:
+      - proxy-certs:/etc/nginx/certs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO /dev/null https://127.0.0.1/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
 volumes:
   pgdata:
   paperclip-data:
+  proxy-certs:
