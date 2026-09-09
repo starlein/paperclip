@@ -901,7 +901,23 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         .then((rows) => rows[0] ?? null),
     ]);
 
-    return Boolean(run || deferredWake);
+    if (run) return true;
+    if (!deferredWake) return false;
+
+    const blockingRun = await db
+      .select({ id: heartbeatRuns.id })
+      .from(heartbeatRuns)
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, companyId),
+          inArray(heartbeatRuns.status, [...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES]),
+          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0] ?? null);
+
+    return Boolean(blockingRun);
   }
 
   async function hasPendingWakeInteraction(companyId: string, issueId: string) {
@@ -3925,6 +3941,24 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             }
             continue;
           }
+
+          const now = new Date();
+          await db
+            .update(agentWakeupRequests)
+            .set({
+              status: "cancelled",
+              finishedAt: now,
+              error: "Deferred execution wake lost its blocking run; replaced by review participant recovery",
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(agentWakeupRequests.companyId, issue.companyId),
+                eq(agentWakeupRequests.agentId, participantAgentId),
+                eq(agentWakeupRequests.status, "deferred_issue_execution"),
+                sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issue.id}`,
+              ),
+            );
 
           const queued = await enqueueStrandedIssueRecovery({
             issueId: issue.id,

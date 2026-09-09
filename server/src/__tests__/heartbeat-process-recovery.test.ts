@@ -5353,12 +5353,30 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   it("dispatches a pending execution-review participant that never received a run", async () => {
     const { agentId, issueId, runId, wakeupRequestId, stageId } =
       await seedInReviewParticipantRunFixture();
+    const deferredWakeupRequestId = randomUUID();
     await db
       .update(issues)
       .set({ executionRunId: null, executionLockedAt: null })
       .where(eq(issues.id, issueId));
     await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await db.insert(agentWakeupRequests).values({
+      id: deferredWakeupRequestId,
+      companyId: (await db.select({ companyId: issues.companyId }).from(issues).where(eq(issues.id, issueId)))[0]!
+        .companyId,
+      agentId,
+      source: "assignment",
+      reason: "issue_execution_deferred",
+      status: "deferred_issue_execution",
+      payload: {
+        issueId,
+        _paperclipWakeContext: {
+          issueId,
+          taskId: issueId,
+          wakeReason: "execution_review_requested",
+        },
+      },
+    });
 
     const heartbeat = heartbeatService(db);
     const result = await heartbeat.reconcileStrandedAssignedIssues();
@@ -5377,6 +5395,14 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       retryReason: "execution_review_participant_recovery",
       currentStageId: stageId,
     });
+
+    const deferredWakeup = await db
+      .select({ status: agentWakeupRequests.status, finishedAt: agentWakeupRequests.finishedAt })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, deferredWakeupRequestId))
+      .then((rows) => rows[0]);
+    expect(deferredWakeup?.status).toBe("cancelled");
+    expect(deferredWakeup?.finishedAt).toBeInstanceOf(Date);
   });
 
   it("restores an interrupted checked-out review stage before re-enqueueing its participant", async () => {
