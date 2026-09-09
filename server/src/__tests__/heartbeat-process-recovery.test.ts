@@ -5350,6 +5350,35 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(retryRun?.contextSnapshot as Record<string, unknown>).not.toHaveProperty("modelProfile");
   });
 
+  it("dispatches a pending execution-review participant that never received a run", async () => {
+    const { agentId, issueId, runId, wakeupRequestId, stageId } =
+      await seedInReviewParticipantRunFixture();
+    await db
+      .update(issues)
+      .set({ executionRunId: null, executionLockedAt: null })
+      .where(eq(issues.id, issueId));
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.reviewParticipantRequeued).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const retryRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId))
+      .then((runs) => runs[0] ?? null);
+    expect(retryRun?.contextSnapshot).toMatchObject({
+      issueId,
+      wakeReason: "execution_review_participant_recovery",
+      retryReason: "execution_review_participant_recovery",
+      currentStageId: stageId,
+    });
+  });
+
   it("restores an interrupted checked-out review stage before re-enqueueing its participant", async () => {
     const { agentId, issueId, runId, wakeupRequestId, stageId } =
       await seedInReviewParticipantRunFixture();
