@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
+  agentWakeupRequests,
   agents,
   companies,
   createDb,
@@ -49,6 +50,7 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -228,12 +230,23 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
 
   it("terminalizes an orphaned running run whose process is gone, then clears the lock", async () => {
     const { companyId, agentId, runningRunId } = await seed();
+    const wakeupRequestId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      source: "automation",
+      reason: "issue_assigned",
+      status: "claimed",
+      runId: runningRunId,
+      claimedAt: new Date(),
+    });
     // The run recorded a pid, but the process and its sandbox are gone. A pid
     // this large never maps to a live process, so isPidAlive returns false.
     // The issue is not terminal, so only the process-death authority applies.
     await db
       .update(heartbeatRuns)
-      .set({ processPid: 2_000_000_000 })
+      .set({ processPid: 2_000_000_000, wakeupRequestId })
       .where(eq(heartbeatRuns.id, runningRunId));
     const issueId = randomUUID();
     await db.insert(issues).values({
@@ -263,6 +276,19 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     expect(run?.status).toBe("interrupted");
     expect(run?.errorCode).toBe("orphaned_running_run");
 
+    const wakeup = await db
+      .select({
+        status: agentWakeupRequests.status,
+        finishedAt: agentWakeupRequests.finishedAt,
+        error: agentWakeupRequests.error,
+      })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0]);
+    expect(wakeup?.status).toBe("failed");
+    expect(wakeup?.finishedAt).toBeInstanceOf(Date);
+    expect(wakeup?.error).toContain("process and sandbox gone");
+
     const lock = await db
       .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })
       .from(issues)
@@ -284,10 +310,21 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     // process-death authority misses this case. The issue-terminal authority
     // catches it: the issue reached "done" while the run row stayed "running".
     const { companyId, agentId, runningRunId } = await seed();
+    const wakeupRequestId = randomUUID();
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId,
+      source: "automation",
+      reason: "issue_assigned",
+      status: "claimed",
+      runId: runningRunId,
+      claimedAt: new Date(),
+    });
     // process.pid is the live test process, so isPidAlive returns true.
     await db
       .update(heartbeatRuns)
-      .set({ processPid: process.pid })
+      .set({ processPid: process.pid, wakeupRequestId })
       .where(eq(heartbeatRuns.id, runningRunId));
     const issueId = randomUUID();
     await db.insert(issues).values({
@@ -317,6 +354,19 @@ describeEmbeddedPostgres("recovery sweepStaleIssueLocks", () => {
     // succeeded run carries no error code.
     expect(run?.status).toBe("succeeded");
     expect(run?.errorCode).toBeNull();
+
+    const wakeup = await db
+      .select({
+        status: agentWakeupRequests.status,
+        finishedAt: agentWakeupRequests.finishedAt,
+        error: agentWakeupRequests.error,
+      })
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, wakeupRequestId))
+      .then((rows) => rows[0]);
+    expect(wakeup?.status).toBe("completed");
+    expect(wakeup?.finishedAt).toBeInstanceOf(Date);
+    expect(wakeup?.error).toBeNull();
 
     const lock = await db
       .select({ checkoutRunId: issues.checkoutRunId, executionRunId: issues.executionRunId })

@@ -5350,6 +5350,75 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(retryRun?.contextSnapshot as Record<string, unknown>).not.toHaveProperty("modelProfile");
   });
 
+  it("restores an interrupted checked-out review stage before re-enqueueing its participant", async () => {
+    const { agentId, issueId, runId, wakeupRequestId, stageId } =
+      await seedInReviewParticipantRunFixture();
+    const finishedAt = new Date("2026-03-19T00:05:00.000Z");
+    await db
+      .update(heartbeatRuns)
+      .set({
+        status: "cancelled",
+        errorCode: "issue_continuation_waiting_on_review",
+        startedAt: new Date("2026-03-19T00:00:00.000Z"),
+        finishedAt,
+        updatedAt: finishedAt,
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    await db
+      .update(agentWakeupRequests)
+      .set({
+        status: "cancelled",
+        finishedAt,
+        updatedAt: finishedAt,
+      })
+      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    await db
+      .update(issues)
+      .set({
+        status: "in_progress",
+        checkoutRunId: null,
+        executionRunId: null,
+        executionLockedAt: null,
+        updatedAt: finishedAt,
+      })
+      .where(eq(issues.id, issueId));
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+
+    expect(result.reviewParticipantRequeued).toBe(1);
+    expect(result.issueIds).toEqual([issueId]);
+
+    const issue = await db
+      .select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(issue).toEqual({ status: "in_review", assigneeAgentId: agentId });
+
+    const retryRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.agentId, agentId))
+      .then((runs) => runs.find((row) => row.id !== runId) ?? null);
+    expect(retryRun?.contextSnapshot).toMatchObject({
+      issueId,
+      wakeReason: "execution_review_participant_recovery",
+      retryReason: "execution_review_participant_recovery",
+      currentStageId: stageId,
+    });
+
+    const audit = await db
+      .select({ action: activityLog.action, details: activityLog.details })
+      .from(activityLog)
+      .where(eq(activityLog.entityId, issueId))
+      .then((rows) => rows.find((row) =>
+        (row.details as Record<string, unknown> | null)?.source ===
+        "recovery.restore_checked_out_review_stage"
+      ));
+    expect(audit).toMatchObject({ action: "issue.updated" });
+  });
+
   it("re-enqueues a stranded execution-review participant when another agent has the latest issue run", async () => {
     const { companyId, agentId, issueId, runId, wakeupRequestId, stageId } =
       await seedInReviewParticipantRunFixture();
