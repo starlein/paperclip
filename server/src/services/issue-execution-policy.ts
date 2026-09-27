@@ -68,7 +68,7 @@ type TransitionResult = {
  * before the pending review escalates to the responsible human. Policies can
  * override via `maxReviewRounds`; human decisions always reset the counter.
  */
-export const DEFAULT_MAX_REVIEW_ROUNDS = 3;
+export const DEFAULT_MAX_REVIEW_ROUNDS = 5;
 
 const COMPLETED_STATUS: IssueExecutionState["status"] = "completed";
 const PENDING_STATUS: IssueExecutionState["status"] = "pending";

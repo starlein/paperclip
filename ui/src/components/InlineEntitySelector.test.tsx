@@ -91,7 +91,7 @@ describe("InlineEntitySelector", () => {
 
   it("focuses the search input when opened on coarse pointers", async () => {
     window.matchMedia = vi.fn().mockImplementation((query: string) => ({
-      matches: query === "(pointer: coarse)",
+      matches: query === "(pointer: coarse)" || query === "(max-width: 40rem)",
       media: query,
       onchange: null,
       addEventListener: vi.fn(),
@@ -116,6 +116,7 @@ describe("InlineEntitySelector", () => {
           searchPlaceholder="Search responsible..."
           emptyMessage="No responsible found."
           onChange={vi.fn()}
+          disablePortal
         />,
       );
     });
@@ -129,7 +130,59 @@ describe("InlineEntitySelector", () => {
 
     const searchInput = document.querySelector('input[placeholder="Search responsible..."]') as HTMLInputElement | null;
     expect(searchInput).not.toBeNull();
+    expect(searchInput?.className).toContain("text-base");
+    expect(document.querySelector("[data-mobile-entity-picker]")).not.toBeNull();
+    expect(container.contains(document.querySelector("[data-mobile-entity-picker]"))).toBe(false);
+    expect(document.querySelector("[data-mobile-entity-picker-header]")?.textContent).toContain("Responsible");
+    expect(document.querySelector('button[aria-label="Close selector"]')).not.toBeNull();
     expect(document.activeElement).toBe(searchInput);
+
+    await act(async () => {
+      (document.querySelector('button[aria-label="Close selector"]') as HTMLButtonElement | null)?.click();
+      await Promise.resolve();
+    });
+    expect(document.querySelector("[data-mobile-entity-picker]")).toBeNull();
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("opens on programmatic focus without toggling an open popover closed", async () => {
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <InlineEntitySelector
+          value=""
+          options={[{ id: "project-1", label: "Project One" }]}
+          placeholder="Project"
+          noneLabel="No project"
+          searchPlaceholder="Search projects..."
+          emptyMessage="No projects found."
+          onChange={vi.fn()}
+        />,
+      );
+    });
+
+    const trigger = container.querySelector("button") as HTMLButtonElement | null;
+    expect(trigger).not.toBeNull();
+
+    await act(async () => {
+      trigger?.focus();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('input[placeholder="Search projects..."]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      trigger?.focus();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('input[placeholder="Search projects..."]'),
+    ).not.toBeNull();
 
     act(() => {
       root.unmount();

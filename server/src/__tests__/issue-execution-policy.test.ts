@@ -1955,14 +1955,33 @@ describe("review round circuit breaker", () => {
     });
   });
 
-  it("escalates the pending stage to the responsible human at the round cap", () => {
+  it("hands the fourth agent review round back to the executor", () => {
     const result = applyIssueExecutionPolicyTransition({
-      issue: reviewPendingIssue({}, { changesRequestedCount: 2 }),
+      issue: reviewPendingIssue({}, { changesRequestedCount: 3 }),
       policy,
       requestedStatus: "in_progress",
       requestedAssigneePatch: {},
       actor: { agentId: qaAgentId },
-      commentBody: "Round three feedback — still not converging",
+      commentBody: "Round four feedback",
+    });
+
+    expect(result.patch.status).toBe("in_progress");
+    expect(result.patch.assigneeAgentId).toBe(coderAgentId);
+    expect(result.patch.assigneeUserId).toBeNull();
+    expect(result.patch.executionState).toMatchObject({
+      status: "changes_requested",
+      changesRequestedCount: 4,
+    });
+  });
+
+  it("escalates the pending stage to the responsible human at the round cap", () => {
+    const result = applyIssueExecutionPolicyTransition({
+      issue: reviewPendingIssue({}, { changesRequestedCount: 4 }),
+      policy,
+      requestedStatus: "in_progress",
+      requestedAssigneePatch: {},
+      actor: { agentId: qaAgentId },
+      commentBody: "Round five feedback — still not converging",
     });
 
     // The decision is still recorded, but the stage stays pending with the
@@ -1975,7 +1994,7 @@ describe("review round circuit breaker", () => {
       status: "pending",
       currentStageId: reviewStageId,
       currentParticipant: { type: "user", userId: boardUserId },
-      changesRequestedCount: 3,
+      changesRequestedCount: 5,
     });
   });
 
@@ -1985,7 +2004,7 @@ describe("review round circuit breaker", () => {
         { assigneeAgentId: null, assigneeUserId: boardUserId },
         {
           currentParticipant: { type: "user", userId: boardUserId },
-          changesRequestedCount: 3,
+          changesRequestedCount: 5,
         },
       ),
       policy,
@@ -2004,7 +2023,7 @@ describe("review round circuit breaker", () => {
           { assigneeAgentId: null, assigneeUserId: boardUserId },
           {
             currentParticipant: { type: "user", userId: boardUserId },
-            changesRequestedCount: 3,
+            changesRequestedCount: 5,
           },
         ),
         policy,
@@ -2023,7 +2042,7 @@ describe("review round circuit breaker", () => {
           { assigneeAgentId: null, assigneeUserId: boardUserId },
           {
             currentParticipant: { type: "user", userId: boardUserId },
-            changesRequestedCount: 3,
+            changesRequestedCount: 5,
           },
         ),
         policy,
@@ -2041,7 +2060,7 @@ describe("review round circuit breaker", () => {
         { assigneeAgentId: qaAgentId, assigneeUserId: null },
         {
           currentParticipant: { type: "user", userId: boardUserId },
-          changesRequestedCount: 3,
+          changesRequestedCount: 5,
         },
       ),
       policy,
@@ -2055,7 +2074,7 @@ describe("review round circuit breaker", () => {
     expect(result.patch.executionState).toMatchObject({
       status: "pending",
       currentParticipant: { type: "user", userId: boardUserId },
-      changesRequestedCount: 3,
+      changesRequestedCount: 5,
     });
   });
 
@@ -2065,7 +2084,7 @@ describe("review round circuit breaker", () => {
         { assigneeAgentId: null, assigneeUserId: boardUserId },
         {
           currentParticipant: { type: "user", userId: boardUserId },
-          changesRequestedCount: 3,
+          changesRequestedCount: 5,
         },
       ),
       policy,
@@ -2089,7 +2108,7 @@ describe("review round circuit breaker", () => {
         { assigneeAgentId: null, assigneeUserId: boardUserId },
         {
           currentParticipant: { type: "user", userId: boardUserId },
-          changesRequestedCount: 3,
+          changesRequestedCount: 5,
         },
       ),
       policy,

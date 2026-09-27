@@ -15,8 +15,6 @@ RUN usermod -u $USER_UID --non-unique node \
   && usermod -g $USER_GID -d /paperclip node
 
 # Docker CLI for controlled Docker-outside-of-Docker access via mounted /var/run/docker.sock.
-# DOCKER_GID must match the host docker.sock group so the non-root node user can manage
-# sibling containers, Docker networks, and published ports through the host daemon.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends docker.io docker-cli docker-compose \
   && rm -rf /var/lib/apt/lists/* \
@@ -62,25 +60,86 @@ COPY scripts/link-plugin-dev-sdk.mjs scripts/
 
 RUN pnpm install --frozen-lockfile
 
-# Keep this image tag in sync with packages/paperclip-runner/rust-toolchain.toml.
-FROM rust:1.97.1-slim-trixie AS rust-toolchain
-
-FROM base AS build
+FROM base AS rust-toolchain
 WORKDIR /app
-# Copy the compiler from the version-pinned official Rust stage above. The C
-# toolchain remains explicit because Rust build scripts require a linker and
-# pkg-config even though Rust itself no longer comes from apt.
+# Debian's packaged rust lags the ecosystem (trixie ships 1.85) and the
+# runner's dependency tree now requires a newer rustc. Install rustup from a
+# version-pinned, checksum-verified installer and let the runner's own
+# rust-toolchain.toml choose the compiler — one pin, owned by the runner
+# package, shared by CI and image builds alike.
+#
+# The C toolchain is explicit: apt's cargo used to pull gcc in as a
+# dependency, and rustup does not — without it every build script dies on
+# "linker `cc` not found".
 RUN apt-get update \
   && apt-get install -y --no-install-recommends gcc libc6-dev pkg-config \
   && rm -rf /var/lib/apt/lists/*
-COPY --from=rust-toolchain /usr/local/cargo /usr/local/cargo
-COPY --from=rust-toolchain /usr/local/rustup /usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo \
-  RUSTUP_HOME=/usr/local/rustup \
-  PATH=/usr/local/cargo/bin:$PATH
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+ARG RUSTUP_VERSION=1.29.0
+ARG RUSTUP_SHA256_AMD64=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+ARG RUSTUP_SHA256_ARM64=9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) rustTarget="x86_64-unknown-linux-gnu"; sha256="$RUSTUP_SHA256_AMD64" ;; \
+      arm64) rustTarget="aarch64-unknown-linux-gnu"; sha256="$RUSTUP_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/rustup-init "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustTarget}/rustup-init"; \
+    echo "${sha256}  /tmp/rustup-init" | sha256sum -c -; \
+    chmod +x /tmp/rustup-init; \
+    /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain none; \
+    rm /tmp/rustup-init
+# Install the package-owned compiler before any application source enters the
+# stage. rustup-init above installs rustup itself, not the selected compiler.
+COPY packages/paperclip-runner/rust-toolchain.toml /tmp/runner-toolchain/rust-toolchain.toml
+RUN cd /tmp/runner-toolchain && rustup show
+
+# Pin the recipe generator and its dependency lockfile. It is a build-only tool
+# and uses the same package-owned compiler as both native build stages.
+FROM rust-toolchain AS rust-chef
+RUN cd /tmp/runner-toolchain && cargo install cargo-chef --version 0.1.73 --locked
+
+FROM rust-chef AS runner-plan
+WORKDIR /app/packages/paperclip-runner
+COPY packages/paperclip-runner/rust-toolchain.toml ./
+COPY packages/paperclip-runner/runner ./runner
+RUN cd runner && cargo chef prepare --recipe-path /tmp/runner-recipe.json
+
+FROM rust-chef AS runner-deps
+WORKDIR /app/packages/paperclip-runner/runner
+COPY packages/paperclip-runner/rust-toolchain.toml ../
+# The recipe changes only when dependency manifests, the lockfile, or target
+# metadata change. Source edits can reuse this compiled dependency layer.
+COPY --from=runner-plan /tmp/runner-recipe.json /tmp/runner-recipe.json
+RUN cargo chef cook --release --locked --package paperclip-runner-core --bin paperclip-runnerd --recipe-path /tmp/runner-recipe.json \
+  && find . -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +
+
+FROM runner-deps AS runner-build
+WORKDIR /app/packages/paperclip-runner
+# Rust embeds protocol schemas and fixtures with include_str!. Keep those
+# alongside the complete Cargo workspace so every compile-time input keys
+# this layer. Ordinary server/UI edits can then reuse the native build.
+COPY packages/paperclip-runner/rust-toolchain.toml ./
+COPY packages/paperclip-runner/runner ./runner
+COPY packages/paperclip-runner/protocol ./protocol
+# Cargo fingerprints source mtimes. Normalize them here and after the full
+# source copy below so a fresh checkout cannot invalidate unchanged inputs.
+RUN find runner protocol -type f -exec touch -d @0 {} + \
+  && touch -d @0 rust-toolchain.toml \
+  && cargo build --release --manifest-path runner/Cargo.toml --locked -p paperclip-runner-core --bin paperclip-runnerd
+
+FROM runner-build AS build
+WORKDIR /app
 COPY --from=deps /app /app
 COPY . .
-
+RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -type f -exec touch -d @0 {} + \
+  && touch -d @0 packages/paperclip-runner/rust-toolchain.toml
+# Both the browser bundle and server stamp need the source commit. Declare it
+# after the stable dependency layers, before either application build.
+ARG PAPERCLIP_BUILD_COMMIT=""
 RUN pnpm --filter @paperclipai/shared build
 RUN pnpm --filter @paperclipai/db build
 RUN pnpm --filter @paperclipai/adapter-utils build
@@ -93,18 +152,14 @@ RUN pnpm --filter @paperclipai/skills-catalog build \
   && pnpm --filter @paperclipai/teams-catalog build
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
-
 # The server build runs scripts/write-build-stamp.mjs, which stamps the built
 # commit into dist/build-info.json. The build context has no .git, so the
 # script reads PAPERCLIP_BUILD_COMMIT instead. Docker exposes an ARG to the
-# next RUN as an environment variable, so declare it here — in the build
-# stage — before the server build. The production stage below declares the
+# next RUN as an environment variable. The production stage below declares the
 # same ARG again for the runtime fallback; an ARG goes out of scope at the
 # end of its stage. Empty for local `docker build`, which then writes no stamp.
-ARG PAPERCLIP_BUILD_COMMIT=""
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm --filter @paperclipai/server build
-
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN test -f packages/adapter-utils/dist/index.js \
   && test -f packages/mcp-server/dist/stdio.js \
@@ -116,14 +171,6 @@ RUN rm -rf packages/paperclip-runner/runner/target
 FROM base AS production
 ARG USER_UID=1000
 ARG USER_GID=1000
-# Real version for this build, computed from `git describe` on the CI runner
-# (the image has no .git, so the server cannot derive it at runtime). Empty for
-# local `docker build`, which just leaves the server on its normal fallbacks.
-ARG PAPERCLIP_BUILD_VERSION=""
-# The exact commit this image was built from, for the same reason: server-info
-# falls back to PAPERCLIP_BUILD_COMMIT when git is unavailable, which feeds the
-# /api/health `commit` field that deploy tooling verifies. Empty locally.
-ARG PAPERCLIP_BUILD_COMMIT=""
 # Refreshes the tool layer below when it changes (CI stamps an ISO week, so
 # the @latest CLI tools advance weekly). Without it the cached layer would
 # freeze the tools until an unrelated cache bust.
@@ -143,14 +190,20 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
   && mkdir -p /paperclip \
   && chown node:node /paperclip
 
-# Sudoers Drop-in mit korrekten Rechten kopieren:
-COPY --chmod=0440 scripts/paperclip-bwrap /etc/sudoers.d/paperclip-bwrap
-
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+COPY --chmod=0440 scripts/paperclip-bwrap /etc/sudoers.d/paperclip-bwrap
+
 COPY --chown=node:node --from=build /app /app
 
+# Declare per-build metadata after the stable RUN layers. Docker includes
+# in-scope ARG values in a RUN's environment even when its command does not
+# mention them; declaring these earlier invalidates the weekly tool cache.
+# The build stage still receives the commit before writing dist/build-info.json.
+# Empty for local builds, preserving the server's normal version fallbacks.
+ARG PAPERCLIP_BUILD_VERSION=""
+ARG PAPERCLIP_BUILD_COMMIT=""
 ENV NODE_ENV=production \
   HOME=/paperclip \
   HOST=0.0.0.0 \
@@ -170,6 +223,13 @@ ENV NODE_ENV=production \
 
 EXPOSE 3100
 
+# tini, not node, is PID 1. The entrypoint ends in `exec`, so without an init
+# node inherits PID 1 and never wait()s the orphans the kernel re-parents onto
+# it -- agent runs spawn git/claude/esbuild/sh descendants that outlive their
+# leader, so they pile up as permanent zombies (~79/h measured) until the
+# cgroup pid limit is exhausted and *every* fork() in the container fails.
+# tini reaps adopted orphans and forwards signals, so the exec chain below and
+# graceful shutdown are unchanged. Mirrors docker/agent-runtime/Dockerfile.base.
 ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]
 CMD ["node", "--import", "./server/node_modules/tsx/dist/loader.mjs", "server/dist/index.js"]
 

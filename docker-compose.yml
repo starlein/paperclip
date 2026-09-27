@@ -85,7 +85,7 @@ services:
   # Paperclip application (always started)
   # ---------------------------------------------------------------------------
   paperclip:
-    image: ghcr.io/starlein/paperclip:latest
+    image: ghcr.io/starlein/paperclip:20260927
     build:
       context: .
       dockerfile: Dockerfile
@@ -96,6 +96,8 @@ services:
         DOCKER_GID: ${DOCKER_GID:-992}
     container_name: paperclip
     restart: unless-stopped
+    # Match upstream's process-leak backstop; tini remains PID 1 in the image.
+    pids_limit: 2048
     depends_on:
       postgres:
         condition: service_healthy
