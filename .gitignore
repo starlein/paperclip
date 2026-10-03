@@ -78,3 +78,12 @@ tests/storybook-visual/playwright-report/
 .vercel/
 .env.local
 test-results/
+
+# Local deployment overrides and TLS material
+docker-compose.override.yml
+docker-compose.*.local.yml
+docker/nginx/certs/
+*.pem
+*.key
+*.crt
+*.csr

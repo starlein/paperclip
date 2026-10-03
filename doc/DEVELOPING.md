@@ -370,6 +370,8 @@ These browser suites are intended for targeted local verification and CI, not th
 
 For normal issue work, start with the smallest targeted check that proves the change. Reserve repo-wide typecheck/build/test runs for PR-ready handoff or changes broad enough that narrow checks do not cover the risk.
 
+Summary refresh routines use `POST /api/companies/{companyId}/summary-slots/routine-refresh/claim` before writing. The claim is company-scoped, accepts only the checked-out built-in Summarizer routine task, selects changed stale slots, and binds that task as each selected slot's active generator. Subsequent writes still use the normal summary-slot `PUT` with the returned `latestRevisionId` as `baseRevisionId`.
+
 ### Task search evaluation
 
 The task search relevance rubric and regression corpus are documented in

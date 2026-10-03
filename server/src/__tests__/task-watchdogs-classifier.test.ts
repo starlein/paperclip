@@ -13,6 +13,7 @@ function issue(overrides: Partial<TaskWatchdogClassifierIssue> = {}): TaskWatchd
     identifier: "PAP-1",
     title: "Source",
     status: "todo",
+    projectId: null,
     parentId: null,
     assigneeAgentId: "agent-1",
     assigneeUserId: null,
@@ -50,7 +51,19 @@ describe("task watchdog subtree classifier", () => {
     });
   });
 
-  it("treats terminal and waiting leaves as stopped work that needs verification", () => {
+  it.each([
+    ["active run", { activeRuns: [{ companyId, issueId: sourceId, agentId: "agent-1", status: "running" }] }],
+    ["queued wake", { queuedWakeRequests: [{ companyId, issueId: sourceId, agentId: "agent-1", status: "queued" }] }],
+  ])("keeps a terminal issue live while it retains an %s", (_label, livePath) => {
+    const result = classify({
+      issues: [issue({ status: "done" })],
+      ...livePath,
+    });
+
+    expect(result).toMatchObject({ state: "live", liveIssueIds: [sourceId] });
+  });
+
+  it("treats non-resumable waiting leaves as stopped work that needs verification", () => {
     const result = classify({
       issues: [
         issue({ status: "done" }),
@@ -62,6 +75,8 @@ describe("task watchdog subtree classifier", () => {
         id: "interaction-1",
         kind: "request_confirmation",
         status: "pending",
+        continuationPolicy: "none",
+        effectiveResolverPolicy: "human_only",
       }],
     });
 
@@ -84,6 +99,47 @@ describe("task watchdog subtree classifier", () => {
     expect(result.pendingInteractionsByIssueId).toEqual({
       [childId]: [{ id: "interaction-1", kind: "request_confirmation" }],
     });
+  });
+
+  it.each(["blocked", "in_review"])(
+    "treats a %s issue with a resolvable resumable interaction as live",
+    (status) => {
+      const result = classify({
+        issues: [issue({ status })],
+        pendingInteractions: [{
+          companyId,
+          issueId: sourceId,
+          id: "interaction-1",
+          kind: "request_confirmation",
+          status: "pending",
+          continuationPolicy: "wake_assignee",
+          effectiveResolverPolicy: "human_only",
+        }],
+      });
+
+      expect(result).toMatchObject({ state: "live", liveIssueIds: [sourceId] });
+    },
+  );
+
+  it.each([
+    ["no continuation", "none", "human_only"],
+    ["invalid resolver", "wake_assignee", "unknown"],
+    ["resolved interaction", "wake_assignee", "human_only", "accepted"],
+  ])("does not treat an interaction with %s as live", (_label, continuationPolicy, effectiveResolverPolicy, status = "pending") => {
+    const result = classify({
+      issues: [issue({ status: "blocked" })],
+      pendingInteractions: [{
+        companyId,
+        issueId: sourceId,
+        id: "interaction-1",
+        kind: "request_confirmation",
+        status,
+        continuationPolicy,
+        effectiveResolverPolicy,
+      }],
+    });
+
+    expect(result.state).toBe("stopped");
   });
 
   it("keeps the material fingerprint stable across metadata-only ticks", () => {
@@ -304,6 +360,32 @@ describe("task watchdog subtree classifier", () => {
 
     expect(result.state).toBe("stopped");
     expect(result.includedIssueIds).toEqual([sourceId]);
+  });
+
+  it("summarizes mixed terminal descendants while excluding a reusable watchdog branch", () => {
+    const result = classify({
+      issues: [
+        issue({ status: "done" }),
+        issue({ id: "done-child", identifier: "PAP-2", parentId: sourceId, originKind: null, status: "done" }),
+        issue({ id: "blocked-child", identifier: "PAP-3", parentId: sourceId, originKind: null, status: "blocked" }),
+        issue({ id: "review-child", identifier: "PAP-4", parentId: sourceId, originKind: null, status: "in_review" }),
+        issue({ id: watchdogId, identifier: "PAP-5", parentId: sourceId, originKind: "task_watchdog", status: "todo" }),
+        issue({ id: "watchdog-work", identifier: "PAP-6", parentId: watchdogId, originKind: null, status: "blocked" }),
+      ],
+    });
+
+    expect(result.state).toBe("stopped");
+    if (result.state !== "stopped") return;
+    expect(result.includedIssueIds).toEqual([sourceId, "blocked-child", "done-child", "review-child"]);
+    expect(result.stoppedLeaves.map((leaf) => [leaf.issueId, leaf.status])).toEqual([
+      ["blocked-child", "blocked"],
+      ["review-child", "in_review"],
+    ]);
+    expect(result.terminalLeafSummaries.map((leaf) => [leaf.issueId, leaf.status])).toEqual([
+      ["blocked-child", "blocked"],
+      ["done-child", "done"],
+      ["review-child", "in_review"],
+    ]);
   });
 
   it("defers a stopped verdict for an issue created inside the first-run grace window", () => {

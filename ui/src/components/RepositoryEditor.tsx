@@ -82,4 +82,3 @@ export function RepositoryEditor({ selected, onChange, state = "ready", availabl
     </fieldset>
   );
 }
-

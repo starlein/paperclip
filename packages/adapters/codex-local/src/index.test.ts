@@ -24,7 +24,7 @@ describe("codex local adapter metadata", () => {
     expect(isCodexLocalFastModeSupported(DEFAULT_CODEX_LOCAL_MODEL)).toBe(true);
     expect(isCodexLocalFastModeSupported("gpt-6-astra")).toBe(true);
     expect(modelIds).not.toContain("gpt-5.3-codex");
-    expect(modelIds).not.toContain("gpt-5.3-codex-spark");
+    expect(modelIds).toContain("gpt-5.3-codex-spark");
   });
 
   it("uses the reasoning efforts advertised for GPT-6 Astra", () => {

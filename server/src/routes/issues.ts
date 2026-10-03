@@ -208,9 +208,10 @@ import {
   resolveTaskWatchdogMutationScope,
   taskWatchdogScopeAllowsIssueMutation,
 } from "../services/task-watchdog-scope.js";
-import type {
-  TaskWatchdogServiceDeps,
-  taskWatchdogService,
+import {
+  loadTaskWatchdogSubtreeIssues,
+  type TaskWatchdogServiceDeps,
+  type taskWatchdogService,
 } from "../services/task-watchdogs.js";
 import { logger } from "../middleware/logger.js";
 import {
@@ -556,6 +557,7 @@ function noopTaskWatchdogService(): TaskWatchdogService {
         includedIssueIds: [],
         stopFingerprint: "task_watchdog_stop:unavailable",
         stoppedLeaves: [],
+        terminalLeafSummaries: [],
         stopSnapshot: {
           version: 2,
           fingerprint: "task_watchdog_stop:unavailable",
@@ -8559,6 +8561,7 @@ export function issueRoutes(
       continuationSummary,
       currentExecutionWorkspace,
       activeRecoveryAction,
+      watchdogSubtreeIssues,
     ] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
       svc.getAncestors(issue.id),
@@ -8579,6 +8582,7 @@ export function issueRoutes(
       ),
       currentExecutionWorkspacePromise,
       recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
+      loadTaskWatchdogSubtreeIssues(db, issue.companyId, issue.id),
     ]);
     const recoveryActionsByRelationIssue = await relationRecoveryActionMap(
       recoveryActionsSvc,
@@ -8610,6 +8614,29 @@ export function issueRoutes(
       continuationSummary && redactLowTrust
         ? redactQuarantinedBodyForHigherTrust(continuationSummary)
         : continuationSummary;
+    const readableWatchdogSubtreeIssues = await filterIssuesForActor(
+      req,
+      watchdogSubtreeIssues,
+    );
+    const readableWatchdogIssueIds = new Set(
+      readableWatchdogSubtreeIssues.map((candidate) => candidate.id),
+    );
+    const compactWatchdogSubtreeIssue = (
+      candidate: (typeof readableWatchdogSubtreeIssues)[number],
+    ) => ({
+      id: candidate.id,
+      identifier: candidate.identifier,
+      title: candidate.title,
+      status: candidate.status,
+      parentId:
+        candidate.parentId && readableWatchdogIssueIds.has(candidate.parentId)
+          ? candidate.parentId
+          : null,
+      assigneeAgentId: candidate.assigneeAgentId,
+      assigneeUserId: candidate.assigneeUserId,
+      originKind: candidate.originKind,
+      updatedAt: candidate.updatedAt,
+    });
     const planReviewContext = await buildPlanReviewContext({
       db,
       companyId: issue.companyId,
@@ -8655,6 +8682,12 @@ export function issueRoutes(
         status: ancestor.status,
         priority: ancestor.priority,
       })),
+      children: readableWatchdogSubtreeIssues
+        .filter((candidate) => candidate.parentId === issue.id)
+        .map(compactWatchdogSubtreeIssue),
+      descendants: readableWatchdogSubtreeIssues
+        .filter((candidate) => candidate.id !== issue.id)
+        .map(compactWatchdogSubtreeIssue),
       project: project
         ? {
             id: project.id,
@@ -13133,6 +13166,48 @@ export function issueRoutes(
         updateFields.executionPolicy !== undefined
           ? (updateFields.executionPolicy as NormalizedExecutionPolicy | null)
           : previousExecutionPolicy;
+      const pendingExecutionState = parseIssueExecutionState(existing.executionState);
+      const activeStageParticipant =
+        pendingExecutionState?.status === "pending"
+          ? pendingExecutionState.currentParticipant
+          : null;
+      const actorIsActiveStageParticipant =
+        activeStageParticipant?.type === "agent"
+          ? activeStageParticipant.agentId === actor.agentId
+          : activeStageParticipant?.type === "user" && actor.actorType === "user"
+            ? activeStageParticipant.userId === actor.actorId
+            : false;
+      const blockerMutationRequested = Array.isArray(req.body.blockedByIssueIds);
+      const activeStageBlockingDispositionRequested =
+        updateFields.status === "blocked" ||
+        (updateFields.status === "in_progress" && actorIsActiveStageParticipant);
+      let preservePendingStageOnBlocked = false;
+      let allowNonParticipantPendingStageBlock = req.actor.type === "board";
+      if (
+        activeStageParticipant &&
+        (blockerMutationRequested || activeStageBlockingDispositionRequested)
+      ) {
+        const requestedBlockerIds = blockerMutationRequested
+          ? [...new Set(req.body.blockedByIssueIds as string[])]
+          : null;
+        const hasUnresolvedBlocker = requestedBlockerIds
+          ? (await svc.getProposedDependencyReadiness(existing.id, requestedBlockerIds))
+              .unresolvedBlockerCount > 0
+          : (await svc.getDependencyReadiness(existing.id)).unresolvedBlockerCount > 0;
+        if (hasUnresolvedBlocker) {
+          if (req.body.executionPolicy !== undefined) {
+            throw unprocessable(
+              "executionPolicy cannot be changed while unresolved blockers suspend an active stage",
+            );
+          }
+          if (!actorIsActiveStageParticipant && req.actor.type === "agent") {
+            const actorWatchdogScope = await resolveTaskWatchdogMutationScope(db, req.actor);
+            allowNonParticipantPendingStageBlock = actorWatchdogScope.kind === "watchdog";
+          }
+          updateFields.status = "blocked";
+          preservePendingStageOnBlocked = true;
+        }
+      }
       if (normalizedAssigneeAgentId !== undefined) {
         updateFields.assigneeAgentId = normalizedAssigneeAgentId;
       }
@@ -13171,6 +13246,8 @@ export function issueRoutes(
         reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
         monitorExplicitlyUpdated:
           req.body.executionPolicy !== undefined && monitorChanged,
+        preservePendingStageOnBlocked,
+        allowNonParticipantPendingStageBlock,
       });
       const decisionId = transition.decision ? randomUUID() : null;
       if (decisionId) {
@@ -14858,7 +14935,7 @@ export function issueRoutes(
           });
           await destroyReusableSandboxLeasesForTerminalIssue(issue);
         }
-        if (becameTerminal && issue.parentId) {
+        if (becameTerminal && issue.parentId && issue.originKind !== TASK_WATCHDOG_ORIGIN_KIND) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
             issue.parentId,
           );
@@ -18204,7 +18281,7 @@ export function issueRoutes(
           });
           await destroyReusableSandboxLeasesForTerminalIssue(currentIssue);
         }
-        if (becameTerminal && currentIssue.parentId) {
+        if (becameTerminal && currentIssue.parentId && currentIssue.originKind !== TASK_WATCHDOG_ORIGIN_KIND) {
           const parent = await svc.getWakeableParentAfterChildCompletion(
             currentIssue.parentId,
           );

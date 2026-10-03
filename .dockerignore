@@ -2,6 +2,21 @@
 .github
 .paperclip
 .pnpm-store
+# Never publish local deployment settings, credentials, or patch backups.
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+*.crt
+*.csr
+docker-compose.override.yml
+docker-compose.*.local.yml
+docker/nginx/certs
+**/*.orig
+**/*.rej
+_HOWTOSTART.txt
 node_modules
 **/node_modules
 coverage

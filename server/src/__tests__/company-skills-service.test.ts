@@ -103,6 +103,39 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     return { companyId, skillId, key: `company/${companyId}/cached` };
   }
 
+  it.each(["github", "skills_sh"] as const)("reads cached SKILL.md for %s when GitHub is unavailable", async (sourceType) => {
+    const { companyId, skillId } = await createPinnedRuntimeFixture();
+    await db.update(companySkills).set({ sourceType }).where(eq(companySkills.id, skillId));
+    const upstream = vi.fn().mockRejectedValue(new Error("Upstream outage"));
+    vi.stubGlobal("fetch", upstream);
+    try {
+      await expect(svc.readFile(companyId, skillId, "SKILL.md")).resolves.toMatchObject({
+        content: "# Installed skill",
+        path: "SKILL.md",
+        editable: false,
+      });
+      expect(upstream).toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("does not substitute cached SKILL.md for a failed supporting file or an empty cache", async () => {
+    const { companyId, skillId } = await createPinnedRuntimeFixture();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable", { status: 503 })));
+    try {
+      await expect(svc.readFile(companyId, skillId, "references/0.md")).rejects.toThrow("503");
+      await db.update(companySkills).set({ markdown: "" }).where(eq(companySkills.id, skillId));
+      await expect(svc.readFile(companyId, skillId, "SKILL.md")).rejects.toThrow("503");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("prefers fetched GitHub markdown over the cached SKILL.md", async () => {
+    const { companyId, skillId } = await createPinnedRuntimeFixture();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("# Remote skill")));
+    try {
+      await expect(svc.readFile(companyId, skillId, "SKILL.md")).resolves.toMatchObject({ content: "# Remote skill" });
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("refreshes once, reuses pinned runtime contents across service instances, and ignores cosmetic changes", async () => {
     const { companyId, skillId, key } = await createPinnedRuntimeFixture();
     const upstream = vi.fn(async (url: string | URL) => new Response(String(url)));

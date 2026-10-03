@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { eq, sql } from "drizzle-orm";
 import {
   activityLog,
   agents,
+  builtInManagedResources,
   companies,
   createDb,
   documentRevisions,
@@ -13,6 +14,7 @@ import {
   issues,
   projectWorkspaces,
   projects,
+  routines,
   summarySlots,
 } from "@paperclipai/db";
 import {
@@ -47,10 +49,12 @@ describeEmbeddedPostgres("summary slot service", () => {
 
   afterEach(async () => {
     await db.delete(summarySlots);
+    await db.delete(builtInManagedResources);
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
+    await db.delete(routines);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -444,13 +448,101 @@ describeEmbeddedPostgres("summary slot service", () => {
     });
   });
 
+  describe("routine refresh claims", () => {
+    async function seedRefreshClaim() {
+      const companyId = await seedCompany();
+      const projectId = await seedProject(companyId);
+      const agentId = await seedSummarizer(companyId);
+      const runId = await seedRun(companyId, agentId);
+      const [document] = await db.insert(documents).values({
+        companyId,
+        latestBody: "# Previous summary",
+        latestRevisionNumber: 1,
+      }).returning();
+      const [revision] = await db.insert(documentRevisions).values({
+        companyId,
+        documentId: document!.id,
+        revisionNumber: 1,
+        body: document!.latestBody,
+      }).returning();
+      await db.update(documents).set({ latestRevisionId: revision!.id }).where(eq(documents.id, document!.id));
+      const [slot] = await db.insert(summarySlots).values({
+        ...projectSelector(companyId, projectId),
+        documentId: document!.id,
+        status: "idle",
+        lastGeneratedAt: new Date(Date.now() - 48 * 60 * 60 * 1_000),
+      }).returning();
+      const [routine] = await db.insert(routines).values({
+        companyId,
+        title: "Refresh stale summary slots",
+        assigneeAgentId: agentId,
+        status: "paused",
+      }).returning();
+      await db.insert(builtInManagedResources).values({
+        companyId,
+        bundleKey: "summarizer",
+        resourceKind: "routine",
+        resourceKey: "refresh-stale-summaries",
+        resourceId: routine!.id,
+        stockVersion: "test",
+        stockHash: "test",
+        defaultsJson: {},
+      });
+      const [issue] = await db.insert(issues).values({
+        companyId,
+        title: "Refresh stale summary slots",
+        status: "in_progress",
+        assigneeAgentId: agentId,
+        checkoutRunId: runId,
+        originKind: "routine_execution",
+        originId: routine!.id,
+      }).returning();
+      return {
+        input: { companyId, generationIssueId: issue!.id, staleAfterHours: 24, maxSlots: 10, scopeKinds: "project" as const },
+        actor: { agentId, runId },
+        slot: slot!,
+      };
+    }
+
+    it.each(["cancelled", "replaced-run"] as const)(
+      "rejects claims when the routine is %s after preflight without changing the slot",
+      async (mutation) => {
+        const { input, actor, slot } = await seedRefreshClaim();
+        const transaction = db.transaction.bind(db);
+        // Commit the competing change after preflight, before the claim transaction.
+        // All queries and cancellation finalization still use real PostgreSQL.
+        const transactionSpy = vi.spyOn(db, "transaction").mockImplementationOnce(async (callback, config) => {
+          if (mutation === "cancelled") {
+            await issueService(db).update(input.generationIssueId, { status: "cancelled" });
+          } else {
+            const replacementRunId = await seedRun(input.companyId, actor.agentId);
+            await db.update(issues).set({ checkoutRunId: replacementRunId }).where(eq(issues.id, input.generationIssueId));
+          }
+          return transaction(callback, config);
+        });
+        try {
+          await expect(summarySlotService(db).claimRoutineRefreshSlots(input, actor)).rejects.toMatchObject({ status: 403 });
+        } finally {
+          transactionSpy.mockRestore();
+        }
+        const [slotAfter] = await db.select().from(summarySlots).where(eq(summarySlots.id, slot.id));
+        expect(slotAfter).toEqual(slot);
+        await expect(db.select().from(documentRevisions).where(eq(documentRevisions.documentId, slot.documentId!)))
+          .resolves.toHaveLength(1);
+      },
+    );
+  });
+
   describe("summarizer writes", () => {
     async function startGeneration(companyId: string, projectId: string, summarizerAgentId: string) {
       const svc = summarySlotService(db);
       const generated = await svc.generate(projectSelector(companyId, projectId), { userId: "board-user" });
       const runId = await seedRun(companyId, summarizerAgentId);
       // Simulate the summarizer run checking out its linked generation task.
-      await db.update(issues).set({ checkoutRunId: runId }).where(eq(issues.id, generated.generatingIssue.id));
+      await db
+        .update(issues)
+        .set({ status: "in_progress", checkoutRunId: runId })
+        .where(eq(issues.id, generated.generatingIssue.id));
       return { svc, generationIssueId: generated.generatingIssue.id, runId };
     }
 
@@ -477,7 +569,7 @@ describeEmbeddedPostgres("summary slot service", () => {
       const nextRunId = await seedRun(companyId, summarizerAgentId);
       await db
         .update(issues)
-        .set({ checkoutRunId: nextRunId })
+        .set({ status: "in_progress", checkoutRunId: nextRunId })
         .where(eq(issues.id, nextGeneration.generatingIssue.id));
       const written = await svc.write(
         {
@@ -548,7 +640,10 @@ describeEmbeddedPostgres("summary slot service", () => {
         userId: "board-user",
       });
       const runId2 = await seedRun(companyId, summarizerAgentId);
-      await db.update(issues).set({ checkoutRunId: runId2 }).where(eq(issues.id, second.generatingIssue.id));
+      await db
+        .update(issues)
+        .set({ status: "in_progress", checkoutRunId: runId2 })
+        .where(eq(issues.id, second.generatingIssue.id));
 
       await expect(
         svc.write(
@@ -604,6 +699,192 @@ describeEmbeddedPostgres("summary slot service", () => {
       ).rejects.toMatchObject({ status: 403 });
     });
 
+    it.each(["cancelled", "done", "blocked"] as const)(
+      "rejects manual generation writes after the task becomes %s without mutating the slot",
+      async (status) => {
+        const companyId = await seedCompany();
+        const projectId = await seedProject(companyId);
+        const summarizerAgentId = await seedSummarizer(companyId);
+        const { svc, generationIssueId, runId } = await startGeneration(
+          companyId,
+          projectId,
+          summarizerAgentId,
+        );
+
+        await db.update(issues).set({ status }).where(eq(issues.id, generationIssueId));
+        const [slotBefore] = await db.select().from(summarySlots).where(eq(summarySlots.companyId, companyId));
+
+        await expect(
+          svc.write(
+            { ...projectSelector(companyId, projectId), markdown: "# Stale summary", generationIssueId },
+            { agentId: summarizerAgentId, runId },
+          ),
+        ).rejects.toMatchObject({ status: 403 });
+
+        const [slotAfter] = await db.select().from(summarySlots).where(eq(summarySlots.companyId, companyId));
+        expect(slotAfter).toEqual(slotBefore);
+        await expect(db.select().from(documents).where(eq(documents.companyId, companyId))).resolves.toHaveLength(0);
+        await expect(
+          db.select().from(documentRevisions).where(eq(documentRevisions.companyId, companyId)),
+        ).resolves.toHaveLength(0);
+      },
+    );
+
+    it("rejects a generation task that is reassigned after claim", async () => {
+      const companyId = await seedCompany();
+      const projectId = await seedProject(companyId);
+      const summarizerAgentId = await seedSummarizer(companyId);
+      const replacementAgentId = await seedPlainAgent(companyId);
+      const { svc, generationIssueId, runId } = await startGeneration(companyId, projectId, summarizerAgentId);
+      await db
+        .update(issues)
+        .set({ assigneeAgentId: replacementAgentId })
+        .where(eq(issues.id, generationIssueId));
+
+      await expect(
+        svc.write(
+          { ...projectSelector(companyId, projectId), markdown: "# Reassigned", generationIssueId },
+          { agentId: summarizerAgentId, runId },
+        ),
+      ).rejects.toMatchObject({ status: 403 });
+      await expect(db.select().from(documents).where(eq(documents.companyId, companyId))).resolves.toHaveLength(0);
+    });
+
+    it("rejects a generation task that is deleted or moved to another company after claim", async () => {
+      for (const mutation of ["deleted", "foreign-company"] as const) {
+        const companyId = await seedCompany();
+        const otherCompanyId = await seedCompany();
+        const projectId = await seedProject(companyId);
+        const summarizerAgentId = await seedSummarizer(companyId);
+        const { svc, generationIssueId, runId } = await startGeneration(companyId, projectId, summarizerAgentId);
+
+        if (mutation === "deleted") {
+          await db.delete(issues).where(eq(issues.id, generationIssueId));
+        } else {
+          await db.update(issues).set({ companyId: otherCompanyId }).where(eq(issues.id, generationIssueId));
+        }
+
+        await expect(
+          svc.write(
+            { ...projectSelector(companyId, projectId), markdown: `# ${mutation}`, generationIssueId },
+            { agentId: summarizerAgentId, runId },
+          ),
+        ).rejects.toMatchObject({ status: 403 });
+        await expect(db.select().from(documents).where(eq(documents.companyId, companyId))).resolves.toHaveLength(0);
+      }
+    });
+
+    it("rechecks task cancellation after waiting at the write transaction boundary", async () => {
+      const companyId = await seedCompany();
+      const projectId = await seedProject(companyId);
+      const summarizerAgentId = await seedSummarizer(companyId);
+      const { svc, generationIssueId, runId } = await startGeneration(companyId, projectId, summarizerAgentId);
+
+      let releaseCancellation!: () => void;
+      const cancellationMayCommit = new Promise<void>((resolve) => {
+        releaseCancellation = resolve;
+      });
+      let issueLocked!: () => void;
+      const issueLockAcquired = new Promise<void>((resolve) => {
+        issueLocked = resolve;
+      });
+      const cancellation = db.transaction(async (tx) => {
+        await tx.select().from(issues).where(eq(issues.id, generationIssueId)).for("update");
+        issueLocked();
+        await cancellationMayCommit;
+        await tx.update(issues).set({ status: "cancelled" }).where(eq(issues.id, generationIssueId));
+      });
+      await issueLockAcquired;
+
+      let writeSettled = false;
+      const writeOutcome = svc
+        .write(
+          { ...projectSelector(companyId, projectId), markdown: "# Raced summary", generationIssueId },
+          { agentId: summarizerAgentId, runId },
+        )
+        .then(
+          (value) => ({ ok: true as const, value }),
+          (error: unknown) => ({ ok: false as const, error }),
+        )
+        .finally(() => {
+          writeSettled = true;
+        });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      try {
+        expect(writeSettled).toBe(false);
+      } finally {
+        releaseCancellation();
+      }
+      await cancellation;
+
+      const outcome = await writeOutcome;
+      expect(outcome.ok).toBe(false);
+      if (!outcome.ok) expect(outcome.error).toMatchObject({ status: 403 });
+      await expect(db.select().from(documents).where(eq(documents.companyId, companyId))).resolves.toHaveLength(0);
+      await expect(
+        db.select().from(documentRevisions).where(eq(documentRevisions.companyId, companyId)),
+      ).resolves.toHaveLength(0);
+      const [slot] = await db.select().from(summarySlots).where(eq(summarySlots.companyId, companyId));
+      expect(slot).toMatchObject({ status: "generating", generatingIssueId: generationIssueId });
+    });
+
+    it("serializes a write and terminal finalization without a slot/issue deadlock", async () => {
+      const companyId = await seedCompany();
+      const projectId = await seedProject(companyId);
+      const agentId = await seedSummarizer(companyId);
+      const { svc, generationIssueId, runId } = await startGeneration(companyId, projectId, agentId);
+      let releaseSlot!: () => void;
+      const slotMayCommit = new Promise<void>((resolve) => { releaseSlot = resolve; });
+      let slotLocked!: (pid: number) => void;
+      const slotLockAcquired = new Promise<number>((resolve) => { slotLocked = resolve; });
+      const blocker = db.transaction(async (tx) => {
+        await tx.select().from(summarySlots).where(eq(summarySlots.companyId, companyId)).for("update");
+        const [backend] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        slotLocked(backend!.pid);
+        await slotMayCommit;
+      });
+      const blockerPid = await slotLockAcquired;
+      const write = svc.write(
+        { ...projectSelector(companyId, projectId), markdown: "# Serialized summary", generationIssueId },
+        { agentId, runId },
+      );
+      // Attach rejection handlers immediately; assertions happen after all locks release.
+      const writeOutcome = Promise.allSettled([write]);
+      let cancellationOutcome: Promise<PromiseSettledResult<unknown>[]> | undefined;
+      try {
+        await expect.poll(async () => {
+          const [row] = await db.execute<{ waiting: boolean }>(sql`
+            select exists (
+              select 1 from pg_stat_activity
+              where datname = current_database() and ${blockerPid} = any(pg_blocking_pids(pid))
+            ) as waiting
+          `);
+          return row!.waiting;
+        }).toBe(true);
+        cancellationOutcome = Promise.allSettled([
+          issueService(db).update(generationIssueId, { status: "cancelled" }),
+        ]);
+        await expect.poll(async () => {
+          const [row] = await db.execute<{ waiting: number }>(sql`
+            select count(*)::int as waiting from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'
+          `);
+          return row!.waiting;
+        }).toBe(2);
+      } finally {
+        releaseSlot();
+        await blocker;
+        await writeOutcome;
+        await cancellationOutcome;
+      }
+      expect((await writeOutcome)[0]).toMatchObject({ status: "fulfilled" });
+      expect((await cancellationOutcome!)[0]).toMatchObject({ status: "fulfilled" });
+      const result = await svc.getSlot(projectSelector(companyId, projectId));
+      expect(result.slot).toMatchObject({ status: "idle", generatingIssueId: null });
+      expect(result.document?.body).toBe("# Serialized summary");
+    });
+
     it("rejects using one generation task to write a different slot", async () => {
       const companyId = await seedCompany();
       const projectId = await seedProject(companyId);
@@ -631,6 +912,160 @@ describeEmbeddedPostgres("summary slot service", () => {
           { agentId: summarizerAgentId, runId: randomUUID() },
         ),
       ).rejects.toMatchObject({ status: 403 });
+    });
+
+    it("requires the current base revision when a checked-out refresh routine writes a claimed slot", async () => {
+      const companyId = await seedCompany();
+      const changedProjectId = await seedProject(companyId);
+      const unrelatedProjectId = await seedProject(companyId);
+      const summarizerAgentId = await seedSummarizer(companyId);
+      const svc = summarySlotService(db);
+
+      const seedSummary = async (projectId: string) => {
+        const generated = await svc.generate(projectSelector(companyId, projectId), { userId: "board-user" });
+        const runId = await seedRun(companyId, summarizerAgentId);
+        await db
+          .update(issues)
+          .set({ status: "in_progress", checkoutRunId: runId })
+          .where(eq(issues.id, generated.generatingIssue.id));
+        return svc.write(
+          { ...projectSelector(companyId, projectId), markdown: "# Previous summary", generationIssueId: generated.generatingIssue.id },
+          { agentId: summarizerAgentId, runId },
+        );
+      };
+      const changedPrevious = await seedSummary(changedProjectId);
+      await seedSummary(unrelatedProjectId);
+      const staleAt = new Date(Date.now() - 48 * 60 * 60 * 1_000);
+      await db.update(summarySlots).set({ lastGeneratedAt: staleAt }).where(eq(summarySlots.companyId, companyId));
+      await db.update(projects).set({ updatedAt: new Date(staleAt.getTime() - 60 * 60 * 1_000) }).where(eq(projects.companyId, companyId));
+      await db.update(issues).set({ updatedAt: new Date(staleAt.getTime() - 60 * 60 * 1_000) }).where(eq(issues.companyId, companyId));
+      await db.insert(issues).values({
+        companyId,
+        projectId: changedProjectId,
+        title: "Changed after the previous summary",
+        status: "in_progress",
+        priority: "medium",
+        updatedAt: new Date(),
+      });
+
+      const [routine] = await db.insert(routines).values({
+        companyId,
+        title: "Refresh stale summary slots",
+        assigneeAgentId: summarizerAgentId,
+        status: "paused",
+      }).returning();
+      await db.insert(builtInManagedResources).values({
+        companyId,
+        bundleKey: "summarizer",
+        resourceKind: "routine",
+        resourceKey: "refresh-stale-summaries",
+        resourceId: routine!.id,
+        stockVersion: "test",
+        stockHash: "test",
+        defaultsJson: { issueTemplate: { modelProfile: "cheap" } },
+      });
+      const routineRunId = await seedRun(companyId, summarizerAgentId);
+      const [routineIssue] = await db.insert(issues).values({
+        companyId,
+        title: "Refresh stale summary slots",
+        status: "in_progress",
+        priority: "medium",
+        assigneeAgentId: summarizerAgentId,
+        checkoutRunId: routineRunId,
+        originKind: "routine_execution",
+        originId: routine!.id,
+      }).returning();
+
+      const claimed = await svc.claimRoutineRefreshSlots({
+        companyId,
+        generationIssueId: routineIssue!.id,
+        staleAfterHours: 24,
+        maxSlots: 10,
+        scopeKinds: "project",
+      }, { agentId: summarizerAgentId, runId: routineRunId });
+
+      expect(claimed.slots).toHaveLength(1);
+      expect(claimed.slots[0]).toMatchObject({
+        slot: {
+          scopeId: changedProjectId,
+          status: "generating",
+          generatingIssueId: routineIssue!.id,
+        },
+        document: { latestRevisionId: changedPrevious.revision.id },
+      });
+      await expect(svc.write({
+        ...projectSelector(companyId, unrelatedProjectId),
+        markdown: "# Unauthorized refresh",
+        generationIssueId: routineIssue!.id,
+      }, { agentId: summarizerAgentId, runId: routineRunId })).rejects.toMatchObject({ status: 403 });
+
+      const [concurrentRevision] = await db.insert(documentRevisions).values({
+        companyId,
+        documentId: changedPrevious.document.id,
+        revisionNumber: 2,
+        body: "# Concurrent summary",
+        createdByUserId: "board-user",
+      }).returning();
+      await db.update(documents).set({
+        latestBody: concurrentRevision!.body,
+        latestRevisionId: concurrentRevision!.id,
+        latestRevisionNumber: concurrentRevision!.revisionNumber,
+        updatedByUserId: "board-user",
+      }).where(eq(documents.id, changedPrevious.document.id));
+
+      await expect(svc.write({
+        ...projectSelector(companyId, changedProjectId),
+        markdown: "# Missing base write",
+        generationIssueId: routineIssue!.id,
+      }, { agentId: summarizerAgentId, runId: routineRunId })).rejects.toMatchObject({ status: 409 });
+
+      await expect(svc.write({
+        ...projectSelector(companyId, changedProjectId),
+        markdown: "# Stale write",
+        baseRevisionId: changedPrevious.revision.id,
+        generationIssueId: routineIssue!.id,
+      }, { agentId: summarizerAgentId, runId: routineRunId })).rejects.toMatchObject({ status: 409 });
+
+      const [slotBeforeCancellation] = await db
+        .select()
+        .from(summarySlots)
+        .where(eq(summarySlots.id, claimed.slots[0]!.slot.id));
+      const [documentBeforeCancellation] = await db
+        .select()
+        .from(documents)
+        .where(eq(documents.id, changedPrevious.document.id));
+      await db.update(issues).set({ status: "cancelled" }).where(eq(issues.id, routineIssue!.id));
+      await expect(svc.write({
+        ...projectSelector(companyId, changedProjectId),
+        markdown: "# Cancelled routine write",
+        baseRevisionId: changedPrevious.revision.id,
+        generationIssueId: routineIssue!.id,
+      }, { agentId: summarizerAgentId, runId: routineRunId })).rejects.toMatchObject({ status: 403 });
+      const [slotAfterCancellation] = await db
+        .select()
+        .from(summarySlots)
+        .where(eq(summarySlots.id, claimed.slots[0]!.slot.id));
+      const [documentAfterCancellation] = await db
+        .select()
+        .from(documents)
+        .where(eq(documents.id, changedPrevious.document.id));
+      expect(slotAfterCancellation).toEqual(slotBeforeCancellation);
+      expect(documentAfterCancellation).toEqual(documentBeforeCancellation);
+      await expect(
+        db.select().from(documentRevisions).where(eq(documentRevisions.documentId, changedPrevious.document.id)),
+      ).resolves.toHaveLength(2);
+
+      await db.update(issues).set({ status: "in_progress" }).where(eq(issues.id, routineIssue!.id));
+
+      const refreshed = await svc.write({
+        ...projectSelector(companyId, changedProjectId),
+        markdown: "# Refreshed summary",
+        baseRevisionId: concurrentRevision!.id,
+        generationIssueId: routineIssue!.id,
+        model: "claude-haiku-4-5",
+      }, { agentId: summarizerAgentId, runId: routineRunId });
+      expect(refreshed.revision.revisionNumber).toBe(3);
+      expect(refreshed.slot).toMatchObject({ status: "idle", generatingIssueId: null });
     });
   });
 });
