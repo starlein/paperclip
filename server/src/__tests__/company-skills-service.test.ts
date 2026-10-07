@@ -136,6 +136,45 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it("publishes a fresh immutable runtime cache after content-only agentskill.sh reimport", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Stored skill cache", issuePrefix: `T${companyId.slice(0, 6)}` });
+    let supportingContent = "Original reference";
+    const upstream = vi.fn(async () => Response.json({
+      slug: "cache-test", name: "Cache test", description: "Stored files",
+      skillMd: "# Unchanged skill",
+      skillFiles: [{ path: "references/a.md", content: supportingContent }],
+    }));
+    vi.stubGlobal("fetch", upstream);
+    try {
+      const first = (await svc.importFromSource(companyId, "https://agentskill.sh/acme/cache-test")).imported[0]!;
+      expect(first.sourceType).toBe("agentskill_sh");
+      const old = (await svc.listRuntimeSkillEntries(companyId)).find((entry) => entry.key === first.key)!;
+      expect(old.sourceStatus).toBe("available");
+      const oldFile = path.join(old.source, "references/a.md");
+      const before = await fs.stat(oldFile);
+      expect(await fs.readFile(oldFile, "utf8")).toBe("Original reference");
+
+      supportingContent = "Reimported reference";
+      const second = (await svc.importFromSource(companyId, "https://agentskill.sh/acme/cache-test")).imported[0]!;
+      expect(second).toMatchObject({ id: first.id, markdown: first.markdown, sourceRef: first.sourceRef, fileInventory: first.fileInventory });
+      const freshService = companySkillService(db);
+      const next = (await freshService.listRuntimeSkillEntries(companyId)).find((entry) => entry.key === first.key)!;
+      expect(next.sourceStatus).toBe("available");
+      expect(next.source).not.toBe(old.source);
+      expect(await fs.readFile(path.join(next.source, "references/a.md"), "utf8")).toBe(supportingContent);
+      expect(await fs.readFile(oldFile, "utf8")).toBe("Original reference");
+      expect((await fs.stat(oldFile)).mtimeMs).toBe(before.mtimeMs);
+      for (const source of [old.source, next.source]) {
+        expect((await fs.stat(source)).mode & 0o222).toBe(0);
+        expect((await fs.stat(path.join(source, "references/a.md"))).mode & 0o222).toBe(0);
+      }
+      const warm = (await freshService.listRuntimeSkillEntries(companyId, { materializeMissing: false })).find((entry) => entry.key === first.key)!;
+      expect(warm.source).toBe(next.source);
+      expect(upstream).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("refreshes once, reuses pinned runtime contents across service instances, and ignores cosmetic changes", async () => {
     const { companyId, skillId, key } = await createPinnedRuntimeFixture();
     const upstream = vi.fn(async (url: string | URL) => new Response(String(url)));

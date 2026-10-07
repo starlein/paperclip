@@ -269,6 +269,33 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(dispatchedRequests[0]).toMatchObject({ runId: dispatchedRun!.id });
   });
 
+  it.each(["onboarding", "ordinary", "cancelled"])("dispatches only a verified completed onboarding report: %s", async kind => {
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), childId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Completion", issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}` });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Lead", role: "engineer", status: "active", adapterType: "codex_local",
+      adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Parent", status: kind === "cancelled" ? "cancelled" : "done",
+      originKind: kind === "ordinary" ? "manual" : "onboarding_first_task", assigneeAgentId: agentId, responsibleUserId: "responsible-user" });
+    await db.insert(issues).values({ id: childId, companyId, title: "Saved result", parentId: issueId, status: "done", assigneeAgentId: agentId });
+    await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation", triggerDetail: "system", reason: "issue_children_completed",
+      requestedByActorType: "system", requestedByActorId: "native-status-committer", idempotencyKey: `onboarding-completed:${issueId}`,
+      payload: { issueId, _paperclipWakeContext: { issueId, completedChildIssueId: childId, onboardingCompletion: true } } });
+    const result = await heartbeat.dispatchPendingNativeStatusWakeups({ companyId });
+    expect(result.dispatched).toBe(kind === "onboarding" ? 1 : 0);
+    await heartbeat.drainActiveRunExecutions();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(kind === "onboarding" ? 1 : 0);
+    if (kind === "onboarding") {
+      expect({ status: runs[0].status, errorCode: runs[0].errorCode, error: runs[0].error })
+        .toEqual({ status: "succeeded", errorCode: null, error: null });
+      expect(runs[0].contextSnapshot).toMatchObject({
+        onboardingCompletion: true, chatCompletionUpdates: [expect.objectContaining({ id: childId, status: "done" })],
+      });
+      expect(mockAdapterExecute).toHaveBeenCalledOnce();
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe(kind === "cancelled" ? "cancelled" : "done");
+  });
+
   it("coalesces the native intent when dispatch admission defers behind an active issue run", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -362,6 +389,56 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       .then((result) => result[0]);
     expect(recoveredIntent).toMatchObject({ status: "coalesced" });
   });
+
+  it.each(["missing", "wrong-agent", "wrong-issue", "wrong-company", "resolved", "wrong-reason"])(
+    "does not bypass dependencies for a %s pending interaction wake",
+    async (scenario) => {
+      const companyId = randomUUID();
+      const otherCompanyId = randomUUID();
+      const agentId = randomUUID();
+      const otherAgentId = randomUUID();
+      const issueId = randomUUID();
+      const blockerId = randomUUID();
+      const interactionId = randomUUID();
+      await db.insert(companies).values([companyId, otherCompanyId].map((id) => ({
+        id, name: "Interaction admission", issuePrefix: `N${id.slice(0, 6)}`,
+        requireBoardApprovalForNewAgents: false,
+      })));
+      await db.insert(agents).values([agentId, otherAgentId].map((id) => ({
+        id, companyId, name: id, role: "engineer", status: "active",
+        adapterType: "codex_local", adapterConfig: {}, permissions: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      })));
+      await db.insert(issues).values([issueId, blockerId].map((id) => ({
+        id, companyId, title: id, status: "todo", priority: "medium",
+        assigneeAgentId: agentId, responsibleUserId: "responsible-user",
+      })));
+      await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+      if (scenario !== "missing") {
+        await db.insert(issueThreadInteractions).values({
+          id: interactionId,
+          companyId: scenario === "wrong-company" ? otherCompanyId : companyId,
+          issueId: scenario === "wrong-issue" ? blockerId : issueId,
+          addresseeAgentId: scenario === "wrong-agent" ? otherAgentId : agentId,
+          kind: "request_item_verdicts",
+          status: scenario === "resolved" ? "resolved" : "pending",
+          continuationPolicy: "wake_assignee",
+          payload: { version: 1, prompt: "Review only", items: [{ id: "security", label: "Security" }] },
+        });
+      }
+      const reason = scenario === "wrong-reason" ? "issue_assigned" : "interaction_pending";
+      expect(await heartbeat.wakeup(agentId, {
+        source: "automation", triggerDetail: "system", reason,
+        payload: { issueId, interactionId },
+        contextSnapshot: { issueId, interactionId, wakeReason: reason },
+      })).toBeNull();
+      expect(await db.select().from(heartbeatRuns)).toHaveLength(0);
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(await db.select().from(agentWakeupRequests)).toEqual([
+        expect.objectContaining({ companyId, agentId, status: "skipped", reason: "issue_dependencies_blocked" }),
+      ]);
+    },
+  );
 
   it("keeps blocked descendants idle until their blockers resolve", async () => {
     const companyId = randomUUID();
@@ -554,6 +631,8 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(addresseeRun?.contextSnapshot).toMatchObject({
       dependencyBlockedInteraction: true,
       unresolvedBlockerIssueIds: [blockerId],
+      unresolvedBlockerCount: 1,
+      unresolvedBlockerSummaries: [expect.objectContaining({ id: blockerId })],
     });
 
     let finishReadyRun!: () => void;

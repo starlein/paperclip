@@ -18,13 +18,16 @@ import { ISSUE_DISPOSITION_REPAIR_RETRY_REASON } from "@paperclipai/shared";
 import { parseObject } from "../../../adapters/utils.js";
 import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokability.js";
 import { budgetService } from "../../../services/budgets.js";
+import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { collectDispositionRepairSourceState } from "../../../services/recovery/disposition-repair.js";
+import { legacyDispositionEpisode, legacyDispositionFingerprint } from "../../../services/recovery/legacy-continuation.js";
 import { appendHeartbeatRunEvent } from "../../../services/heartbeat-run-events.js";
 import { emitAgentTaskRun } from "../../../services/agent-task-run-telemetry.js";
 import { issueService } from "../../../services/issues.js";
 import {
   issueTreeControlService,
+  isPendingInteractionAddresseeWake,
   isVerifiedIssueTreeControlInteractionWake,
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
 } from "../../../services/issue-tree-control.js";
@@ -391,13 +394,31 @@ export function createPostgresRunDispatchAdapter(
         excludeRunId: input.runId,
         excludeWakeupRequestId: input.wakeupRequestId,
       });
+      let currentFingerprint = sourceState.fingerprint;
+      let validSource = true;
+      if (readNonEmptyString(parseObject(input.contextSnapshot.legacyDispositionEpisode).id)) {
+        // Legacy repair reserves a slot in a persisted episode. Its fingerprint
+        // identifies that episode, not the older parked-summary state snapshot.
+        // Still recheck every active/wait/ownership gate before promotion.
+        const episode = legacyDispositionEpisode({ id: input.runId, contextSnapshot: input.contextSnapshot });
+        const sourceId = readNonEmptyString(input.contextSnapshot.dispositionRepairSourceRunId)
+          ?? readNonEmptyString(input.contextSnapshot.retryOfRunId);
+        const source = sourceId ? await dbOrTx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, sourceId), eq(heartbeatRuns.companyId, input.companyId),
+        )).limit(1).then(rows => rows[0]) : null;
+        validSource = Boolean(source && source.status === "succeeded" && source.agentId === input.agentId
+          && (source.contextSnapshot?.issueId ?? source.contextSnapshot?.taskId) === issueId
+          && legacyDispositionEpisode(source).id === episode.id
+          && episode.attempt >= 1 && episode.attempt <= episode.maxAttempts);
+        currentFingerprint = legacyDispositionFingerprint(input.companyId, issueId, input.agentId, episode.id);
+      }
       facts.dispositionRepair = {
         expectedFingerprintPresent: expectedFingerprint !== null,
-        fingerprintMatches: sourceState.fingerprint === expectedFingerprint,
+        fingerprintMatches: validSource && currentFingerprint === expectedFingerprint,
         hasActiveExecutionPath: sourceState.hasActiveExecutionPath,
         hasDurableWaitingPath: sourceState.hasDurableWaitingPath,
         expectedFingerprint,
-        currentFingerprint: sourceState.fingerprint,
+        currentFingerprint,
         durablePathReason: sourceState.durablePathReason,
       };
     }
@@ -511,7 +532,12 @@ export function createPostgresRunDispatchAdapter(
     const isInteractionWake = allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-    );
+    ) || await isPendingInteractionAddresseeWake(dbOrTx, {
+      companyId: input.companyId,
+      issueId,
+      agentId: input.agentId,
+      contextSnapshot: context,
+    });
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason =
@@ -589,6 +615,10 @@ export function createPostgresRunDispatchAdapter(
       isNonAssigneeWorkspaceBusyRetry: isNonAssigneeWorkspaceBusyRetry(retryReason, context),
       resumeIntent,
       wakeCommentIdPresent: Boolean(wakeCommentId),
+      isCompletedOnboardingHandoffWake: await isCompletedOnboardingHandoffWake(dbOrTx, {
+        companyId: input.companyId, issueId, agentId: input.agentId,
+        reason: wakeReason, contextSnapshot: context,
+      }),
       continuationParkApplies,
       continuationParksExecutor,
       continuationSummaryBody,

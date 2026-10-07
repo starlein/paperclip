@@ -106,7 +106,7 @@ test('root Compose mounts the template, allows SAN fallback, and preserves the r
   assert.match(compose, /\.\/docker\/nginx\/paperclip\.conf\.template:\/etc\/nginx\/templates\/default\.conf\.template:ro/);
   assert.match(compose, /PAPERCLIP_TLS_CERT_ALT_NAMES: "\$\{PAPERCLIP_TLS_CERT_ALT_NAMES:-\}"/);
   assert.match(compose, /NGINX_ENVSUBST_FILTER: "\^PAPERCLIP_TLS_SERVER_NAME\$"/);
-  assert.match(compose, /image: ghcr\.io\/starlein\/paperclip:v2026\.1001\.0/);
+  assert.match(compose, /image: ghcr\.io\/starlein\/paperclip:v2026\.1005\.0/);
 });
 
 test('Docker documentation matches the root Compose path and PostgreSQL 17 storage', () => {

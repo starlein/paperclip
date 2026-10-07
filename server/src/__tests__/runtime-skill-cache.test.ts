@@ -92,6 +92,18 @@ describe("runtime skill revision cache", () => {
     expect(runtimeSkillCacheSpec(root, { ...skill, sourceRef: "main" })).toBeNull();
   });
 
+  it("fingerprints agentskill.sh stored contents deterministically, not metadata insertion order", () => {
+    skill = { ...skill, sourceType: "agentskill_sh", sourceRef: null,
+      metadata: { fileContents: { "references/a.md": "first", "scripts/check.sh": "check" } },
+      fileInventory: [...skill.fileInventory, { path: "scripts/check.sh", kind: "script" }],
+    };
+    const original = runtimeSkillCacheSpec(root, skill)!;
+    const reordered = { fileContents: { "scripts/check.sh": "check", "references/a.md": "first" }, qualityScore: 99 };
+    expect(runtimeSkillCacheSpec(root, { ...skill, metadata: reordered })!.fingerprint).toBe(original.fingerprint);
+    const changed = { fileContents: { ...reordered.fileContents, "references/a.md": "other" } };
+    expect(runtimeSkillCacheSpec(root, { ...skill, metadata: changed })!.fingerprint).not.toBe(original.fingerprint);
+  });
+
   it("retains the old revision when publishing an explicit update", async () => {
     const old = await resolveRuntimeSkillCache(runtimeSkillCacheSpec(root, skill)!, reader());
     const next = await resolveRuntimeSkillCache(runtimeSkillCacheSpec(root, { ...skill, sourceRef: "b".repeat(40) })!, async () => "updated");

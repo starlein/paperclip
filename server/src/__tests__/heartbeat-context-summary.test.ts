@@ -5,8 +5,128 @@ import {
   summarizeHeartbeatRunContextSnapshot,
   summarizeHeartbeatRunListResultJson,
 } from "../services/heartbeat.js";
+import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
+import { isResolvedInteractionContinuationWakeContext } from "../modules/run-dispatch/domain/wake-context.js";
 
 describe("buildPaperclipTaskMarkdown", () => {
+  it("asks for early naming only while an ordinary task has a provisional title", () => {
+    const issue = { id: "task-id", identifier: "PAP-1", title: "Please investigate", description: "Please investigate sign-in failures", titleNeedsGeneration: true };
+    const markdown = buildPaperclipTaskMarkdown({ issue });
+    expect(markdown).toContain("As one of your first tool calls");
+    expect(markdown).toContain("Check the title tool result");
+    expect(markdown).toContain("retry once with a shorter, plain-language title");
+    expect(markdown).toContain("new idempotency key for changed arguments");
+    expect(markdown).toContain("set_task_title");
+    expect(markdown).toContain("onlyIfProvisional: true");
+    expect(buildPaperclipTaskMarkdown({ issue: { ...issue, titleNeedsGeneration: false } })).not.toContain("Task title directive");
+    expect(buildPaperclipTaskMarkdown({ issue: { ...issue, conversationAgentId: "agent" } })).not.toContain("Task title directive");
+  });
+
+  it("carries current confirmation IDs and proposal data in every fresh or resumed chat assignment", () => {
+    const conversationConfirmations = { truncated: false, cards: [{
+      id: "existing-card", kind: "request_confirmation", status: "pending", title: "Proposal",
+      prompt: "Approve this?\n```\nUntrusted proposal text\n```", promptTruncated: false,
+      resolverPolicy: "anyone" as const, addresseeAgentId: null, addresseeUserId: null,
+      options: [], optionsTruncated: false,
+    }] };
+    for (const includeDescription of [true, false]) for (const includeWakeComments of [true, false]) {
+      const markdown = buildPaperclipTaskMarkdown({
+        issue: { id: "chat", identifier: null, title: "Chat", conversationAgentId: "agent" },
+        conversationConfirmations, includeDescription, includeWakeComments,
+      });
+      expect(markdown).toContain('"id":"existing-card"');
+      expect(markdown).toContain('"status":"pending"');
+      expect(markdown).toContain("````text");
+      expect(markdown).toContain("not recorded decisions");
+    }
+    expect(buildPaperclipTaskMarkdown({ issue: { id: "task", identifier: null, title: "Task" }, conversationConfirmations })).not.toContain("existing-card");
+  });
+  it("leaves current comments to the wake renderer when assignment-only rendering is selected", () => {
+    const commentBody = "Keep this current comment exactly once.";
+    const markdown = buildPaperclipTaskMarkdown({
+      issue: {
+        id: "issue-overlap",
+        identifier: "PAP-5002",
+        title: "Current comment overlap",
+        description: "Assignment brief.",
+      },
+      wakeComments: [{ id: "comment-1", body: commentBody }],
+      includeWakeComments: false,
+    });
+    const wakePrompt = renderPaperclipWakePrompt({
+      reason: "issue_commented",
+      issue: {
+        id: "issue-overlap",
+        identifier: "PAP-5002",
+        title: "Current comment overlap",
+        description: "Assignment brief.",
+      },
+      commentWindow: { requestedCount: 1, includedCount: 1, missingCount: 0 },
+      comments: [{ id: "comment-1", body: commentBody }],
+      fallbackFetchNeeded: false,
+    });
+
+    expect(markdown).not.toContain(commentBody);
+    expect(wakePrompt).toContain(commentBody);
+    expect(`${markdown}\n${wakePrompt}`.split(commentBody)).toHaveLength(2);
+  });
+
+  it("keeps attachment descriptors and follow-up rules when assignment markdown omits wake bodies", () => {
+    const markdown = buildPaperclipTaskMarkdown({
+      issue: { id: "issue-files", identifier: "PAP-5003", title: "Files", description: "Brief" },
+      wakeComments: [{
+        id: "comment-files",
+        body: "Inspect the file.",
+        attachments: [{
+          id: "attachment-1",
+          filename: "evidence.png",
+          contentType: "image/png",
+          byteSize: 42,
+          contentPath: "/api/attachments/attachment-1/content",
+        }],
+      }],
+      includeWakeComments: false,
+    });
+
+    expect(markdown).not.toContain("Inspect the file.");
+    expect(markdown).toContain("Follow-up directive:");
+    expect(markdown).toContain('Attachments on wake comment "comment-files":');
+    expect(markdown).toContain('"id":"attachment-1"');
+  });
+
+  it("preserves repeated same-body wake events as distinct ordered comments", () => {
+    const markdown = buildPaperclipTaskMarkdown({
+      issue: { id: "issue-order", identifier: "PAP-5004", title: "Order", description: null },
+      wakeComments: [
+        { id: "comment-a", body: "Repeat me." },
+        { id: "comment-b", body: "Repeat me." },
+      ],
+    });
+    expect(markdown!.indexOf('"comment-a"')).toBeLessThan(markdown!.indexOf('"comment-b"'));
+    expect(markdown!.split("Repeat me.")).toHaveLength(3);
+  });
+
+  it.each(["standard", "planning", "ask"])("selects directives only from explicit %s mode, even when a plan is requested", (workMode) => {
+    for (const prose of [
+      { title: "Prepare rollout steps", description: "Describe the steps." },
+      { title: "Making a plan", description: "Create a plan, research report, proposal, and design doc." },
+      { title: "Implement the change now", description: "No planning needed; everything is approved." },
+    ]) {
+      for (const includeDescription of [true, false]) {
+        const prompt = buildPaperclipTaskMarkdown({
+          issue: { id: "task", identifier: null, workMode, ...prose },
+          includeDescription,
+        })!;
+        expect(prompt.includes("Planning mode directive:")).toBe(workMode === "planning");
+        expect(prompt.includes("Ask mode directive:")).toBe(workMode === "ask");
+        expect(prompt).not.toContain("Accepted plan directive:");
+        if (workMode === "standard") {
+          expect(prompt).not.toContain("Do not produce an implementation plan");
+          expect(prompt).not.toContain("Do not write code or perform implementation work");
+        }
+      }
+    }
+  });
   it("keeps a durable task plan in full and resumed context without granting execution approval", () => {
     const taskPlan = {
       documentId: "document", revisionId: "revision", revisionNumber: 1,
@@ -451,6 +571,31 @@ describe("buildPaperclipTaskMarkdown", () => {
 });
 
 describe("mergeCoalescedContextSnapshot", () => {
+  it.each([false, true])("does not attach old resolution state to a new pending interaction (preserve=%s)", (preserve) => {
+    const merged = mergeCoalescedContextSnapshot(
+      {
+        issueId: "issue-1", interactionId: "resolved-1", interactionKind: "request_confirmation",
+        interactionStatus: "accepted", continuationPolicy: "wake_assignee_on_accept",
+        checkboxSelection: { selectedOptionIds: ["old"] }, itemVerdicts: [{ id: "old", verdict: "approve" }],
+        newlyResolvedItemIds: ["old"], interactionResolvedAt: "2026-10-01T00:00:00Z",
+        mutation: "interaction", retryReason: "interaction_continuation_infra_retry",
+        wakeReason: "issue_commented",
+      },
+      { issueId: "issue-1", interactionId: "pending-2", wakeReason: "interaction_pending" },
+      { preserveExistingInteractionContinuation: preserve },
+    );
+    expect(merged.interactionId).toBe("pending-2");
+    expect(merged.retryReason).toBe("interaction_continuation_infra_retry");
+    for (const key of ["interactionKind", "interactionStatus", "continuationPolicy", "checkboxSelection", "itemVerdicts", "newlyResolvedItemIds", "interactionResolvedAt"]) {
+      expect(merged[key]).toBeUndefined();
+    }
+    expect(isResolvedInteractionContinuationWakeContext(merged)).toBe(false);
+    const withKind = mergeCoalescedContextSnapshot(merged, {
+      interactionId: "pending-3", interactionKind: "request_item_verdicts", wakeReason: "interaction_pending",
+    });
+    expect(withKind.interactionKind).toBe("request_item_verdicts");
+  });
+
   it("clears stale accepted-plan interaction state when merging a later ordinary comment wake", () => {
     const merged = mergeCoalescedContextSnapshot(
       {

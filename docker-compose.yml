@@ -85,7 +85,7 @@ services:
   # Paperclip application (always started)
   # ---------------------------------------------------------------------------
   paperclip:
-    image: ghcr.io/starlein/paperclip:v2026.1001.0
+    image: ghcr.io/starlein/paperclip:v2026.1005.0
     build:
       context: .
       dockerfile: Dockerfile

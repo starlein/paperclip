@@ -555,6 +555,12 @@ const RESOLVE_ISSUE_RECOVERY_ACTION_OUTCOMES = [
   "cancelled",
 ] as const;
 
+export const retryWorkspaceExportSchema = z.object({
+  actionId: z.string().guid(),
+  runId: z.string().guid(),
+  repairNote: z.string().trim().min(20).max(12000),
+}).strict();
+
 export const resolveIssueRecoveryActionSchema = z
   .object({
     executionReconciliation: z
@@ -563,6 +569,7 @@ export const resolveIssueRecoveryActionSchema = z
         providerStopped: z.literal(true),
         actionOutcome: z.enum(["completed", "not_performed", "mixed"]),
         outcomeEvidence: z.string().trim().min(20).max(12000),
+        workspaceRepairEvidence: z.string().trim().min(20).max(12000).optional(),
       })
       .strict()
       .optional(),
@@ -777,17 +784,36 @@ const onboardingFirstTaskMarkerSchema = {
 };
 
 export const createIssueInputSchema = createIssueBaseSchema.extend({
+  title: z.string().optional(),
   status: createIssueBaseSchema.shape.status.optional(),
   ...createIssueDuplicateGuardSchema,
   ...onboardingFirstTaskMarkerSchema,
 });
 
+function requireTitleOrDescription(
+  value: { title?: string; description?: string | null },
+  ctx: z.RefinementCtx,
+) {
+  if (!value.title?.trim() && !value.description?.trim()) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["title"], message: "Provide a title or task description" });
+  }
+}
+
 export const createIssueSchema = withCreateIssueStatusDefault(
   createIssueBaseSchema.extend({
+    title: z.string().optional(),
     ...createIssueDuplicateGuardSchema,
     ...onboardingFirstTaskMarkerSchema,
   }),
-).superRefine(requireBlockedStatusForUnblockDescriptor);
+).superRefine(requireBlockedStatusForUnblockDescriptor).superRefine(requireTitleOrDescription);
+
+export const setIssueTitleSchema = z.object({
+  title: z.string().trim().min(1).max(240),
+  onlyIfProvisional: z.boolean().optional().default(false),
+  idempotencyKey: z.string().trim().min(1).max(240).optional(),
+}).strict();
+
+export type SetIssueTitle = z.input<typeof setIssueTitleSchema>;
 
 export type CreateIssue = z.infer<typeof createIssueSchema>;
 
@@ -808,13 +834,14 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(
       watchdogDiscovery: true,
     })
     .extend({
+      title: z.string().optional(),
       acceptanceCriteria: z
         .array(z.string().trim().min(1).max(500))
         .max(20)
         .optional(),
       blockParentUntilDone: z.boolean().optional().default(false),
     }),
-).superRefine(requireBlockedStatusForUnblockDescriptor);
+).superRefine(requireBlockedStatusForUnblockDescriptor).superRefine(requireTitleOrDescription);
 
 export type CreateChildIssue = z.infer<typeof createChildIssueSchema>;
 
@@ -1010,6 +1037,14 @@ export const issueCommentMetadataSchema = z
       .max(160)
       .nullable()
       .optional(),
+    recovery: z.object({
+      kind: z.literal("disposition_repair_escalated"),
+      actionId: z.string().guid(),
+      attemptCount: z.number().int().nonnegative(),
+      maxAttempts: z.number().int().positive(),
+      reason: z.string().trim().min(1).max(160),
+      assigneeAgentId: z.string().guid().nullable(),
+    }).strict().optional(),
     sections: z.array(issueCommentMetadataSectionSchema).min(1).max(20),
   })
   .strict();
@@ -1075,6 +1110,7 @@ const connectionIntentBrandAssetSchema = z
 
 export const connectionIntentPayloadSchema = z
   .object({
+    upstreamService: z.object({ slug: z.string().min(1).max(120), name: z.string().min(1).max(160), selectionInteractionId: z.string().guid().optional() }).strict().optional(),
     purpose: z.literal("ai").optional(),
     version: z.literal(1),
     serviceSlug: z.string().trim().min(1).max(120),
@@ -1090,6 +1126,7 @@ export const connectionIntentPayloadSchema = z
 export const connectionIntentResultSchema = z
   .object({
     version: z.literal(1),
+    instruction: z.string().max(4000).optional(),
     outcome: z.enum(["connected", "declined", "superseded", "expired"]),
     connectionId: z.string().guid().nullable().optional(),
     reason: z.string().trim().max(4000).nullable().optional(),
@@ -1329,7 +1366,7 @@ export const paperclipQuestionSetPayloadSchema = z
   .object({
     schema: z.literal("paperclip.question_set.v1"),
     title: z.string().max(1000).optional(),
-    description: z.string().max(4000).optional(),
+    description: z.string().max(100_000).optional(),
     submitLabel: z.string().max(200).optional(),
     questions: z.array(paperclipQuestionSchema).min(1).max(64),
   })
@@ -2021,6 +2058,23 @@ export const acceptIssueThreadInteractionSchema = z
 export type AcceptIssueThreadInteraction = z.infer<
   typeof acceptIssueThreadInteractionSchema
 >;
+
+/** Records an agent's interpretation of a real user reply without widening resolver permissions. */
+export const resolveConfirmationFromCommentSchema = z.object({
+  commentId: z.string().guid(),
+  decision: z.enum(["accept", "reject"]),
+  selectedOptionIds: z.array(z.string().trim().min(1).max(120))
+    .max(REQUEST_CHECKBOX_CONFIRMATION_OPTION_LIMIT).optional(),
+  reason: z.string().trim().max(4000).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.decision === "reject" && value.selectedOptionIds !== undefined) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["selectedOptionIds"], message: "Selections apply only to acceptance" });
+  }
+  if (value.selectedOptionIds && new Set(value.selectedOptionIds).size !== value.selectedOptionIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["selectedOptionIds"], message: "Selections must be unique" });
+  }
+});
+export type ResolveConfirmationFromComment = z.infer<typeof resolveConfirmationFromCommentSchema>;
 
 export const rejectIssueThreadInteractionSchema = z.object({
   reason: z.string().trim().max(4000).optional(),
