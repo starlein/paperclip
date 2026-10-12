@@ -103,6 +103,78 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     return { companyId, skillId, key: `company/${companyId}/cached` };
   }
 
+  it.each(["github", "skills_sh"] as const)("reads cached SKILL.md for %s when GitHub is unavailable", async (sourceType) => {
+    const { companyId, skillId } = await createPinnedRuntimeFixture();
+    await db.update(companySkills).set({ sourceType }).where(eq(companySkills.id, skillId));
+    const upstream = vi.fn().mockRejectedValue(new Error("Upstream outage"));
+    vi.stubGlobal("fetch", upstream);
+    try {
+      await expect(svc.readFile(companyId, skillId, "SKILL.md")).resolves.toMatchObject({
+        content: "# Installed skill",
+        path: "SKILL.md",
+        editable: false,
+      });
+      expect(upstream).toHaveBeenCalled();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("does not substitute cached SKILL.md for a failed supporting file or an empty cache", async () => {
+    const { companyId, skillId } = await createPinnedRuntimeFixture();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("Unavailable", { status: 503 })));
+    try {
+      await expect(svc.readFile(companyId, skillId, "references/0.md")).rejects.toThrow("503");
+      await db.update(companySkills).set({ markdown: "" }).where(eq(companySkills.id, skillId));
+      await expect(svc.readFile(companyId, skillId, "SKILL.md")).rejects.toThrow("503");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("prefers fetched GitHub markdown over the cached SKILL.md", async () => {
+    const { companyId, skillId } = await createPinnedRuntimeFixture();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("# Remote skill")));
+    try {
+      await expect(svc.readFile(companyId, skillId, "SKILL.md")).resolves.toMatchObject({ content: "# Remote skill" });
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("publishes a fresh immutable runtime cache after content-only agentskill.sh reimport", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Stored skill cache", issuePrefix: `T${companyId.slice(0, 6)}` });
+    let supportingContent = "Original reference";
+    const upstream = vi.fn(async () => Response.json({
+      slug: "cache-test", name: "Cache test", description: "Stored files",
+      skillMd: "# Unchanged skill",
+      skillFiles: [{ path: "references/a.md", content: supportingContent }],
+    }));
+    vi.stubGlobal("fetch", upstream);
+    try {
+      const first = (await svc.importFromSource(companyId, "https://agentskill.sh/acme/cache-test")).imported[0]!;
+      expect(first.sourceType).toBe("agentskill_sh");
+      const old = (await svc.listRuntimeSkillEntries(companyId)).find((entry) => entry.key === first.key)!;
+      expect(old.sourceStatus).toBe("available");
+      const oldFile = path.join(old.source, "references/a.md");
+      const before = await fs.stat(oldFile);
+      expect(await fs.readFile(oldFile, "utf8")).toBe("Original reference");
+
+      supportingContent = "Reimported reference";
+      const second = (await svc.importFromSource(companyId, "https://agentskill.sh/acme/cache-test")).imported[0]!;
+      expect(second).toMatchObject({ id: first.id, markdown: first.markdown, sourceRef: first.sourceRef, fileInventory: first.fileInventory });
+      const freshService = companySkillService(db);
+      const next = (await freshService.listRuntimeSkillEntries(companyId)).find((entry) => entry.key === first.key)!;
+      expect(next.sourceStatus).toBe("available");
+      expect(next.source).not.toBe(old.source);
+      expect(await fs.readFile(path.join(next.source, "references/a.md"), "utf8")).toBe(supportingContent);
+      expect(await fs.readFile(oldFile, "utf8")).toBe("Original reference");
+      expect((await fs.stat(oldFile)).mtimeMs).toBe(before.mtimeMs);
+      for (const source of [old.source, next.source]) {
+        expect((await fs.stat(source)).mode & 0o222).toBe(0);
+        expect((await fs.stat(path.join(source, "references/a.md"))).mode & 0o222).toBe(0);
+      }
+      const warm = (await freshService.listRuntimeSkillEntries(companyId, { materializeMissing: false })).find((entry) => entry.key === first.key)!;
+      expect(warm.source).toBe(next.source);
+      expect(upstream).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("refreshes once, reuses pinned runtime contents across service instances, and ignores cosmetic changes", async () => {
     const { companyId, skillId, key } = await createPinnedRuntimeFixture();
     const upstream = vi.fn(async (url: string | URL) => new Response(String(url)));

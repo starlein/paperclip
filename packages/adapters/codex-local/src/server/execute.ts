@@ -67,6 +67,7 @@ import {
   isCodexHarnessCrash,
   isCodexProviderQuotaError,
   isCodexTransientUpstreamError,
+  isCodexContextExhaustedError,
   isCodexUnknownSessionError,
 } from "./parse.js";
 import {
@@ -1553,11 +1554,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         sessionId &&
         !initial.proc.timedOut &&
         !initial.proc.signal &&
-        // A started session can emit stale-rollout warnings for other threads.
-        // After Ctrl-C those warnings must not restart the cancelled turn.
-        !initial.parsed.sessionId &&
         (initial.proc.exitCode ?? 0) !== 0 &&
-        isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
+        (
+          isCodexContextExhaustedError(initial.proc.stdout, initial.rawStderr) ||
+          // A started session can emit stale-rollout warnings for other threads.
+          (!initial.parsed.sessionId && isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr))
+        )
       ) {
         await onLog(
           "stdout",

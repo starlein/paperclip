@@ -741,6 +741,7 @@ export {
 } from "./constants.js";
 
 export {
+  claimRoutineSummaryRefreshSlotsSchema,
   generateSummarySlotSchema,
   summarySlotKeySchema,
   summarySlotQuerySchema,
@@ -748,6 +749,7 @@ export {
   summarySlotScopeSelectorSchema,
   summarySlotStatusSchema,
   writeSummarySlotSchema,
+  type ClaimRoutineSummaryRefreshSlotsInput,
   type GenerateSummarySlotInput,
   type SummarySlotScopeSelectorInput,
   type WriteSummarySlotInput,
@@ -773,6 +775,9 @@ export {
 } from "./environment-custom-images.js";
 
 export type {
+  ClaimedRoutineSummaryRefreshSlot,
+  ClaimRoutineSummaryRefreshSlotsRequest,
+  ClaimRoutineSummaryRefreshSlotsResponse,
   Company,
   InteractionResolverGovernance,
   InteractionResolverKindGovernance,

@@ -5,7 +5,9 @@ import { createRoot, type Root } from "react-dom/client";
 import type { CatalogSkill, CompanySkillDetail, CompanySkillListItem, CompanySkillVersion, FolderListResult } from "@paperclipai/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AgentSkillBrowser,
   DiscoveryGrid,
+  ImportSkillSourceTabsHeader,
   InstallPreviewDialog,
   SkillDetailPage,
   buildDiscoveryCards,
@@ -102,17 +104,156 @@ vi.mock("../components/MarkdownEditor", () => ({
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 
-async function act(callback: () => void | Promise<void>) {
+async function act(callback: () => void | Promise<unknown>) {
   await reactAct(async () => {
     await callback();
   });
 }
 
-afterEach(() => {
-  root?.unmount();
+afterEach(async () => {
+  await act(() => root?.unmount());
   root = null;
   container?.remove();
   container = null;
+});
+
+describe("AgentSkillBrowser request ordering", () => {
+  type SearchData = { data: Array<Record<string, unknown>>; hasMore: boolean };
+  const requests: Array<{
+    url: URL;
+    resolve: (data: SearchData) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  let intersect: () => void;
+
+  async function renderBrowser() {
+    vi.useFakeTimers();
+    requests.length = 0;
+    intersect = () => {};
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: IntersectionObserverCallback) {
+        intersect = () => callback([{ isIntersecting: true } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+      }
+      observe() {}
+      disconnect() {}
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname.endsWith("/categories")) {
+        return { json: async () => ({ data: [{ slug: "coding", name: "Coding", count: 1 }] }) };
+      }
+      // Delay body decoding too: a response's headers do not settle the search.
+      const body = new Promise<SearchData>((resolve, reject) => requests.push({ url, resolve, reject }));
+      return { ok: true, json: () => body };
+    }));
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(() => root!.render(<AgentSkillBrowser onInstall={vi.fn()} installing={null} />));
+    await act(() => vi.advanceTimersByTimeAsync(300));
+    return container;
+  }
+
+  function result(name: string, hasMore = false): SearchData {
+    return { data: [{ slug: name, name, owner: "acme", description: "", category: "coding", platforms: [], installCount: 0, githubStars: 0, securityScore: 80, contentQualityScore: 80, updatedAt: "2026-01-01" }], hasMore };
+  }
+
+  async function changeFilter(node: HTMLElement, filter: string) {
+    await act(() => {
+      if (filter === "section") {
+        buttonsNamed(node, "Latest")[0]!.click();
+      } else if (filter === "category") {
+        const select = node.querySelector("select")!;
+        select.value = "coding";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        const input = node.querySelector("input")!;
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "new query");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each(["query", "category", "section"])("keeps the newer %s results when an older body resolves last", async (filter) => {
+    const node = await renderBrowser();
+    await changeFilter(node, filter);
+    await act(() => vi.advanceTimersByTimeAsync(300));
+    expect(requests).toHaveLength(2);
+    await act(() => requests[1]!.resolve(result("Current skill", true)));
+    await act(() => requests[0]!.resolve(result("Stale skill")));
+    expect(node.textContent).toContain("Current skill");
+    expect(node.textContent).not.toContain("Stale skill");
+    await act(() => intersect());
+    expect(requests).toHaveLength(3);
+    expect(requests[2]!.url.searchParams.get("page")).toBe("2");
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores an old request's %s during the new query's debounce", async (settlement) => {
+    const node = await renderBrowser();
+    await changeFilter(node, "query");
+    await act(() => {
+      if (settlement === "resolve") requests[0]!.resolve(result("Stale skill", true));
+      else requests[0]!.reject(new Error("Old request failed"));
+    });
+    expect(requests).toHaveLength(1);
+    expect(node.textContent).toContain("Loading skills...");
+    expect(node.textContent).not.toContain("Stale skill");
+    await act(() => vi.advanceTimersByTimeAsync(300));
+    await act(() => requests[1]!.resolve(result("Current skill")));
+    expect(node.textContent).toContain("Current skill");
+  });
+
+  it.each([false, true])("ignores stale failure when the newer request is settled=%s", async (settled) => {
+    const node = await renderBrowser();
+    await changeFilter(node, "query");
+    await act(() => vi.advanceTimersByTimeAsync(300));
+    if (settled) await act(() => requests[1]!.resolve(result("Current skill")));
+    await act(() => requests[0]!.reject(new Error("Old request failed")));
+    expect(node.textContent).toContain(settled ? "Current skill" : "Loading skills...");
+  });
+
+  it.each(["resolve", "reject"] as const)("ignores superseded pagination %s without clearing the current page's loading state", async (settlement) => {
+    const node = await renderBrowser();
+    await act(() => requests[0]!.resolve(result("Old first page", true)));
+    await act(() => intersect());
+    expect(requests[1]!.url.searchParams.get("page")).toBe("2");
+    await changeFilter(node, "query");
+    await act(() => vi.advanceTimersByTimeAsync(300));
+    await act(() => requests[2]!.resolve(result("Current first page", true)));
+    await act(() => intersect());
+    expect(requests).toHaveLength(4);
+    await act(() => {
+      if (settlement === "resolve") requests[1]!.resolve(result("Stale second page"));
+      else requests[1]!.reject(new Error("Old page failed"));
+    });
+    expect(node.textContent).toContain("Current first page");
+    expect(node.textContent).not.toContain("Stale second page");
+    expect(node.querySelector(".animate-spin")).not.toBeNull();
+    await act(() => intersect());
+    expect(requests).toHaveLength(4);
+    await act(() => requests[3]!.resolve(result("Current second page", true)));
+    expect(node.querySelector(".animate-spin")).toBeNull();
+    await act(() => intersect());
+    expect(requests[4]!.url.searchParams.get("page")).toBe("3");
+    expect(requests[4]!.url.searchParams.get("q")).toBe("new query");
+  });
+
+  it("ignores a queued callback from a disconnected pagination observer", async () => {
+    const node = await renderBrowser();
+    await act(() => requests[0]!.resolve(result("Old first page", true)));
+    const oldIntersect = intersect;
+    await changeFilter(node, "query");
+    await act(() => oldIntersect());
+    expect(requests).toHaveLength(1);
+    await act(() => vi.advanceTimersByTimeAsync(300));
+    expect(requests[1]!.url.searchParams.get("page")).toBe("1");
+    expect(requests[1]!.url.searchParams.get("q")).toBe("new query");
+  });
 });
 
 function makeVersion(revisionNumber: number, content: string): CompanySkillVersion {
@@ -641,6 +782,25 @@ describe("skills discovery tab routing", () => {
 
     const installedParams = withDiscoveryTab(new URLSearchParams("tab=all&folder=my"), "installed");
     expect(installedParams.toString()).toBe("folder=my");
+  });
+});
+
+describe("skills import source tabs", () => {
+  it("renders the GitHub-backed other-sources tab", async () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<ImportSkillSourceTabsHeader />);
+    });
+
+    expect(container.textContent).toContain("Other sources");
+    expect(
+      buttonsNamed(container, "Other sources")[0]?.querySelector(
+        'svg path[d^="M15 22v-4a4.8 4.8"]',
+      ),
+    ).not.toBeNull();
   });
 });
 

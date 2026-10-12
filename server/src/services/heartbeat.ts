@@ -314,6 +314,7 @@ import {
   MAX_EXCERPT_BYTES,
 } from "../adapters/utils.js";
 import { costService } from "./costs.js";
+import { priceOpenAiUsageCents } from "./openai-pricing.js";
 import {
   authorizeChatConversationForBoundRun,
   isExternalChatWaitAuthorizationContention,
@@ -448,6 +449,7 @@ import {
 } from "./issue-execution-policy.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
+  isPendingInteractionAddresseeWake,
   isVerifiedIssueTreeControlInteractionWake,
   issueTreeControlService,
 } from "./issue-tree-control.js";
@@ -605,6 +607,7 @@ import {
   writePaperclipSkillSyncPreference,
 } from "@paperclipai/adapter-utils/server-utils";
 import { extractSkillMentionIds, isUuidLike } from "@paperclipai/shared";
+import { getCodexModelCompactionPolicy } from "@paperclipai/adapter-codex-local";
 import { evaluateCodexCredentialReadiness } from "@paperclipai/adapter-codex-local/server";
 import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
@@ -5347,6 +5350,37 @@ function normalizeBilledCostCents(
   return Math.max(0, Math.round(costUsd * 100));
 }
 
+const OPENAI_SUBSCRIPTION_LEDGER_BILLING_TYPES: readonly BillingType[] = [
+  "subscription_included",
+  "subscription_overage",
+];
+
+export function resolveOpenAiSubscriptionBilling(input: {
+  provider: string | null | undefined;
+  model: string | null | undefined;
+  usage: UsageTotals | null;
+  billingType: BillingType;
+  reportedCostUsd: number | null | undefined;
+}): { costCents: number; billingType: BillingType; biller: string } | null {
+  if (
+    typeof input.reportedCostUsd === "number" &&
+    Number.isFinite(input.reportedCostUsd) &&
+    input.reportedCostUsd > 0
+  ) return null;
+  if ((input.provider ?? "").trim().toLowerCase() !== "openai") return null;
+  if (!OPENAI_SUBSCRIPTION_LEDGER_BILLING_TYPES.includes(input.billingType)) return null;
+  if (!input.usage) return null;
+
+  const costCents = priceOpenAiUsageCents({
+    model: input.model,
+    inputTokens: input.usage.inputTokens,
+    cachedInputTokens: input.usage.cachedInputTokens,
+    outputTokens: input.usage.outputTokens,
+  });
+  if (costCents <= 0) return null;
+  return { costCents, billingType: "metered_api", biller: "openai" };
+}
+
 export function resolveLedgerCostStatus(input: {
   costUsd: number | null | undefined;
   inputTokens: number;
@@ -5592,9 +5626,21 @@ function formatCount(value: number | null | undefined) {
 
 export function parseSessionCompactionPolicy(
   agent: typeof agents.$inferSelect,
+  effectiveAdapterConfig?: Record<string, unknown>,
 ): SessionCompactionPolicy {
-  return resolveSessionCompactionPolicy(agent.adapterType, agent.runtimeConfig)
-    .policy;
+  const modelCompactionPolicy =
+    agent.adapterType === "codex_local"
+      ? getCodexModelCompactionPolicy(
+          readConfiguredModelFromAdapterConfig(
+            effectiveAdapterConfig ?? parseObject(agent.adapterConfig),
+          ),
+        )
+      : null;
+  return resolveSessionCompactionPolicy(
+    agent.adapterType,
+    agent.runtimeConfig,
+    modelCompactionPolicy,
+  ).policy;
 }
 
 export function resolveRuntimeSessionParamsForWorkspace(input: {
@@ -6015,6 +6061,8 @@ export type ExecutionWorkspaceReuseRequestForIssue = {
   requestedExecutionWorkspaceId: string | null;
   requestedShouldReuseExisting: boolean;
   existingExecutionWorkspaceAvailable: boolean;
+  explicitReuseRequested: boolean;
+  automaticSharedReuseRequested: boolean;
 };
 
 /**
@@ -6033,7 +6081,12 @@ export function resolveNativeRecoveryExecutionWorkspaceBinding(input: {
 export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
   issueExecutionWorkspaceId?: string | null;
   issueExecutionWorkspacePreference?: string | null;
+  resolvedExecutionWorkspaceMode?: string | null;
+  resolvedProjectId?: string | null;
   existingExecutionWorkspaceStatus?: string | null;
+  existingExecutionWorkspaceClosedAt?: Date | string | null;
+  existingExecutionWorkspaceMode?: string | null;
+  existingExecutionWorkspaceProjectId?: string | null;
   requestedExistingBranch?: string | null;
   existingExecutionWorkspaceBranchName?: string | null;
 }): ExecutionWorkspaceReuseRequestForIssue {
@@ -6050,10 +6103,31 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
     requestedExistingBranch === null ||
     readNonEmptyString(input.existingExecutionWorkspaceBranchName) ===
       requestedExistingBranch;
-  const requestedShouldReuseExisting =
+  const explicitReuseRequested =
     input.issueExecutionWorkspacePreference === "reuse_existing" &&
     requestedExecutionWorkspaceId !== null &&
     existingWorkspaceMatchesRequestedBranch;
+  const existingStatusSupportsAutomaticReuse =
+    input.existingExecutionWorkspaceStatus === "active" ||
+    input.existingExecutionWorkspaceStatus === "idle" ||
+    input.existingExecutionWorkspaceStatus === "in_review";
+  const resolvedProjectId = readNonEmptyString(input.resolvedProjectId);
+  const existingProjectId = readNonEmptyString(
+    input.existingExecutionWorkspaceProjectId,
+  );
+  const automaticSharedReuseRequested = Boolean(
+    requestedExecutionWorkspaceId &&
+    input.resolvedExecutionWorkspaceMode === "shared_workspace" &&
+    input.existingExecutionWorkspaceMode === "shared_workspace" &&
+    existingStatusSupportsAutomaticReuse &&
+    !input.existingExecutionWorkspaceClosedAt &&
+    resolvedProjectId !== null &&
+    existingProjectId !== null &&
+    resolvedProjectId === existingProjectId &&
+    existingWorkspaceMatchesRequestedBranch,
+  );
+  const requestedShouldReuseExisting =
+    explicitReuseRequested || automaticSharedReuseRequested;
 
   return {
     requestedExecutionWorkspaceId,
@@ -6063,16 +6137,26 @@ export function resolveExecutionWorkspaceReuseRequestForIssue(input: {
       input.existingExecutionWorkspaceStatus !== null &&
       input.existingExecutionWorkspaceStatus !== undefined &&
       input.existingExecutionWorkspaceStatus !== "archived",
+    explicitReuseRequested,
+    automaticSharedReuseRequested,
   };
 }
 
 export function resolveExecutionWorkspaceReuseProvisioningPolicy(input: {
   requestedShouldReuseExisting: boolean;
+  forceRestoreExisting?: boolean;
   workspaceConfigFreshness: ExecutionWorkspaceConfigFreshnessDecision;
 }): ExecutionWorkspaceReuseProvisioningPolicy {
-  const shouldRestoreExistingWorkspace = input.requestedShouldReuseExisting;
+  const forceRestoreExisting =
+    input.forceRestoreExisting ?? input.requestedShouldReuseExisting;
+  const shouldRestoreExistingWorkspace =
+    forceRestoreExisting ||
+    (
+      input.requestedShouldReuseExisting &&
+      input.workspaceConfigFreshness.shouldReuseExisting
+    );
   const replacementClassDrift =
-    input.requestedShouldReuseExisting &&
+    shouldRestoreExistingWorkspace &&
     input.workspaceConfigFreshness.action === "replace";
 
   return {
@@ -6119,6 +6203,7 @@ export async function provisionExecutionWorkspaceForFreshnessDecision<
   T extends { warnings?: string[] },
 >(input: {
   requestedShouldReuseExisting: boolean;
+  forceRestoreExisting?: boolean;
   existingExecutionWorkspaceId?: string | null;
   issueRef: WorkspaceReuseIssueRef;
   runId: string;
@@ -6132,6 +6217,7 @@ export async function provisionExecutionWorkspaceForFreshnessDecision<
 }> {
   const policy = resolveExecutionWorkspaceReuseProvisioningPolicy({
     requestedShouldReuseExisting: input.requestedShouldReuseExisting,
+    forceRestoreExisting: input.forceRestoreExisting,
     workspaceConfigFreshness: input.workspaceConfigFreshness,
   });
 
@@ -7324,7 +7410,17 @@ function normalizeInteractionContinuationWakeContext(
   payload: Record<string, unknown> | null | undefined,
 ) {
   if (isInteractionResolutionWakePayload(payload)) return;
+  // Pending-addressee wakes are not resolution continuations. Retain only
+  // their identity for the DB-backed admission/claim checks below.
+  const pendingInteractionId = contextSnapshot.wakeReason === "interaction_pending"
+    ? readNonEmptyString(contextSnapshot.interactionId) ?? readNonEmptyString(payload?.interactionId)
+    : null;
+  const pendingInteractionKind = pendingInteractionId
+    ? readNonEmptyString(contextSnapshot.interactionKind) ?? readNonEmptyString(payload?.interactionKind)
+    : null;
   clearInteractionContinuationWakeContext(contextSnapshot);
+  if (pendingInteractionId) contextSnapshot.interactionId = pendingInteractionId;
+  if (pendingInteractionKind) contextSnapshot.interactionKind = pendingInteractionKind;
 }
 
 type AcceptedPlanWakeRoutingDecision = {
@@ -7475,7 +7571,15 @@ export function mergeCoalescedContextSnapshot(
       merged[PAPERCLIP_EXTERNAL_CHAT_EXECUTION_BOUND_KEY] = true;
     }
   }
-  if (
+  if (incoming.wakeReason === "interaction_pending") {
+    // A new review request must not inherit a different interaction's result.
+    clearInteractionContinuationWakeContext(merged);
+    delete merged.interactionResolvedAt;
+    const interactionId = readNonEmptyString(incoming.interactionId);
+    const interactionKind = readNonEmptyString(incoming.interactionKind);
+    if (interactionId) merged.interactionId = interactionId;
+    if (interactionId && interactionKind) merged.interactionKind = interactionKind;
+  } else if (
     !hasInteractionContinuationWakeContext(incoming) &&
     !(
       options.preserveExistingInteractionContinuation === true &&
@@ -12175,6 +12279,7 @@ export function heartbeatService(
 
   async function evaluateSessionCompaction(input: {
     agent: typeof agents.$inferSelect;
+    effectiveAdapterConfig: Record<string, unknown>;
     sessionId: string | null;
     issueId: string | null;
     continuationSummaryBody?: string | null;
@@ -12189,7 +12294,10 @@ export function heartbeatService(
       };
     }
 
-    const policy = parseSessionCompactionPolicy(agent);
+    const policy = parseSessionCompactionPolicy(
+      agent,
+      input.effectiveAdapterConfig,
+    );
     if (!policy.enabled || !hasSessionCompactionThresholds(policy)) {
       return {
         rotate: false,
@@ -17451,6 +17559,7 @@ export function heartbeatService(
     }
 
     const issueId = readNonEmptyString(context.issueId);
+    let pendingInteractionAddresseeWake = false;
     if (issueId && activeRunExecutions.size > 0) {
       // Native finalization publishes success before workspace synchronization,
       // provider suspension, and lease release finish. A queued comment must
@@ -17519,12 +17628,19 @@ export function heartbeatService(
       );
       const readiness = dependencyReadiness.get(issueId);
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
+      pendingInteractionAddresseeWake = await isPendingInteractionAddresseeWake(db, {
+        companyId: run.companyId,
+        issueId,
+        agentId: run.agentId,
+        contextSnapshot: context,
+      });
       if (
         unresolvedBlockerCount > 0 &&
         !allowsIssueInteractionWake(
           context,
           ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-        )
+        ) &&
+        !pendingInteractionAddresseeWake
       ) {
         await cancelQueuedRunForBlockedDependencies(
           run,
@@ -17545,6 +17661,9 @@ export function heartbeatService(
       });
       if (staleness.outcome === "cancelled") {
         applyRunDispatchPostCommitEffects(staleness.postCommitEffects);
+        await releaseIssueExecutionAndPromote(run, {
+          suppressImmediateRecovery: true,
+        });
         logger.info(
           { runId: run.id, issueId, errorCode: staleness.errorCode },
           "claimQueuedRun: cancelled stale queued run",
@@ -17958,6 +18077,39 @@ export function heartbeatService(
     const claimed = queuedCommentClaim
       ? queuedCommentClaim.run
       : await withChatControlRecoveryGate(run, "claim", async (tx) => {
+          if (pendingInteractionAddresseeWake && issueId) {
+            const stillAuthorized = await isPendingInteractionAddresseeWake(
+              tx as unknown as Db,
+              {
+                companyId: run.companyId,
+                issueId,
+                agentId: run.agentId,
+                contextSnapshot: context,
+              },
+              true,
+            );
+            if (!stillAuthorized) {
+              const cancellationReason =
+                "Pending interaction addressee wake became stale before run claim";
+              const cancelledAt = new Date();
+              await tx.update(heartbeatRuns).set({
+                status: "cancelled",
+                finishedAt: cancelledAt,
+                error: cancellationReason,
+                errorCode: "interaction_pending_stale",
+                updatedAt: cancelledAt,
+              }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")));
+              if (run.wakeupRequestId) {
+                await tx.update(agentWakeupRequests).set({
+                  status: "skipped",
+                  finishedAt: cancelledAt,
+                  error: cancellationReason,
+                  updatedAt: cancelledAt,
+                }).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
+              }
+              return null;
+            }
+          }
           const claimValues = {
             status: "running",
             runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
@@ -18177,6 +18329,7 @@ export function heartbeatService(
 
     return cancelled;
   }
+
 
   function truncateAgentErrorReason(
     reason: string | null | undefined,
@@ -20005,12 +20158,22 @@ export function heartbeatService(
     const inputTokens = usage?.inputTokens ?? 0;
     const outputTokens = usage?.outputTokens ?? 0;
     const cachedInputTokens = usage?.cachedInputTokens ?? 0;
-    const billingType = normalizeLedgerBillingType(result.billingType);
+    const baseBillingType = normalizeLedgerBillingType(result.billingType);
     const billedCostUsd = resolveCacheAdjustedCostUsd(result);
-    const additionalCostCents = normalizeBilledCostCents(
+    const baseCostCents = normalizeBilledCostCents(
       billedCostUsd,
-      billingType,
+      baseBillingType,
     );
+    const openAiSubscriptionBilling = resolveOpenAiSubscriptionBilling({
+      provider: result.provider,
+      model: result.model,
+      usage,
+      billingType: baseBillingType,
+      reportedCostUsd: billedCostUsd,
+    });
+    const billingType = openAiSubscriptionBilling?.billingType ?? baseBillingType;
+    const additionalCostCents =
+      openAiSubscriptionBilling?.costCents ?? baseCostCents;
     const hasTokenUsage =
       inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
     const costStatus = resolveLedgerCostStatus({
@@ -20020,7 +20183,7 @@ export function heartbeatService(
       outputTokens,
     });
     const provider = result.provider ?? "unknown";
-    const biller = resolveLedgerBiller(result);
+    const biller = openAiSubscriptionBilling?.biller ?? resolveLedgerBiller(result);
     const ledgerScope = await resolveLedgerScopeForRun(
       db,
       agent.companyId,
@@ -20687,6 +20850,7 @@ export function heartbeatService(
             return;
           }
           throw error;
+
         }
         issueContext = await getIssueExecutionContext(agent.companyId, issueId);
       }
@@ -21436,8 +21600,19 @@ export function heartbeatService(
           issueExecutionWorkspacePreference: nativeRecoveryExecutionWorkspaceId
             ? "reuse_existing"
             : (issueRef?.executionWorkspacePreference ?? null),
+          resolvedExecutionWorkspaceMode: requestedExecutionWorkspaceMode,
+          resolvedProjectId:
+            issueRef?.projectId ?? existingExecutionWorkspace?.projectId ?? null,
           existingExecutionWorkspaceStatus:
             existingExecutionWorkspace?.status ?? null,
+          existingExecutionWorkspaceClosedAt:
+            existingExecutionWorkspace?.closedAt ?? null,
+          existingExecutionWorkspaceMode:
+            existingExecutionWorkspace?.mode ?? null,
+          existingExecutionWorkspaceProjectId:
+            existingExecutionWorkspace?.projectId ?? null,
+          existingExecutionWorkspaceBranchName:
+            existingExecutionWorkspace?.branchName ?? null,
         });
       const requestedShouldReuseExisting =
         workspaceReuseRequest.requestedShouldReuseExisting;
@@ -22266,6 +22441,7 @@ export function heartbeatService(
       } = await provisionExecutionWorkspaceForFreshnessDecision<RealizedExecutionWorkspace>(
         {
           requestedShouldReuseExisting,
+          forceRestoreExisting: workspaceReuseRequest.explicitReuseRequested,
           existingExecutionWorkspaceId:
             workspaceReuseRequest.requestedExecutionWorkspaceId,
           issueRef,
@@ -22934,6 +23110,7 @@ export function heartbeatService(
             gate.cancellation.postCommitEffects,
           );
         }
+
         return { dispatched: false };
       };
       if (!executionTarget || executionTarget.kind === "local") {
@@ -23201,6 +23378,7 @@ export function heartbeatService(
 
       const sessionCompaction = await evaluateSessionCompaction({
         agent,
+        effectiveAdapterConfig: runtimeConfig,
         sessionId: previousSessionDisplayId ?? runtimeSessionIdForAdapter,
         issueId,
         continuationSummaryBody: continuationSummary?.body ?? null,
@@ -27590,6 +27768,7 @@ export function heartbeatService(
               tx as unknown as Db,
               { companyId: agent.companyId, issueId, agentId },
               opts.requestedByActorId ?? null,
+
             );
             const genericParent =
               !opts.requestedByActorId && reason === "issue_continuation_needed"
@@ -28297,15 +28476,20 @@ export function heartbeatService(
             .then((rows) => rows.get(issue.id) ?? null);
 
           // Blocked descendants should stay idle until the final blocker resolves.
-          // Human comment/mention wakes are the exception: they may run in a
-          // bounded interaction mode so the assignee can answer or triage.
+          // Comment/mention and verified pending-addressee wakes may run in
+          // bounded interaction mode so the agent can answer or triage.
           const blockedInteractionWake =
             dependencyReadiness &&
             !dependencyReadiness.isDependencyReady &&
-            allowsIssueInteractionWake(
+            (allowsIssueInteractionWake(
               enrichedContextSnapshot,
               ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-            );
+            ) || await isPendingInteractionAddresseeWake(tx, {
+              companyId: issue.companyId,
+              issueId: issue.id,
+              agentId,
+              contextSnapshot: enrichedContextSnapshot,
+            }));
 
           if (blockedInteractionWake) {
             enrichedContextSnapshot.dependencyBlockedInteraction = true;

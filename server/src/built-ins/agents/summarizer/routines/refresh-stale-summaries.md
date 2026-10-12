@@ -51,8 +51,8 @@ This routine is **paused by default** and spends no tokens until an operator ena
 
 ## What this run must do
 
-1. Select summary slots whose scope has changed since their last revision and whose `lastGeneratedAt` is older than `{{staleAfterHours}}` hours. Restrict to `{{scopeKinds}}` when a specific kind is chosen. Cap the set at `{{maxSlots}}`, most-stale first.
-2. For each selected slot, run the `summarize-status` skill as the operating procedure: read the current revision, read the company-scoped state you need to understand where things are, and write one new Markdown revision back to the slot.
+1. Claim the bounded refresh set with `POST /api/companies/{companyId}/summary-slots/routine-refresh/claim`, sending this routine execution issue id as `generationIssueId` plus `staleAfterHours: {{staleAfterHours}}`, `maxSlots: {{maxSlots}}`, and `scopeKinds: "{{scopeKinds}}"`. The endpoint returns only stale slots whose scope changed, most-stale first, and binds this checked-out routine task as their active generator.
+2. For each claimed slot, run the `summarize-status` skill as the operating procedure: use the returned document and `latestRevisionId`, read the company-scoped state you need to understand where things are, and write one new Markdown revision back to that exact slot with this routine issue as `generationIssueId`.
 3. Skip slots with no meaningful change since their last revision — do not spend tokens rewriting an unchanged summary.
 
 ## Hard limits for this routine

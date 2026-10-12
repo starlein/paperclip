@@ -80,5 +80,14 @@ tests/storybook-visual/playwright-report/
 .env.local
 test-results/
 
+# Local deployment overrides and TLS material
+docker-compose.override.yml
+docker-compose.*.local.yml
+docker/nginx/certs/
+*.pem
+*.key
+*.crt
+*.csr
+
 # Retained local lifecycle behavior measurements
 .lifecycle-baseline/

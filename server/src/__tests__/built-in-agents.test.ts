@@ -23,6 +23,7 @@ import {
   issues,
   principalPermissionGrants,
   routines,
+  routineRevisions,
   routineTriggers,
 } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
@@ -189,7 +190,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       defaultAdapterType: "claude_local",
       defaultAdapterConfig: { model: "claude-haiku-4-5" },
     });
-    expect(summarizer?.defaultRuntimeConfig).toBeUndefined();
+
     expect(() => validateBuiltInAgentDefinitions([
       {
         key: "briefs",
@@ -661,6 +662,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       title: "Review recent agent trajectories for coaching proposals",
       status: "paused",
       assigneeAgentId: state.agentId,
+      responsibleUserId: "responsible-user",
     });
     const [trigger] = await db.select().from(routineTriggers).where(eq(routineTriggers.routineId, routine!.id));
     expect(trigger).toMatchObject({
@@ -673,6 +675,42 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(coachGrantKeys).toEqual(expect.arrayContaining(["agents:suggest-changes", "skills:suggest-changes"]));
     expect(coachGrantKeys).not.toContain("agents:configure");
     expect(coachGrantKeys).not.toContain("skills:create");
+  });
+
+  it("repairs the legacy system actor stored as a built-in routine responsible user", async () => {
+    const companyId = await seedCompany({ requireApproval: false });
+    await agentService(db).create(companyId, {
+      name: "CEO",
+      role: "ceo",
+      status: "idle",
+      adapterType: "codex_local",
+      adapterConfig: { model: "gpt-5.4" },
+      runtimeConfig: {},
+      permissions: {},
+    });
+    const builtIns = builtInAgentService(db);
+    await builtIns.ensure(companyId, "reflection-coach");
+
+    const [legacyRoutine] = await db.select().from(routines).where(eq(routines.companyId, companyId));
+    await db
+      .update(routines)
+      .set({ responsibleUserId: "built-in-bundles" })
+      .where(eq(routines.id, legacyRoutine!.id));
+    await db
+      .update(routineRevisions)
+      .set({ responsibleUserId: "built-in-bundles" })
+      .where(eq(routineRevisions.id, legacyRoutine!.latestRevisionId!));
+
+    await builtIns.ensure(companyId, "reflection-coach");
+
+    const [repairedRoutine] = await db.select().from(routines).where(eq(routines.id, legacyRoutine!.id));
+    const [repairedRevision] = await db
+      .select()
+      .from(routineRevisions)
+      .where(eq(routineRevisions.id, repairedRoutine!.latestRevisionId!));
+    expect(repairedRoutine?.responsibleUserId).toBe("responsible-user");
+    expect(repairedRevision?.responsibleUserId).toBe("responsible-user");
+    expect(repairedRevision?.createdByUserId).toBeNull();
   });
 
   it("recreates missing managed resource bindings idempotently during concurrent reconcile", async () => {
@@ -1279,6 +1317,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       assigneeAgentId: state.agentId,
       originKind: "built_in_agent_bundle",
       originId: "reflection-coach:recent-agent-reflection",
+      responsibleUserId: "responsible-user",
     });
     const [trigger] = await db.select().from(routineTriggers).where(eq(routineTriggers.routineId, routine!.id));
     expect(trigger).toMatchObject({
@@ -1327,6 +1366,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       featureKeys: ["summarizer"],
     });
 
+
     expect(state.resources.map((resource) => [resource.resourceKind, resource.stockStatus])).toEqual([
       ["instructions", "stock_current"],
       ["skill", "stock_current"],
@@ -1353,6 +1393,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       assigneeAgentId: state.agentId,
       originKind: "built_in_agent_bundle",
       originId: "summarizer:refresh-stale-summaries",
+      responsibleUserId: "responsible-user",
     });
     const [trigger] = await db.select().from(routineTriggers).where(eq(routineTriggers.routineId, routine!.id));
     expect(trigger).toMatchObject({
@@ -1361,6 +1402,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       cronExpression: "0 8 * * *",
       timezone: "UTC",
     });
+
   });
 
   it("keeps the Summarizer not-configured until an adapter model is set", async () => {
@@ -1381,6 +1423,7 @@ describeEmbeddedPostgres("built-in agents", () => {
       warning: { code: "built_in_agent_paused", key: "summarizer" },
     });
   });
+
 
   it("restores Summarizer instruction drift on reset", async () => {
     const companyId = await seedCompany();

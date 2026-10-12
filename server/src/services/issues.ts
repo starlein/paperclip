@@ -172,6 +172,7 @@ import {
   summarizeIssueWatchdog,
   upsertIssueWatchdogForIssue,
 } from "./task-watchdogs.js";
+import { TASK_WATCHDOG_ORIGIN_KIND } from "./task-watchdog-scope.js";
 import {
   isVerifiedIssueTreeControlInteractionWake,
   issueTreeControlService,
@@ -2734,6 +2735,48 @@ async function listUnresolvedBlockerIssueIds(
     )
     .then((rows) => rows.map((row) => row.id));
 }
+
+async function getProposedIssueDependencyReadiness(
+  dbOrTx: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+  blockerIssueIds: string[],
+) {
+  const readiness = createIssueDependencyReadiness(issueId);
+  const uniqueBlockerIssueIds = [...new Set(blockerIssueIds.filter(Boolean))];
+  if (uniqueBlockerIssueIds.length === 0) return readiness;
+
+  const blockerRows = await dbOrTx
+    .select({
+      blockerIssueId: issues.id,
+      blockerStatus: issues.status,
+      blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+    })
+    .from(issues)
+    .where(and(eq(issues.companyId, companyId), inArray(issues.id, uniqueBlockerIssueIds)));
+  const pendingFinalizeBlockerIssueIds = await listPendingFinalizeBlockerIssueIds(
+    dbOrTx,
+    companyId,
+    blockerRows.flatMap((row) =>
+      row.blockerStatus === "done" && row.blockerExecutionWorkspaceId
+        ? [{ blockerIssueId: row.blockerIssueId, executionWorkspaceId: row.blockerExecutionWorkspaceId }]
+        : []),
+  );
+
+  for (const row of blockerRows) {
+    readiness.blockerIssueIds.push(row.blockerIssueId);
+    const pendingFinalize = pendingFinalizeBlockerIssueIds.has(row.blockerIssueId);
+    if (row.blockerStatus !== "done" || pendingFinalize) {
+      readiness.unresolvedBlockerIssueIds.push(row.blockerIssueId);
+      readiness.unresolvedBlockerCount += 1;
+      readiness.allBlockersDone = false;
+      readiness.isDependencyReady = false;
+      if (pendingFinalize) readiness.pendingFinalizeBlockerIssueIds.push(row.blockerIssueId);
+    }
+  }
+  return readiness;
+}
+
 async function getProjectDefaultGoalId(
   db: ProjectGoalReader,
   companyId: string,
@@ -9087,6 +9130,25 @@ export function issueService(db: Db) {
       return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
     },
 
+    getProposedDependencyReadiness: async (
+      issueId: string,
+      blockerIssueIds: string[],
+      dbOrTx: any = db,
+    ) => {
+      const issue = await dbOrTx
+        .select({ id: issues.id, companyId: issues.companyId })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows: Array<{ id: string; companyId: string }>) => rows[0] ?? null);
+      if (!issue) throw notFound("Issue not found");
+      return getProposedIssueDependencyReadiness(
+        dbOrTx,
+        issue.companyId,
+        issue.id,
+        blockerIssueIds,
+      );
+    },
+
     listDependencyReadiness: async (
       companyId: string,
       issueIds: string[],
@@ -9208,12 +9270,11 @@ export function issueService(db: Db) {
           updatedAt: issues.updatedAt,
         })
         .from(issues)
-        .where(
-          and(
-            eq(issues.companyId, parent.companyId),
-            eq(issues.parentId, parentIssueId),
-          ),
-        )
+        .where(and(
+          eq(issues.companyId, parent.companyId),
+          eq(issues.parentId, parentIssueId),
+          or(isNull(issues.originKind), ne(issues.originKind, TASK_WATCHDOG_ORIGIN_KIND)),
+        ))
         .orderBy(asc(issues.issueNumber), asc(issues.createdAt));
       if (children.length === 0) return null;
       if (
@@ -11442,6 +11503,39 @@ export function issueService(db: Db) {
       await assertAssignableAgent(db, issueCompany.companyId, agentId, {
         kind: "work",
       });
+
+      // A run-bound agent token can outlive the heartbeat row's active state.
+      // Never report a successful checkout for such a terminal run: the stale
+      // lock sweeper would immediately clear the ownership we just wrote and
+      // the same run's follow-up policy/status mutations would then conflict.
+      // This check makes a successful agent checkout mean that its run is a
+      // live, same-company execution owner at the checkout linearization point.
+      if (checkoutRunId) {
+        const checkoutRun = await db
+          .select({
+            companyId: heartbeatRuns.companyId,
+            agentId: heartbeatRuns.agentId,
+            status: heartbeatRuns.status,
+          })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, checkoutRunId))
+          .then((rows) => rows[0] ?? null);
+        if (
+          !checkoutRun ||
+          checkoutRun.companyId !== issueCompany.companyId ||
+          checkoutRun.agentId !== agentId ||
+          TERMINAL_HEARTBEAT_RUN_STATUSES.has(checkoutRun.status)
+        ) {
+          throw conflict("Heartbeat run cannot checkout issue", {
+            issueId: id,
+            checkoutRunId,
+            runStatus:
+              checkoutRun?.companyId === issueCompany.companyId && checkoutRun.agentId === agentId
+                ? checkoutRun.status
+                : "missing",
+          });
+        }
+      }
 
       const now = new Date();
       const activePauseHold = await treeControlSvc.getActivePauseHoldGate(

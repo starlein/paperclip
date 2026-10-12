@@ -38,6 +38,14 @@ export function runtimeSkillCacheSpec(managedRoot: string, skill: CompanySkill):
   // editor. Existing directories are used directly; missing-source fallback
   // must reread its files rather than reuse an immutable revision fingerprint.
   if (skill.sourceType === "local_path") return null;
+  const storedFiles = metadata.fileContents;
+  const fileContents = skill.sourceType === "agentskill_sh"
+    && storedFiles && typeof storedFiles === "object" && !Array.isArray(storedFiles)
+    ? paths.filter((relative) => relative !== "SKILL.md" || !skill.markdown).map((relative) => {
+      const content = (storedFiles as Record<string, unknown>)[relative];
+      return { path: relative, digest: typeof content === "string" ? digest(content) : null };
+    })
+    : undefined;
   const fingerprint = digest(JSON.stringify({
     format: FORMAT, companyId: skill.companyId, skillId: skill.id,
     sourceType: skill.sourceType, sourceLocator: skill.sourceLocator, sourceRef: skill.sourceRef,
@@ -45,7 +53,7 @@ export function runtimeSkillCacheSpec(managedRoot: string, skill: CompanySkill):
     source: { owner: metadata.owner, repo: metadata.repo, hostname: metadata.hostname,
       ref: skill.sourceRef ? undefined : metadata.ref, repoSkillDir: metadata.repoSkillDir,
       fallbackDirectory: typeof metadata.repoSkillDir === "string" ? undefined : skill.slug },
-    markdown: digest(skill.markdown), inventory,
+    markdown: digest(skill.markdown), inventory, fileContents,
   }));
   const root = runtimeSkillCacheRoot(managedRoot, skill.id);
   return { root, entry: path.join(root, fingerprint), fingerprint, paths };

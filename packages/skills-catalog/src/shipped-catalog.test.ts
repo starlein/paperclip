@@ -44,6 +44,7 @@ function listSkillFiles(dir: string): string[] {
     // shipped Paperclip skills and must not participate in this repo audit.
     if (entry.name === "node_modules") return [];
     const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory() && entry.name === "node_modules") return [];
     if (entry.isDirectory()) return listSkillFiles(entryPath);
     if (entry.isFile() && entry.name === "SKILL.md") return [entryPath];
     return [];

@@ -19,6 +19,7 @@ import {
   issueComments,
   issueDocuments,
   issueRelations,
+  issueThreadInteractions,
   issueRecoveryActions,
   issueTreeHolds,
   issues,
@@ -139,6 +140,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(issueRelations);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueTreeHolds);
     await db.delete(issues);
     await db.delete(heartbeatRunEvents);
@@ -388,6 +390,56 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(recoveredIntent).toMatchObject({ status: "coalesced" });
   });
 
+  it.each(["missing", "wrong-agent", "wrong-issue", "wrong-company", "resolved", "wrong-reason"])(
+    "does not bypass dependencies for a %s pending interaction wake",
+    async (scenario) => {
+      const companyId = randomUUID();
+      const otherCompanyId = randomUUID();
+      const agentId = randomUUID();
+      const otherAgentId = randomUUID();
+      const issueId = randomUUID();
+      const blockerId = randomUUID();
+      const interactionId = randomUUID();
+      await db.insert(companies).values([companyId, otherCompanyId].map((id) => ({
+        id, name: "Interaction admission", issuePrefix: `N${id.slice(0, 6)}`,
+        requireBoardApprovalForNewAgents: false,
+      })));
+      await db.insert(agents).values([agentId, otherAgentId].map((id) => ({
+        id, companyId, name: id, role: "engineer", status: "active",
+        adapterType: "codex_local", adapterConfig: {}, permissions: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+      })));
+      await db.insert(issues).values([issueId, blockerId].map((id) => ({
+        id, companyId, title: id, status: "todo", priority: "medium",
+        assigneeAgentId: agentId, responsibleUserId: "responsible-user",
+      })));
+      await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+      if (scenario !== "missing") {
+        await db.insert(issueThreadInteractions).values({
+          id: interactionId,
+          companyId: scenario === "wrong-company" ? otherCompanyId : companyId,
+          issueId: scenario === "wrong-issue" ? blockerId : issueId,
+          addresseeAgentId: scenario === "wrong-agent" ? otherAgentId : agentId,
+          kind: "request_item_verdicts",
+          status: scenario === "resolved" ? "resolved" : "pending",
+          continuationPolicy: "wake_assignee",
+          payload: { version: 1, prompt: "Review only", items: [{ id: "security", label: "Security" }] },
+        });
+      }
+      const reason = scenario === "wrong-reason" ? "issue_assigned" : "interaction_pending";
+      expect(await heartbeat.wakeup(agentId, {
+        source: "automation", triggerDetail: "system", reason,
+        payload: { issueId, interactionId },
+        contextSnapshot: { issueId, interactionId, wakeReason: reason },
+      })).toBeNull();
+      expect(await db.select().from(heartbeatRuns)).toHaveLength(0);
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(await db.select().from(agentWakeupRequests)).toEqual([
+        expect.objectContaining({ companyId, agentId, status: "skipped", reason: "issue_dependencies_blocked" }),
+      ]);
+    },
+  );
+
   it("keeps blocked descendants idle until their blockers resolve", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -532,6 +584,55 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(interactionRun?.contextSnapshot).toMatchObject({
       dependencyBlockedInteraction: true,
       unresolvedBlockerIssueIds: [blockerId],
+    });
+
+    const pendingInteractionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({
+      id: pendingInteractionId,
+      companyId,
+      issueId: blockedIssueId,
+      kind: "request_item_verdicts",
+      status: "pending",
+      addresseeAgentId: agentId,
+      continuationPolicy: "wake_assignee",
+      payload: {
+        version: 1,
+        prompt: "Review this blocked issue without taking ownership.",
+        items: [{ id: "security", label: "Security verdict" }],
+      },
+    });
+    const addresseeWake = await heartbeat.wakeup(agentId, {
+      source: "automation",
+      triggerDetail: "system",
+      reason: "interaction_pending",
+      payload: { issueId: blockedIssueId, interactionId: pendingInteractionId },
+      contextSnapshot: {
+        issueId: blockedIssueId,
+        interactionId: pendingInteractionId,
+        wakeReason: "interaction_pending",
+      },
+    });
+    expect(addresseeWake).not.toBeNull();
+
+    await waitForCondition(async () => {
+      const run = await db
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, addresseeWake!.id))
+        .then((rows) => rows[0] ?? null);
+      return run?.status === "succeeded";
+    });
+
+    const addresseeRun = await db
+      .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, addresseeWake!.id))
+      .then((rows) => rows[0] ?? null);
+    expect(addresseeRun?.contextSnapshot).toMatchObject({
+      dependencyBlockedInteraction: true,
+      unresolvedBlockerIssueIds: [blockerId],
+      unresolvedBlockerCount: 1,
+      unresolvedBlockerSummaries: [expect.objectContaining({ id: blockerId })],
     });
 
     let finishReadyRun!: () => void;

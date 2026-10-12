@@ -110,4 +110,3 @@ export async function syncConnectionCredentialBindings(
       projectionAllowlistKey: ref.projectionAllowlistKey,
     })));
   }
-

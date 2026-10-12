@@ -27,6 +27,7 @@ import { emitAgentTaskRun } from "../../../services/agent-task-run-telemetry.js"
 import { issueService } from "../../../services/issues.js";
 import {
   issueTreeControlService,
+  isPendingInteractionAddresseeWake,
   isVerifiedIssueTreeControlInteractionWake,
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
 } from "../../../services/issue-tree-control.js";
@@ -531,7 +532,12 @@ export function createPostgresRunDispatchAdapter(
     const isInteractionWake = allowsIssueInteractionWake(
       context,
       ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
-    );
+    ) || await isPendingInteractionAddresseeWake(dbOrTx, {
+      companyId: input.companyId,
+      issueId,
+      agentId: input.agentId,
+      contextSnapshot: context,
+    });
     const resumeIntent = context.resumeIntent === true || context.followUpRequested === true;
     const wakeReason = readNonEmptyString(context.wakeReason);
     const retryReason =

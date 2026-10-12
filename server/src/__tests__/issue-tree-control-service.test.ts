@@ -18,8 +18,14 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
-import { issueTreeControlService } from "../services/issue-tree-control.js";
+import {
+  isPendingInteractionAddresseeWake,
+  ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
+  isVerifiedIssueTreeControlInteractionWake,
+  issueTreeControlService,
+} from "../services/issue-tree-control.js";
 import { issueService } from "../services/issues.js";
+import { allowsIssueInteractionWake } from "../modules/run-dispatch/domain/wake-context.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -44,6 +50,7 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     await db.delete(activityLog);
     await db.delete(issueTreeHoldMembers);
     await db.delete(issueTreeHolds);
+    await db.delete(issueThreadInteractions);
     await db.delete(issueComments);
     await db.delete(issues);
     await db.delete(heartbeatRuns);
@@ -54,6 +61,102 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("allows a pending interaction addressee through issue-tree pause checks without issue ownership", async () => {
+    const companyId = randomUUID();
+    const ownerAgentId = randomUUID();
+    const addresseeAgentId = randomUUID();
+    const issueId = randomUUID();
+    const interactionId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: ownerAgentId,
+        companyId,
+        name: "SoftwareEngineer",
+        role: "engineer",
+        status: "running",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: addresseeAgentId,
+        companyId,
+        name: "SecurityEngineer",
+        role: "security_engineer",
+        status: "idle",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Security advisory",
+      status: "in_review",
+      priority: "high",
+      assigneeAgentId: ownerAgentId,
+    });
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId,
+      companyId,
+      issueId,
+      kind: "request_item_verdicts",
+      status: "pending",
+      addresseeAgentId,
+      payload: {
+        version: 1,
+        prompt: "Review the exact PR head.",
+        items: [{ id: "security", label: "Security boundary" }],
+        verdicts: ["approve", "reject", "defer"],
+      },
+    });
+
+    const contextSnapshot = { wakeReason: "interaction_pending", interactionId, commentId: randomUUID() };
+    const authorize = async (agentId: string, context = contextSnapshot, targetIssueId = issueId) =>
+      allowsIssueInteractionWake(context, ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS)
+      || await isPendingInteractionAddresseeWake(db, {
+        companyId, issueId: targetIssueId, agentId, contextSnapshot: context,
+      });
+    expect(await authorize(addresseeAgentId)).toBe(true);
+    expect(await authorize(ownerAgentId)).toBe(false);
+    expect(await authorize(addresseeAgentId, { ...contextSnapshot, interactionId: "" })).toBe(false);
+    expect(await authorize(addresseeAgentId, { ...contextSnapshot, interactionId: randomUUID() })).toBe(false);
+    expect(await authorize(addresseeAgentId, contextSnapshot, randomUUID())).toBe(false);
+    await db.update(issueThreadInteractions).set({ status: "answered" })
+      .where(eq(issueThreadInteractions.id, interactionId));
+    expect(await authorize(addresseeAgentId)).toBe(false);
+    await db.update(issueThreadInteractions).set({ status: "pending" })
+      .where(eq(issueThreadInteractions.id, interactionId));
+
+    await expect(isVerifiedIssueTreeControlInteractionWake(db, {
+      companyId,
+      issueId,
+      agentId: addresseeAgentId,
+      contextSnapshot: { wakeReason: "interaction_pending", interactionId },
+    })).resolves.toBe(true);
+
+    await db.update(issueThreadInteractions).set({
+      effectiveResolverPolicy: "human_only",
+    }).where(eq(issueThreadInteractions.id, interactionId));
+
+    await expect(isVerifiedIssueTreeControlInteractionWake(db, {
+      companyId,
+      issueId,
+      agentId: addresseeAgentId,
+      contextSnapshot: { wakeReason: "interaction_pending", interactionId },
+    })).resolves.toBe(false);
   });
 
   it("previews a subtree without changing issue statuses", async () => {
@@ -408,6 +511,7 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     const issuePath = Array.from({ length: 17 }, () => randomUUID());
     const rootIssueId = issuePath[0];
     const deepDescendantIssueId = issuePath.at(-1)!;
+    const unrelatedRunId = randomUUID();
     const rootRunId = randomUUID();
     const deepDescendantRunId = randomUUID();
     const forgedRunId = randomUUID();
@@ -504,6 +608,15 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
     ]);
     await db.insert(heartbeatRuns).values([
       {
+        id: unrelatedRunId,
+        companyId,
+        agentId,
+        invocationSource: "on_demand",
+        triggerDetail: "manual",
+        status: "queued",
+        contextSnapshot: { issueId: deepDescendantIssueId },
+      },
+      {
         id: rootRunId,
         companyId,
         agentId,
@@ -569,7 +682,7 @@ describeEmbeddedPostgres("issueTreeControlService", () => {
 
     const issueSvc = issueService(db);
     await expect(
-      issueSvc.checkout(deepDescendantIssueId, agentId, ["todo"], randomUUID()),
+      issueSvc.checkout(deepDescendantIssueId, agentId, ["todo"], unrelatedRunId),
     ).rejects.toMatchObject({
       status: 409,
       details: expect.objectContaining({

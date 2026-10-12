@@ -48,6 +48,17 @@ describe("wake context", () => {
     expect(deriveCommentId(context, payload)).toBe(expected);
   });
 
+  it.each(["commentId", "wakeCommentId", "wakeCommentIds"])(
+    "never authorizes interaction_pending from %s without DB revalidation",
+    (key) => {
+      expect(allowsIssueInteractionWake({
+        wakeReason: "interaction_pending",
+        interactionId: "interaction-1",
+        [key]: key === "wakeCommentIds" ? ["comment-1"] : "comment-1",
+      }, new Set(["interaction_pending", "issue_commented"]))).toBe(false);
+    },
+  );
+
   it("allows interaction wakes only for an allowed reason with a comment id", () => {
     const allowed = new Set(["issue_commented"]);
     expect(allowsIssueInteractionWake({

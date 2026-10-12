@@ -15,7 +15,7 @@ describe("codex local adapter metadata", () => {
     // alias, so it must not be advertised or used as the default (it triggers a fallback warning).
     expect(DEFAULT_CODEX_LOCAL_MODEL).toBe("gpt-5.6-sol");
     // Ordered like the ChatGPT app: newest version first, then by capability within a version (#14878).
-    expect(modelIds.slice(0, 13)).toEqual([
+    expect(modelIds.slice(0, 14)).toEqual([
       "gpt-6.1-sol",
       "gpt-6-astra",
       "gpt-6-sol",
@@ -26,6 +26,7 @@ describe("codex local adapter metadata", () => {
       "gpt-5.5",
       "gpt-5.4",
       "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
       "gpt-5",
       "gpt-5-mini",
       "gpt-5-nano",
@@ -36,7 +37,7 @@ describe("codex local adapter metadata", () => {
     expect(isCodexLocalFastModeSupported("gpt-6.1-sol")).toBe(true);
     expect(isCodexLocalFastModeSupported("gpt-6-sol")).toBe(true);
     expect(modelIds).not.toContain("gpt-5.3-codex");
-    expect(modelIds).not.toContain("gpt-5.3-codex-spark");
+    expect(modelIds).toContain("gpt-5.3-codex-spark");
   });
 
   it.each(["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", " gpt-6-sol ", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6"])("uses the reasoning efforts advertised for %s", (model) => {

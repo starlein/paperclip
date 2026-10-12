@@ -86,7 +86,9 @@ export function allowsIssueInteractionWake(
   allowedWakeReasons: ReadonlySet<string>,
 ): boolean {
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
-  if (!wakeReason || !allowedWakeReasons.has(wakeReason)) return false;
+  // Pending interactions require DB-backed addressee and status revalidation,
+  // even when their context also carries a comment id.
+  if (!wakeReason || wakeReason === "interaction_pending" || !allowedWakeReasons.has(wakeReason)) return false;
   return Boolean(deriveCommentId(contextSnapshot));
 }
 

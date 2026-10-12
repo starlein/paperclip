@@ -6,6 +6,7 @@ import {
   summarizeHeartbeatRunListResultJson,
 } from "../services/heartbeat.js";
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
+import { isResolvedInteractionContinuationWakeContext } from "../modules/run-dispatch/domain/wake-context.js";
 
 describe("buildPaperclipTaskMarkdown", () => {
   it("asks for early naming only while an ordinary task has a provisional title", () => {
@@ -570,6 +571,31 @@ describe("buildPaperclipTaskMarkdown", () => {
 });
 
 describe("mergeCoalescedContextSnapshot", () => {
+  it.each([false, true])("does not attach old resolution state to a new pending interaction (preserve=%s)", (preserve) => {
+    const merged = mergeCoalescedContextSnapshot(
+      {
+        issueId: "issue-1", interactionId: "resolved-1", interactionKind: "request_confirmation",
+        interactionStatus: "accepted", continuationPolicy: "wake_assignee_on_accept",
+        checkboxSelection: { selectedOptionIds: ["old"] }, itemVerdicts: [{ id: "old", verdict: "approve" }],
+        newlyResolvedItemIds: ["old"], interactionResolvedAt: "2026-10-01T00:00:00Z",
+        mutation: "interaction", retryReason: "interaction_continuation_infra_retry",
+        wakeReason: "issue_commented",
+      },
+      { issueId: "issue-1", interactionId: "pending-2", wakeReason: "interaction_pending" },
+      { preserveExistingInteractionContinuation: preserve },
+    );
+    expect(merged.interactionId).toBe("pending-2");
+    expect(merged.retryReason).toBe("interaction_continuation_infra_retry");
+    for (const key of ["interactionKind", "interactionStatus", "continuationPolicy", "checkboxSelection", "itemVerdicts", "newlyResolvedItemIds", "interactionResolvedAt"]) {
+      expect(merged[key]).toBeUndefined();
+    }
+    expect(isResolvedInteractionContinuationWakeContext(merged)).toBe(false);
+    const withKind = mergeCoalescedContextSnapshot(merged, {
+      interactionId: "pending-3", interactionKind: "request_item_verdicts", wakeReason: "interaction_pending",
+    });
+    expect(withKind.interactionKind).toBe("request_item_verdicts");
+  });
+
   it("clears stale accepted-plan interaction state when merging a later ordinary comment wake", () => {
     const merged = mergeCoalescedContextSnapshot(
       {

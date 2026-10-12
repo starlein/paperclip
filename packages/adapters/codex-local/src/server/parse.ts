@@ -127,6 +127,20 @@ export function isCodexUnknownSessionError(stdout: string, stderr: string): bool
   );
 }
 
+/**
+ * Codex cannot resume a thread once its model context is exhausted. Treat the
+ * documented failure as a stale session so the executor retries with a fresh
+ * thread instead of surfacing an unrecoverable adapter failure.
+ */
+export function isCodexSessionResetRequiredError(stdout: string, stderr: string): boolean {
+  return isCodexUnknownSessionError(stdout, stderr) || isCodexContextExhaustedError(stdout, stderr);
+}
+
+export function isCodexContextExhaustedError(stdout: string, stderr: string): boolean {
+  const haystack = `${stdout}\n${stderr}`;
+  return /ran out of room in (?:the )?model(?:'s)? context window|start a new thread or clear earlier history/i.test(haystack);
+}
+
 function buildCodexErrorHaystack(input: {
   stdout?: string | null;
   stderr?: string | null;

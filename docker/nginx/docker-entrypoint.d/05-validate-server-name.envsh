@@ -1,0 +1,29 @@
+#!/bin/sh
+# Sourced by the official nginx entrypoint before certificates and envsubst.
+PAPERCLIP_TLS_SERVER_NAME="${PAPERCLIP_TLS_SERVER_NAME-localhost}"
+
+invalid_server_name() {
+  echo "paperclip nginx: PAPERCLIP_TLS_SERVER_NAME must be a DNS hostname (no scheme, port, path, wildcard, or nginx variables)" >&2
+  exit 1
+}
+
+case "$PAPERCLIP_TLS_SERVER_NAME" in
+  ''|*[!A-Za-z0-9.-]*|.*|*.|*..*) invalid_server_name ;;
+esac
+[ "${#PAPERCLIP_TLS_SERVER_NAME}" -le 253 ] || invalid_server_name
+
+remaining="$PAPERCLIP_TLS_SERVER_NAME"
+while :; do
+  label="${remaining%%.*}"
+  case "$label" in
+    ''|-*|*-) invalid_server_name ;;
+  esac
+  [ "${#label}" -le 63 ] || invalid_server_name
+  [ "$remaining" != "$label" ] || break
+  remaining="${remaining#*.}"
+done
+unset remaining label
+
+# Never substitute nginx's runtime variables, even when running without Compose.
+NGINX_ENVSUBST_FILTER='^PAPERCLIP_TLS_SERVER_NAME$'
+export PAPERCLIP_TLS_SERVER_NAME NGINX_ENVSUBST_FILTER
