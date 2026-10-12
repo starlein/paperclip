@@ -18104,6 +18104,14 @@ export function heartbeatService(
       : await withChatControlRecoveryGate(run, "claim", async (tx) => tx.transaction(async (claimTx) => {
           const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
           if (issueClaim.blocked) return null;
+          // Native reviewer admission and queue edits both lock issue, wake,
+          // then run. Retain that order before revalidating the claim context.
+          if (run.wakeupRequestId) await claimTx.select({ id: agentWakeupRequests.id })
+            .from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.id, run.wakeupRequestId),
+              eq(agentWakeupRequests.companyId, run.companyId),
+              eq(agentWakeupRequests.agentId, run.agentId),
+            )).for("update");
           const [current] = await claimTx.select().from(heartbeatRuns).where(and(
             eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
             eq(heartbeatRuns.agentId, run.agentId),
