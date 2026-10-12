@@ -1635,7 +1635,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         issueId,
         _paperclipWakeContext: {
           issueId,
-          wakeReason: "execution_review_requested",
+          wakeReason: "issue_assigned",
         },
       },
       status: "deferred_issue_execution",
@@ -1697,6 +1697,44 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(deferred?.status).not.toBe("deferred_issue_execution");
     expect(promotedRun?.agentId).toBe(replacementAgentId);
     expect(countExecuteCallsForRun(runId)).toBe(0);
+  });
+
+  it.each([
+    { initialReason: "interaction_pending", comments: false, replacementReason: "interaction_pending" },
+    { initialReason: "issue_assigned", comments: false, replacementReason: "interaction_pending" },
+    { initialReason: "interaction_pending", comments: true, replacementReason: "interaction_pending" },
+    { initialReason: "issue_assigned", comments: true, replacementReason: "interaction_pending" },
+    { initialReason: "interaction_pending", comments: false, replacementReason: "issue_assigned" },
+  ])("rejects replaced claim context: $initialReason -> $replacementReason, queued comments=$comments", async ({ initialReason, comments, replacementReason }) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID(), interactionId = randomUUID(), commentId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Claim context race", status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(issueThreadInteractions).values({ id: interactionId, companyId, issueId,
+      kind: "request_confirmation", status: "pending", addresseeAgentId: agentId,
+      payload: { version: 1, prompt: "Confirm" } });
+    if (comments) await db.insert(issueComments).values({ id: commentId, companyId, issueId, authorUserId: "local-board", body: "Continue" });
+    const queued = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: initialReason,
+      invocationSource: "automation", contextExtras: { interactionId, ...(comments ? { wakeCommentIds: [commentId] } : {}) } });
+    if (comments) await db.update(agentWakeupRequests).set({ payload: withQueuedCommentIdsInWakePayload({ issueId }, [commentId]) }).where(eq(agentWakeupRequests.id, queued.wakeupRequestId));
+    let changed = false;
+    const racingHeartbeat = heartbeatService(db, {
+      runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" },
+      beforeChatControlRecoveryCheck: async ({ runId, stage }) => {
+        if (stage !== "claim" || runId !== queued.runId || changed) return;
+        changed = true;
+        await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, wakeReason: replacementReason,
+          interactionId: randomUUID(), ...(comments ? { wakeCommentIds: [commentId] } : {}) } }).where(eq(heartbeatRuns.id, runId));
+      },
+    });
+    await racingHeartbeat.resumeQueuedRuns();
+    await racingHeartbeat.drainActiveRunExecutions();
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued.runId));
+    expect(changed).toBe(true);
+    expect(countExecuteCallsForRun(queued.runId)).toBe(0);
+    expect(run.status).toBe("cancelled");
+    expect(run.errorCode).toBe("interaction_pending_stale");
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, queued.wakeupRequestId));
+    expect(wake.status).toBe("skipped");
   });
 
   it("runs a pending interaction wake for its non-assignee addressee", async () => {

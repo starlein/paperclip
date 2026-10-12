@@ -24,6 +24,7 @@ import {
 import { createPostgresRunDispatchAdapter } from "./postgres.js";
 import { settleUnrecoverableExecutions } from "../../../services/execution-recovery-resolution.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
+import { legacyExecutionNeedsReconciliation } from "../../../services/legacy-execution-recovery.js";
 
 // Proves the DB-to-facts mapping this adapter owns for each state the two
 // run-dispatch gates decide on. `application/use-cases.test.ts` and
@@ -524,6 +525,28 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
   });
 
   describe("cancelStaleQueuedRun", () => {
+    it.each([
+      { name: "never dispatched", patch: {}, safe: true },
+      { name: "running", patch: { status: "running" }, safe: false },
+      { name: "started", patch: { startedAt: new Date() }, safe: false },
+      { name: "PID", patch: { processPid: 123 }, safe: false },
+      { name: "process group", patch: { processGroupId: 123 }, safe: false },
+      { name: "dispatch", patch: { runnerProfileJson: { adapterDispatch: { adapterType: "codex_local" } } }, safe: false },
+      { name: "previous result", patch: { resultJson: { summary: "Earlier work" } }, safe: false },
+      { name: "uncertain recovery", patch: { resultJson: { executionRecovery: { kind: "interrupted", providerWorkStarted: true } } }, safe: false },
+    ])("retains cancellation reconciliation unless provably pre-dispatch: $name", async ({ patch, safe }) => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      await seedIssue({ companyId, issueId, status: "done", assigneeAgentId: agentId });
+      const runId = await seedRun({ companyId, agentId, contextSnapshot: { issueId, wakeReason: "issue_assigned" } });
+      await db.update(heartbeatRuns).set({ updatedAt: new Date(), ...patch }).where(eq(heartbeatRuns.id, runId));
+      const outcome = await createPostgresRunDispatchAdapter(db).cancelStaleQueuedRun({ companyId, runId,
+        expectedStatus: patch.status === "running" ? "running" : "queued", now: new Date() });
+      expect(outcome.outcome).toBe("cancelled");
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+      expect(legacyExecutionNeedsReconciliation(run)).toBe(!safe);
+      if (safe) expect(run.resultJson).toMatchObject({ executionRecovery: { kind: "bootstrap", providerWorkStarted: false } });
+    });
     it.each([
       { label: "chat source", source: "chat:slack", expected: "chat:slack" },
       {

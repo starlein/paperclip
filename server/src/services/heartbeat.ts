@@ -17260,13 +17260,13 @@ export function heartbeatService(
   async function withChatControlRecoveryGate(
     run: typeof heartbeatRuns.$inferSelect,
     stage: "claim" | "dispatch",
-    onClear: (tx: Db) => Promise<typeof heartbeatRuns.$inferSelect | null>,
+    onClear: (tx: Db, current: typeof heartbeatRuns.$inferSelect) => Promise<typeof heartbeatRuns.$inferSelect | null>,
     nativeRecovery = false,
   ) {
     const issueId = readNonEmptyString(
       parseObject(run.contextSnapshot).issueId,
     );
-    if (!issueId || run.invocationSource !== "automation") return onClear(db);
+    if (!issueId || run.invocationSource !== "automation") return onClear(db, run);
     await options.beforeChatControlRecoveryCheck?.({
       runId: run.id,
       issueId,
@@ -17300,7 +17300,7 @@ export function heartbeatService(
           (admission === "admitted" ||
             (admission === "historical" && expected === "historical"))
         )
-          return onClear(db);
+          return onClear(db, run);
       }
     }
     let terminal: typeof heartbeatRuns.$inferSelect | null = null;
@@ -17346,7 +17346,8 @@ export function heartbeatService(
           .limit(1);
         if (
           !current ||
-          current.status !== (stage === "claim" ? "queued" : "running")
+          current.status !== (stage === "claim" ? "queued" : "running") ||
+          readNonEmptyString(parseObject(current.contextSnapshot).issueId) !== issueId
         )
           return null;
         const admission = readChatControlRecoveryAdmission(current);
@@ -17359,7 +17360,7 @@ export function heartbeatService(
           !admissionLost &&
           (admission === "historical" || admission === "admitted")
         )
-          return onClear(tx as unknown as Db);
+          return onClear(tx as unknown as Db, current);
         // A new warm child can inherit a prior runner's PID during preparation.
         // Those fields do not prove this run's turn was dispatched.
         // Exact admitted/historical recovery retains its existing ownership;
@@ -17397,7 +17398,7 @@ export function heartbeatService(
                 updatedAt: new Date(),
               })
               .where(eq(heartbeatRuns.id, current.id));
-          return onClear(tx as unknown as Db);
+          return onClear(tx as unknown as Db, current);
         }
         if (proof.kind === "unresolved" && stage === "claim") return null;
         const now = new Date();
@@ -17754,6 +17755,26 @@ export function heartbeatService(
         updatedAt: claimedAt,
       }).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
     }
+    async function authorizePendingInteractionClaim(tx: Db, current: typeof heartbeatRuns.$inferSelect) {
+      const currentContext = parseObject(current.contextSnapshot);
+      if (readNonEmptyString(currentContext.wakeReason) !== "interaction_pending" &&
+          readNonEmptyString(context.wakeReason) !== "interaction_pending") return true;
+      const currentIssueId = readNonEmptyString(currentContext.issueId);
+      const authorized = currentIssueId === issueId && currentIssueId && await isPendingInteractionAddresseeWake(tx, {
+        companyId: current.companyId, issueId: currentIssueId, agentId: current.agentId,
+        contextSnapshot: currentContext,
+      }, true);
+      if (authorized) return true;
+      const cancelledAt = new Date();
+      const error = "Pending interaction addressee wake became stale before run claim";
+      await tx.update(heartbeatRuns).set({ status: "cancelled", finishedAt: cancelledAt,
+        error, errorCode: "interaction_pending_stale", updatedAt: cancelledAt,
+      }).where(and(eq(heartbeatRuns.id, current.id), eq(heartbeatRuns.status, "queued")));
+      if (current.wakeupRequestId) await tx.update(agentWakeupRequests).set({ status: "skipped",
+        finishedAt: cancelledAt, error, updatedAt: cancelledAt,
+      }).where(eq(agentWakeupRequests.id, current.wakeupRequestId));
+      return false;
+    }
     const nativeReviewContext = readNativeReviewAssignmentContext(context);
     const queuedCommentIds = queuedCommentIdsFromRunContext(context);
     if (
@@ -17813,6 +17834,10 @@ export function heartbeatService(
                 return { kind: "stale" as const, run: null };
               }
 
+              if (readNonEmptyString(parseObject(lockedRun.contextSnapshot).issueId) !== issueId)
+                return { kind: "stale" as const, run: null };
+              if (!(await authorizePendingInteractionClaim(tx as unknown as Db, lockedRun)))
+                return { kind: "stale" as const, run: null };
               if (lockedRun.invocationSource === "automation") {
                 const admission = readChatControlRecoveryAdmission(lockedRun);
                 if (admission === "invalid")
@@ -18076,68 +18101,36 @@ export function heartbeatService(
     }
     const claimed = queuedCommentClaim
       ? queuedCommentClaim.run
-      : await withChatControlRecoveryGate(run, "claim", async (tx) => {
-          if (pendingInteractionAddresseeWake && issueId) {
-            const stillAuthorized = await isPendingInteractionAddresseeWake(
-              tx as unknown as Db,
-              {
-                companyId: run.companyId,
-                issueId,
-                agentId: run.agentId,
-                contextSnapshot: context,
-              },
-              true,
-            );
-            if (!stillAuthorized) {
-              const cancellationReason =
-                "Pending interaction addressee wake became stale before run claim";
-              const cancelledAt = new Date();
-              await tx.update(heartbeatRuns).set({
-                status: "cancelled",
-                finishedAt: cancelledAt,
-                error: cancellationReason,
-                errorCode: "interaction_pending_stale",
-                updatedAt: cancelledAt,
-              }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")));
-              if (run.wakeupRequestId) {
-                await tx.update(agentWakeupRequests).set({
-                  status: "skipped",
-                  finishedAt: cancelledAt,
-                  error: cancellationReason,
-                  updatedAt: cancelledAt,
-                }).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
-              }
-              return null;
-            }
-          }
+      : await withChatControlRecoveryGate(run, "claim", async (tx) => tx.transaction(async (claimTx) => {
+          const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
+          if (issueClaim.blocked) return null;
+          const [current] = await claimTx.select().from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+            eq(heartbeatRuns.agentId, run.agentId),
+          )).for("update");
+          if (!current || current.status !== "queued" ||
+              readNonEmptyString(parseObject(current.contextSnapshot).issueId) !== issueId) return null;
+          if (!(await authorizePendingInteractionClaim(claimTx as unknown as Db, current))) return null;
           const claimValues = {
             status: "running",
             runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
-            ...legacyControllerClaim(run.runtimeMode),
+            ...legacyControllerClaim(current.runtimeMode),
             responsibleUserId,
-            startedAt: run.startedAt ?? claimedAt,
+            startedAt: current.startedAt ?? claimedAt,
             updatedAt: claimedAt,
           };
           if (nativeReviewContext) {
-            if (run.scheduledRetryReason === "native_provider_overloaded") {
-              const predecessor = await lockIssueExecutionClaim(tx);
-              if (predecessor.blocked) return null;
-            }
-            return claimQueuedNativeReviewRun(tx, {
-              run, claimedAt, claimValues,
+            return claimQueuedNativeReviewRun(claimTx as unknown as Db, {
+              run: current, claimedAt, claimValues,
               agentNameKey: normalizeAgentNameKey(agent.name),
             });
           }
-          return tx.transaction(async (claimTx) => {
-            const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
-            if (issueClaim.blocked) return null;
-            const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
-              eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued"),
-            )).returning().then((rows) => rows[0] ?? null);
-            await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);
-            return claimedRun;
-          });
-        });
+          const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
+            eq(heartbeatRuns.id, current.id), eq(heartbeatRuns.status, "queued"),
+          )).returning().then((rows) => rows[0] ?? null);
+          await bindClaimedIssueExecution(claimTx as unknown as Db, issueClaim.ownsIssue, claimedRun);
+          return claimedRun;
+        }));
     if (!claimed) return null;
 
     publishLiveEvent({

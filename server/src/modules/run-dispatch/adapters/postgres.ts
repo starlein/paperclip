@@ -873,6 +873,16 @@ export function createPostgresRunDispatchAdapter(
     expectedStatus: "queued" | "running",
     now: Date,
   ): Promise<CancelStaleQueuedRunOutcome> {
+      // Queue status alone is not proof: recovered/requeued executions may
+      // retain provider actions. Mint bootstrap evidence only for an untouched
+      // run, while holding the same issue -> run locks as the cancellation.
+      const neverDispatched = expectedStatus === "queued" && run.status === "queued" &&
+        !run.startedAt && !run.processPid && !run.processGroupId && !run.processStartedAt &&
+        !run.executionStage && !run.sessionIdAfter && !run.externalRunId &&
+        !run.lastOutputAt && run.lastOutputSeq === 0 && !run.stdoutExcerpt && !run.stderrExcerpt &&
+        run.exitCode === null && !run.signal && !run.usageJson &&
+        !parseObject(run.runnerProfileJson).adapterDispatch &&
+        Object.keys(parseObject(run.resultJson)).length === 0;
       const [row] = await tx
         .update(heartbeatRuns)
         .set({
@@ -882,6 +892,7 @@ export function createPostgresRunDispatchAdapter(
           errorCode: decision.errorCode,
           resultJson: {
             ...parseObject(run.resultJson),
+            ...(neverDispatched ? { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } : {}),
             stopReason: decision.errorCode,
             ...(decision.errorCode === "execution_reconciliation_required"
               ? { executionWait: decision.details }
